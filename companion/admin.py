@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -871,7 +872,8 @@ class AdminServer:
             except Exception:
                 days = 0.0
 
-            tau_base = max(20.0, imp * 20.0)
+            # 遗忘曲线公式与 memory.py 生产逻辑保持一致
+            tau_base = max(10.0, imp * 6.8)
             tau_eff = tau_base * (1.0 + 0.15 * rc)
             if st in POSITIVE_SENTIMENTS:
                 tau_eff *= 2.0
