@@ -75,7 +75,7 @@ class TurnHandler:
                         model=self.config.llm.vision_model,
                         purpose="vision_perception",
                     )
-                    clean_desc = desc_resp.strip()
+                    clean_desc = desc_resp.strip()[:120]
                     logger.info(f"[Bot] 视觉提取成功: {clean_desc}")
                     user_text = f"{user_text} [发来一张照片：{clean_desc}]".strip()
                 except Exception as e:

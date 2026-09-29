@@ -23,10 +23,32 @@ NEGATIVE_SENTIMENTS = {"不安", "伤感"}
 ALL_SENTIMENTS = POSITIVE_SENTIMENTS | NEGATIVE_SENTIMENTS | {"平静", "释然"}
 
 
+DEFAULT_STAGE_NAMES = {
+    0: "初识",
+    1: "相识",
+    2: "熟络",
+    3: "同好",
+    4: "知己",
+    5: "微酸",
+    6: "倾心",
+    7: "依恋",
+    8: "深情",
+    9: "相守",
+}
+
+
 class MemoryManager:
-    def __init__(self, db: Database, gateway: Optional[LLMGateway] = None):
+    def __init__(
+        self,
+        db: Database,
+        gateway: Optional[LLMGateway] = None,
+        affection: Optional[Any] = None,
+        persona: Optional[Any] = None,
+    ):
         self.db = db
         self.gateway = gateway
+        self.affection = affection
+        self.persona = persona
         self._archive_lock = asyncio.Lock()
         self._archive_task: Optional[asyncio.Task] = None
 
@@ -148,12 +170,37 @@ class MemoryManager:
                 logger.error(f"[Memory] 日记归档异常: {e}", exc_info=True)
 
     async def archive_diary(self, turns: List[Any], new_cursor_id: int) -> None:
-        """调用 LLM 将 8 轮对话压缩为第一人称日记，并更新 turn id 游标"""
+        """调用 LLM 将 8 轮对话压缩为第一人称日记，感知当前关系阶段，并在事务中原子落库更新游标"""
         formatted_turns = "\n".join(
             [f"{'机主' if r['role'] == 'user' else '我'}：{r['content']}" for r in turns]
         )
 
-        user_prompt = DIARY_USER_PROMPT.format(conversation_turns=formatted_turns)
+        stage_num = 0
+        if self.affection:
+            try:
+                aff_st = await self.affection.get_state()
+                stage_num = aff_st.get("stage", 0)
+            except Exception:
+                stage_num = 0
+        else:
+            state_row = await self.db.fetchone("SELECT value FROM state WHERE key = 'affection'")
+            if state_row and state_row["value"]:
+                try:
+                    aff_data = json.loads(state_row["value"])
+                    stage_num = int(aff_data.get("stage", 0))
+                except Exception:
+                    stage_num = 0
+
+        if self.persona:
+            stage_name = self.persona.get_stage(stage_num).name
+        else:
+            stage_name = DEFAULT_STAGE_NAMES.get(stage_num, f"阶段{stage_num}")
+
+        user_prompt = DIARY_USER_PROMPT.format(
+            stage_num=stage_num,
+            stage_name=stage_name,
+            conversation_turns=formatted_turns,
+        )
         messages = [
             {"role": "system", "content": DIARY_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -180,47 +227,50 @@ class MemoryManager:
             sentiment = "平静"
         facts = list(data.get("facts", []))
 
-        current_time = now_str()
-        await self.db.execute(
-            """
-            INSERT INTO diary (content, importance, sentiment, recall_count, created_at, last_recall_at)
-            VALUES (?, ?, ?, 0, ?, ?)
-            """,
-            (content, importance, sentiment, current_time, current_time),
-        )
-
-        # 重要性 >= 6 写入语义记忆
-        if importance >= 6 and facts:
-            for fact in facts:
-                fact_str = str(fact).strip()
-                if fact_str:
-                    await self.add_fact(fact_str)
-
-        # 更新已归档游标为本次处理的最新 turn id
-        await self.db.execute(
-            "UPDATE counters SET value = ? WHERE key = 'archived_turns'",
-            (new_cursor_id,),
-        )
-        logger.info(f"[Memory] 成功归档日记 (游标推进至 id={new_cursor_id}): 《{content[:20]}...》 importance={importance}, sentiment={sentiment}")
-
-        # 检查日记总数是否 > 500
-        count_row = await self.db.fetchone("SELECT COUNT(*) as cnt FROM diary")
-        if count_row and count_row["cnt"] > 500:
-            half = count_row["cnt"] // 2
-            old_rows = await self.db.fetchall(
-                "SELECT id, content, importance, sentiment, recall_count, created_at, last_recall_at FROM diary ORDER BY id ASC LIMIT ?",
-                (half,),
+        # 事务包裹：日记写入、事实更新与已归档游标推进原子执行
+        async with self.db.transaction():
+            current_time = now_str()
+            await self.db.execute(
+                """
+                INSERT INTO diary (content, importance, sentiment, recall_count, created_at, last_recall_at)
+                VALUES (?, ?, ?, 0, ?, ?)
+                """,
+                (content, importance, sentiment, current_time, current_time),
             )
-            for r in old_rows:
-                await self.db.execute(
-                    """
-                    INSERT INTO diary_archive (content, importance, sentiment, recall_count, created_at, last_recall_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (r["content"], r["importance"], r["sentiment"], r["recall_count"], r["created_at"], r["last_recall_at"]),
+
+            # 重要性 >= 6 写入语义记忆
+            if importance >= 6 and facts:
+                for fact in facts:
+                    fact_str = str(fact).strip()
+                    if fact_str:
+                        await self.add_fact(fact_str)
+
+            # 更新已归档游标为本次处理的最新 turn id
+            await self.db.execute(
+                "UPDATE counters SET value = ? WHERE key = 'archived_turns'",
+                (new_cursor_id,),
+            )
+
+            # 检查日记总数是否 > 500
+            count_row = await self.db.fetchone("SELECT COUNT(*) as cnt FROM diary")
+            if count_row and count_row["cnt"] > 500:
+                half = count_row["cnt"] // 2
+                old_rows = await self.db.fetchall(
+                    "SELECT id, content, importance, sentiment, recall_count, created_at, last_recall_at FROM diary ORDER BY id ASC LIMIT ?",
+                    (half,),
                 )
-                await self.db.execute("DELETE FROM diary WHERE id = ?", (r["id"],))
-            logger.info(f"[Memory] 已将最旧的 {half} 条日记转存入 diary_archive")
+                for r in old_rows:
+                    await self.db.execute(
+                        """
+                        INSERT INTO diary_archive (content, importance, sentiment, recall_count, created_at, last_recall_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (r["content"], r["importance"], r["sentiment"], r["recall_count"], r["created_at"], r["last_recall_at"]),
+                    )
+                    await self.db.execute("DELETE FROM diary WHERE id = ?", (r["id"],))
+                logger.info(f"[Memory] 已将最旧的 {half} 条日记转存入 diary_archive")
+
+        logger.info(f"[Memory] 成功归档日记 (游标推进至 id={new_cursor_id}): 《{content[:20]}...》 importance={importance}, sentiment={sentiment}")
 
     # ==========================================
     # 3. 回忆加固与遗忘曲线 (§8.3)
@@ -282,8 +332,8 @@ class MemoryManager:
             except Exception:
                 days = 0.0
 
-            # 遗忘曲线公式
-            tau_base = max(20.0, importance * 20.0)
+            # 遗忘曲线公式 (标定：imp 1 ~ 7d, imp 5 ~ 78d, imp 8 pos ~ 300d, imp 10 pos 8 recalls ~ 3y)
+            tau_base = max(10.0, importance * 6.8)
             tau_effective = tau_base * (1.0 + 0.15 * recall_count)
             if sentiment in POSITIVE_SENTIMENTS:
                 tau_effective *= 2.0
@@ -321,10 +371,42 @@ class MemoryManager:
     # ==========================================
 
     async def add_fact(self, content: str) -> None:
-        """添加关于机主的语义记忆事实（精确去重）"""
+        """添加关于机主的语义记忆事实（支持字符 Jaccard 相似度 >= 0.6 近似去重）"""
         content = content.strip()
         if not content:
             return
+
+        new_chars = set(re.findall(r"[\u4e00-\u9fa5]", content))
+        if not new_chars:
+            new_chars = set(content.lower().split()) or set(content.lower())
+
+        rows = await self.db.fetchall("SELECT id, content FROM facts")
+        best_sim = 0.0
+        best_fact = ""
+        best_id = None
+
+        for r in rows:
+            exist_content = r["content"]
+            exist_chars = set(re.findall(r"[\u4e00-\u9fa5]", exist_content))
+            if not exist_chars:
+                exist_chars = set(exist_content.lower().split()) or set(exist_content.lower())
+            union = new_chars | exist_chars
+            sim = len(new_chars & exist_chars) / len(union) if union else 0.0
+            if sim > best_sim:
+                best_sim = sim
+                best_fact = exist_content
+                best_id = r["id"]
+
+        if best_sim >= 0.6 and best_id is not None:
+            await self.db.execute(
+                "UPDATE facts SET created_at = ? WHERE id = ?",
+                (now_str(), best_id),
+            )
+            logger.info(
+                f"[Memory] 事实近义去重命中: 《{content}》 与既有 《{best_fact}》 相似度 {best_sim:.2f}，跳过插入"
+            )
+            return
+
         await self.db.execute(
             "INSERT OR IGNORE INTO facts (content, created_at) VALUES (?, ?)",
             (content, now_str()),

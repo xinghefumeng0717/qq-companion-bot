@@ -278,7 +278,7 @@ def compute_forgetting_table() -> List[Dict[str, Any]]:
     for imp in importances:
         for sent_name, sent_factor in sentiments:
             for rec in recall_counts:
-                tau_base = max(20.0, imp * 20.0)
+                tau_base = max(10.0, imp * 6.8)
                 tau_eff = tau_base * (1.0 + 0.15 * rec) * sent_factor
                 s0 = imp * (1.0 + 0.3 * math.log2(rec + 1))
                 if s0 > 0.5:
@@ -373,36 +373,49 @@ async def main():
     for day, cp in res_d_long["checkpoints"].items():
         print(f"  Day {day:4d} ({day/365:4.1f}年): 复合分 = {cp['composite']:6.2f} (阶段 {cp['stage']}) | warmth={cp['warmth']:.1f}, trust={cp['trust']:.1f}, intimacy={cp['intimacy']:.1f}")
 
-    print("\n[数学机理与病灶深度剖析]")
-    print("1. 为什么线上当前代码能跨入阶段 6~9？")
-    print("   审查 affection.py:182: `dims[dim] = max(0.0, round(new_val, 2))`")
-    print("   真相：当前生产代码中【完全缺失对六维上限 <=100.0 的 clamp 截断】！")
-    print("   并且 calc_resistance 公式 `0.15 + 0.85*exp(-0.012*(composite-30))` 存在 0.15 的正向硬底（阻力永不为0）。")
-    print("   因此在长时间持续良性互动下，各维度数值会发生【数值通胀与无上限膨胀】：")
-    print("   - 场景 A 满 1 年：warmth 暴涨至 475.2，intrigue 暴涨至 465.7，复合分达到 290.86 (阶段 8)；")
-    print("   - 场景 D 满 1 年：warmth 暴涨至 1110.4，复合分达到 858.90；满 10 年复合分膨胀至 6797.83！")
-    print("\n2. 若按架构设计初衷将六维严格限制在 [0, 100] 时：")
-    print("   composite = warmth*0.25 + trust*0.25 + intimacy*0.25 + intrigue*0.10 + patience*0.15 - tension*0.3")
-    print("   由于正向权重总和 0.25+0.25+0.25+0.10+0.15 = 1.00，六维全满 100 时的绝对复合分上限严格等于 100.0。")
-    print("   此时阶段阈值 STAGE_THRESHOLDS 里的阶段 6 (111)、阶段 7 (151)、阶段 8 (201)、阶段 9 (301) 将【绝对不可达】！")
-    print("\n===> 核心结论与两难抉择（供所有者拍板）：")
-    print("   - 病态现状：不限 100 导致维度通胀破千破万，仪表盘与提示词数值失真；")
-    print("   - 潜在陷阱：若直接加 min(100.0, val)，阶段 6~9 立即变为死代码；")
-    print("   - 正确解法：必须同步重构 STAGE_THRESHOLDS（如重映射到 [0, 100] 区间内）并为维度增加 100 封顶与真实阻力归零。")
+    # FIXES8 目标 vs 实测 对照表
+    print("\n" + "=" * 80)
+    print("【FIXES8 关系推进节奏：目标 vs 实测对照表 (基准场景 A: 日常 30 轮, 6聊1歇)】")
+    print("=" * 80)
+    print(f"{'阶段':<6} | {'阶段名':<6} | {'门槛分':<8} | {'目标时间':<12} | {'允许容差(±25%)':<16} | {'实测到达天数':<12} | 判定")
+    print("-" * 80)
+    target_pacing = [
+        (2, "熟络", STAGE_THRESHOLDS[2], 7, 5.25, 8.75),
+        (3, "同好", STAGE_THRESHOLDS[3], 21, 15.75, 26.25),
+        (4, "知己", STAGE_THRESHOLDS[4], 45, 33.75, 56.25),
+        (5, "微酸", STAGE_THRESHOLDS[5], 75, 56.25, 93.75),
+        (6, "倾心", STAGE_THRESHOLDS[6], 120, 90.0, 150.0),
+        (7, "依恋", STAGE_THRESHOLDS[7], 210, 157.5, 262.5),
+        (8, "深情", STAGE_THRESHOLDS[8], 365, 273.75, 456.25),
+        (9, "相守", STAGE_THRESHOLDS[9], 9999, 9999, 9999),
+    ]
 
-    # 判据验收
-    crit_1_pass = 3 <= res_1["A"]["reached_stage"].get(2, 999) <= 10
-    crit_2_pass = 9 not in res_d_long["reached_stage"]
+    all_pacing_pass = True
+    for stg, name, th, target, tol_min, tol_max in target_pacing:
+        actual = res_1["A"]["reached_stage"].get(stg)
+        if stg == 9:
+            target_str = "渐近线"
+            tol_str = "3650天不可达"
+            actual_str = f"未到达 (终态 {res_d_long['final_composite']:.2f})" if stg not in res_d_long["reached_stage"] else f"{actual}天"
+            verdict = "【通过】" if (9 not in res_d_long["reached_stage"] and 9 not in res_1["A"]["reached_stage"]) else "【不通过】"
+        else:
+            target_str = f"~{target} 天"
+            tol_str = f"[{tol_min:.1f}, {tol_max:.1f}] 天"
+            actual_str = f"{actual} 天" if actual else "未到达"
+            passed = actual is not None and (tol_min <= actual <= tol_max)
+            if not passed:
+                all_pacing_pass = False
+            verdict = "【通过】" if passed else "【不通过】"
+
+        print(f"阶段{stg:<4} | {name:<6} | {th:<8.2f} | {target_str:<12} | {tol_str:<16} | {actual_str:<12} | {verdict}")
+
     # 场景 C 复合分单调下行检查
     c_series = res_1["C"]["daily_composite"]
     c_mono_down = all(c_series[i] >= c_series[i+1] - 0.05 for i in range(len(c_series)-1))
     c_tension = res_1["C"]["final_dims"]["tension"]
-    crit_3_pass = c_mono_down and c_tension <= initial_dims["tension"]
+    crit_c_pass = c_mono_down and c_tension <= initial_dims["tension"] and res_1["C"]["final_composite"] == 0.0
 
-    print("\n[任务 1 验收判据结果]")
-    print(f"  1. 场景 A 阶段 1→2 在 3~10 天内: {'【通过】' if crit_1_pass else '【不通过】'} (实际: {res_1['A']['reached_stage'].get(2)} 天)")
-    print(f"  2. 场景 D 阶段 9 在 3650 天不可达，明确'相守=渐近线': {'【通过】' if crit_2_pass else '【不通过】'} (实际最高到达阶段: {res_d_long['final_stage']}，极限分 100)")
-    print(f"  3. 场景 C 复合分单调下行且 tension 不异常累积: {'【通过】' if crit_3_pass else '【不通过】'} (初始: {init_comp:.2f} -> 365天末: {res_1['C']['final_composite']:.2f}, tension={c_tension:.2f})")
+    print(f"\n冷淡场景 C 验证: 复合分从 {init_comp:.2f} 单调递减归零至 0.00，无负数无异常: {'【通过】' if crit_c_pass else '【不通过】'}")
 
     # 2. 任务 2 仿真
     print("\n" + "-" * 80)
@@ -414,15 +427,8 @@ async def main():
         print(f"场景 {sc_k} ({scenarios[sc_k]['name']}):")
         print(f"  总轮次: {p['total_turns']}")
         print(f"  单轮复合分最大涨幅: {p['max_delta']:.4f}, 平均涨幅: {p['avg_delta']:.4f}")
-        print(f"  现行阈值 (>0.50) 触发率: {p['rate_cur_0_50']:.2f}% (触发次数: 0)")
-        print(f"  备选阈值 (>0.20) 触发率: {p['rate_alt_0_20']:.2f}%")
-        print(f"  备选阈值 (>0.15) 触发率: {p['rate_alt_0_15']:.2f}%")
+        print(f"  新阈值 (>0.15) 触发率: {p['rate_alt_0_15']:.2f}%")
         print(f"  备选阈值 (>0.10) 触发率: {p['rate_alt_0_10']:.2f}%")
-
-    print("\n[任务 2 结论]")
-    print("  常规对话 (moments=[]) 下，现行阈值 0.50 的触发率严格为 0.00%。")
-    print("  原因：EMA 双重压缩后，热恋满分 (8.0) 场景下单轮最大涨幅仅约 0.17~0.22（且随复合分上升的高值阻力 r 进一步衰减至 0.03~0.05）。")
-    print("  建议：若希望常规高光互动也能适度引起情绪波动，阈值拍板建议调整为 0.15 或 0.10；若维持'脉冲只服务 moments 剧烈事件'，则保留现状。")
 
     # 3. 任务 3 仿真
     print("\n" + "-" * 80)
@@ -435,15 +441,8 @@ async def main():
         print(f"{pt['hours']:>4.0f} 小时   | {pt['v']:>8.2f}   | {pt['a']:>8.2f}   | {pt['t']:>8.2f}   | {pt['frustration']:>12.2f}")
 
     v_48h = next(pt["v"] for pt in neglect_data if pt["hours"] == 48.0)
-    frust_24h = next(pt["frustration"] for pt in neglect_data if pt["hours"] == 24.0)
-    frust_48h = next(pt["frustration"] for pt in neglect_data if pt["hours"] == 48.0)
-
     crit_3_1_pass = -5.0 <= v_48h < 0.0
-    # frustration 增长节奏
-    print("\n[任务 3 验收判据结果]")
-    print(f"  1. 48 小时冷落后 v 处于 [-5, 0) 区间: {'【通过】' if crit_3_1_pass else '【不通过】'} (实际 v = {v_48h:.2f}，表现为闹情绪而非深度抑郁)")
-    print(f"  2. frustration 增长节奏评估: 24h 时为 {frust_24h:.2f}，48h 时为 {frust_48h:.2f}。")
-    print("     说明：frustration 仅在无聊/冷落 >12h 后以 (hours - 12)*0.02 极慢增长。主动消息调度在 20~40 分钟间隔内不会触发过激 frustration。")
+    print(f"\n[任务 3 验收] 48 小时冷落后 v 处于 [-5, 0) 区间: {'【通过】' if crit_3_1_pass else '【不通过】'} (实际 v = {v_48h:.2f})")
 
     # 4. 任务 4 仿真
     print("\n" + "-" * 80)
@@ -455,20 +454,24 @@ async def main():
     print("-" * 75)
     for r in forgetting_rows:
         flag = ""
-        if r["importance"] == 5 and r["days_to_0_5"] > 90:
-            flag = "⚠️ 首年名存实亡"
-        elif r["importance"] >= 8:
-            flag = "永久深层记忆"
+        if r["importance"] == 5 and r["sentiment"] == "中性" and r["recall_count"] == 0:
+            flag = "⭐ 日常主力 (60~80天)"
+        elif r["importance"] == 8 and r["sentiment"] == "正面" and r["recall_count"] == 0:
+            flag = "⭐ 正面重要 (~1年)"
+        elif r["importance"] == 10 and r["recall_count"] == 8:
+            flag = "⭐ 永久深层记忆"
         print(f"{r['importance']:<6d} | {r['sentiment']:<8} | {r['recall_count']:<8d} | {r['initial_strength']:<8.2f} | {r['tau_effective']:<10.1f} | {r['days_to_0_5']:<12.1f} | {flag}")
 
+    imp1_neutral_0 = next(r for r in forgetting_rows if r["importance"] == 1 and r["sentiment"] == "中性" and r["recall_count"] == 0)
     imp5_neutral_0 = next(r for r in forgetting_rows if r["importance"] == 5 and r["sentiment"] == "中性" and r["recall_count"] == 0)
-    imp5_pos_0 = next(r for r in forgetting_rows if r["importance"] == 5 and r["sentiment"] == "正面" and r["recall_count"] == 0)
+    imp8_pos_0 = next(r for r in forgetting_rows if r["importance"] == 8 and r["sentiment"] == "正面" and r["recall_count"] == 0)
+    imp10_pos_8 = next(r for r in forgetting_rows if r["importance"] == 10 and r["sentiment"] == "正面" and r["recall_count"] == 8)
 
-    print("\n[任务 4 结论与判据]")
-    print(f"  明确回答：重要性 5 的日常日记（中性情感、0次回忆）：衰减至 0.5 需要 【{imp5_neutral_0['days_to_0_5']:.1f} 天】（约 7.7 个月）！")
-    print(f"  若是正面情感日记，衰减至 0.5 需要 【{imp5_pos_0['days_to_0_5']:.1f} 天】（约 15.3 个月，跨年依然有效）！")
-    print("  判据断言：天数远大于 90 天，标注【遗忘曲线在首年名存实亡】！")
-    print("  原因：生产公式 tau_base = max(20.0, importance * 20.0) 使得重要性 5 的时间常数直接达 100 天，衰减极度缓慢。")
+    print("\n[FIXES8 任务 4 遗忘曲线验证结论]")
+    print(f"  1. 重要性 1 (中性, 0次回忆): {imp1_neutral_0['days_to_0_5']:.1f} 天 (目标 ~7 天, 容差 [5.6, 8.4]) -> {'【通过】' if 5.6 <= imp1_neutral_0['days_to_0_5'] <= 8.4 else '【不通过】'}")
+    print(f"  2. 重要性 5 (中性日常, 0次回忆): {imp5_neutral_0['days_to_0_5']:.1f} 天 (目标 60~80 天) -> {'【通过】' if 60 <= imp5_neutral_0['days_to_0_5'] <= 80 else '【不通过】'}")
+    print(f"  3. 重要性 8 (正面感动, 0次回忆): {imp8_pos_0['days_to_0_5']:.1f} 天 (目标 ~1 年, 容差 [292, 438]) -> {'【通过】' if 292 <= imp8_pos_0['days_to_0_5'] <= 438 else '【不通过】'}")
+    print(f"  4. 重要性 10 (正面+8次回忆加固): {imp10_pos_8['days_to_0_5']/365:.1f} 年 (目标 多年永久记忆) -> {'【通过】' if imp10_pos_8['days_to_0_5']/365 >= 2.5 else '【不通过】'}")
 
     print("\n" + "=" * 80)
     print("   仿真运行完毕。全部 4 个任务均已产出严格量化证据。")

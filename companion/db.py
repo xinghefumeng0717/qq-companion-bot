@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import os
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
@@ -21,6 +22,7 @@ class Database:
     def __init__(self, db_path: str = "data/companion.db"):
         self.db_path = db_path
         self._conn: Optional[aiosqlite.Connection] = None
+        self._in_transaction: bool = False
 
     async def connect(self) -> aiosqlite.Connection:
         if self._conn is None:
@@ -36,16 +38,37 @@ class Database:
             await self._conn.close()
             self._conn = None
 
+    @asynccontextmanager
+    async def transaction(self):
+        """异步事务上下文管理器，异常时自动回滚，正常退出时自动提交"""
+        conn = await self.connect()
+        if self._in_transaction:
+            # 嵌套事务中直接复用
+            yield conn
+            return
+
+        self._in_transaction = True
+        try:
+            yield conn
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+        finally:
+            self._in_transaction = False
+
     async def execute(self, sql: str, parameters: Tuple[Any, ...] | List[Any] = ()) -> aiosqlite.Cursor:
         conn = await self.connect()
         cursor = await conn.execute(sql, parameters)
-        await conn.commit()
+        if not self._in_transaction:
+            await conn.commit()
         return cursor
 
     async def executemany(self, sql: str, seq_of_parameters: List[Tuple[Any, ...]]) -> aiosqlite.Cursor:
         conn = await self.connect()
         cursor = await conn.executemany(sql, seq_of_parameters)
-        await conn.commit()
+        if not self._in_transaction:
+            await conn.commit()
         return cursor
 
     async def fetchone(self, sql: str, parameters: Tuple[Any, ...] | List[Any] = ()) -> Optional[aiosqlite.Row]:

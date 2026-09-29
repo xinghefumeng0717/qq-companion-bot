@@ -41,15 +41,17 @@ class TestM3Engines(unittest.IsolatedAsyncioTestCase):
 
         # 2. 阶段门槛
         self.assertEqual(determine_stage(0), 0)
-        self.assertEqual(determine_stage(15.9), 0)
-        self.assertEqual(determine_stage(16.0), 1)
+        self.assertEqual(determine_stage(14.9), 0)
+        self.assertEqual(determine_stage(15.0), 1)
         self.assertEqual(determine_stage(40.85), 2)
-        self.assertEqual(determine_stage(301.0), 9)
+        self.assertEqual(determine_stage(99.8), 9)
 
         # 3. 高值阻力
-        self.assertEqual(calc_resistance(25.0), 1.0)
-        self.assertEqual(calc_resistance(30.0), 1.0)
+        self.assertEqual(calc_resistance(15.0), 1.0)
+        self.assertEqual(calc_resistance(20.0), 1.0)
         self.assertLess(calc_resistance(50.0), 1.0)
+        self.assertEqual(calc_resistance(100.0), 0.0)
+        self.assertEqual(calc_resistance(105.0), 0.0)
 
     async def test_affection_update_and_milestones(self):
         aff = AffectionEngine(self.db)

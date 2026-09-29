@@ -14,7 +14,10 @@ from companion.db import Database, now_str
 
 logger = logging.getLogger(__name__)
 
-STAGE_THRESHOLDS = [0, 16, 31, 46, 61, 81, 111, 151, 201, 301]
+# 阶段门槛严格映射在 [0, 100] 范围内
+# 仿真标定：S1->S2 ~7d, S2->S3 ~21d, S3->S4 ~45d, S4->S5 ~75d, S5->S6 ~120d, S6->S7 ~210d, S7->S8 ~365d
+# 相守（阶段 9）说明：设计上不可达，是方向不是终点，作为极限渐近线（3650 天仿真不可达，且复合分在 95+ 走平）
+STAGE_THRESHOLDS = [0, 15.0, 38.0, 65.0, 81.0, 93.0, 97.0, 99.0, 99.24, 99.8]
 
 ALPHA = {
     "warmth": 0.80,
@@ -35,10 +38,12 @@ DECAY_RATES = {
 
 
 def calc_resistance(composite: float) -> float:
-    """计算高值阻力 r"""
-    if composite <= 30.0:
+    """计算高值阻力 r。在 [0, 20] 为 1.0，在 100 时平滑归零，无保底杜绝破百。"""
+    if composite <= 20.0:
         return 1.0
-    return 0.15 + 0.85 * math.exp(-0.012 * (composite - 30.0))
+    if composite >= 100.0:
+        return 0.0
+    return ((100.0 - composite) / 80.0) ** 0.45
 
 
 def calc_composite_score(dims: Dict[str, float]) -> float:
@@ -51,11 +56,11 @@ def calc_composite_score(dims: Dict[str, float]) -> float:
         + dims.get("patience", 0.0) * 0.15
         - dims.get("tension", 0.0) * 0.30
     )
-    return max(0.0, score)
+    return min(100.0, max(0.0, score))
 
 
 def determine_stage(composite: float) -> int:
-    """门槛 [0,16,31,46,61,81,111,151,201,301]，composite >= 门槛[i] 即阶段 i"""
+    """根据 STAGE_THRESHOLDS 门槛判定阶段，composite >= 门槛[i] 即阶段 i"""
     stage = 0
     for i, threshold in enumerate(STAGE_THRESHOLDS):
         if composite >= threshold:
@@ -127,7 +132,7 @@ class AffectionEngine:
 
         if days > 0:
             for k, rate in DECAY_RATES.items():
-                dims[k] = max(0.0, dims.get(k, 0.0) - rate * days)
+                dims[k] = min(100.0, max(0.0, dims.get(k, 0.0) - rate * days))
 
         # 2. 当前复合分与阻力
         old_comp = calc_composite_score(dims)
@@ -173,16 +178,16 @@ class AffectionEngine:
                 moments_adjust["intimacy"] += 1.5
                 moments_adjust["trust"] += 1.0
 
-        # 5. EMA 平滑更新常规 delta，moments 直接加减
+        # 5. EMA 平滑更新常规 delta，moments 直接加减，严格 clamp 在 [0.0, 100.0]
         for dim, a in ALPHA.items():
             old_val = dims.get(dim, 0.0)
             d = deltas.get(dim, 0.0)
             ema_val = a * old_val + (1.0 - a) * (old_val + d)
             new_val = ema_val + moments_adjust.get(dim, 0.0)
-            dims[dim] = max(0.0, round(new_val, 2))
+            dims[dim] = min(100.0, max(0.0, round(new_val, 2)))
 
-        # tension 独占直接累加
-        dims["tension"] = max(0.0, round(dims.get("tension", 0.0) + moments_adjust["tension"], 2))
+        # tension 独占直接累加，严格 clamp 在 [0.0, 100.0]
+        dims["tension"] = min(100.0, max(0.0, round(dims.get("tension", 0.0) + moments_adjust["tension"], 2)))
 
         # 6. 计算新复合分与阶段
         new_comp = round(calc_composite_score(dims), 2)
@@ -204,6 +209,6 @@ class AffectionEngine:
         }
         await self.save_state(new_state)
 
-        # 单次涨幅 > 0.5 时触发情绪脉冲
-        trigger_mood_pulse = (new_comp - old_comp) > 0.5
+        # 单次涨幅 > 0.15 时触发情绪脉冲
+        trigger_mood_pulse = (new_comp - old_comp) > 0.15
         return new_state, trigger_mood_pulse

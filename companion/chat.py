@@ -58,11 +58,12 @@ class ChatSession:
         self.persona = Persona.load(self.config.character.path)
         stickers_dir = os.path.join(self.persona.base_dir, self.persona.stickers_dir)
         self.stickers = StickerManager(stickers_dir, self.db)
+        await self.stickers.sync_initial_stickers()
 
         self.affection = AffectionEngine(self.db, self.persona.initial_dims)
         self.mood = MoodEngine(self.db)
         self.gateway = LLMGateway(self.config.llm, self.db)
-        self.memory = MemoryManager(self.db, self.gateway)
+        self.memory = MemoryManager(self.db, self.gateway, self.affection, self.persona)
         self.assembler = PromptAssembler(
             self.persona, self.affection, self.mood, self.memory, self.stickers, self.db
         )

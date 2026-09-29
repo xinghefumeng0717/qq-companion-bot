@@ -109,7 +109,7 @@ class CompanionBot:
         self.affection = AffectionEngine(self.db, self.persona.initial_dims)
         self.mood = MoodEngine(self.db)
         self.gateway = LLMGateway(config.llm, self.db)
-        self.memory = MemoryManager(self.db, self.gateway)
+        self.memory = MemoryManager(self.db, self.gateway, self.affection, self.persona)
 
         self.assembler = PromptAssembler(
             self.persona, self.affection, self.mood, self.memory, self.stickers, self.db
