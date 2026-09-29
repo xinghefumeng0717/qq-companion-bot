@@ -30,6 +30,7 @@ from companion.persona import Persona
 from companion.proactive import ProactiveScheduler
 from companion.replier import Replier
 from companion.stickers import StickerManager
+from helpers import make_db, close_db, make_engine_stack
 from launcher.core import (
     format_header_info,
     get_backup_command,
@@ -225,19 +226,16 @@ class TestTask3AdminAPIAndManagement(AioHTTPTestCase):
         self.db_path = os.path.join(self.temp_dir, "test_companion.db")
         self.backup_dir = os.path.join(self.temp_dir, "backup", "daily")
 
-        self.db = Database(self.db_path)
-        await self.db.init_tables()
+        self.db = await make_db(self.db_path)
 
         self.config = Config.load("config.example.toml")
-        self.persona = Persona.load(self.config.character.path)
-        self.affection = AffectionEngine(self.db, self.persona.initial_dims)
-        self.mood = MoodEngine(self.db)
-        self.memory = MemoryManager(self.db)
-        stickers_dir = os.path.join(self.persona.base_dir, self.persona.stickers_dir)
-        self.stickers = StickerManager(stickers_dir, self.db)
-        self.assembler = PromptAssembler(
-            self.persona, self.affection, self.mood, self.memory, self.stickers, self.db
-        )
+        stack = make_engine_stack(self.db, persona_path=self.config.character.path)
+        self.persona = stack.persona
+        self.affection = stack.affection
+        self.mood = stack.mood
+        self.memory = stack.memory
+        self.stickers = stack.stickers
+        self.assembler = stack.assembler
 
         # Mock OneBot
         self.mock_onebot = MagicMock()
@@ -268,7 +266,7 @@ class TestTask3AdminAPIAndManagement(AioHTTPTestCase):
         return app
 
     async def tearDownAsync(self):
-        await self.db.close()
+        await close_db(self.db)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
         await super().tearDownAsync()
 

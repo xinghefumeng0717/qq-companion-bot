@@ -21,6 +21,7 @@ from companion.persona import Persona, RoutineItem
 from companion.proactive import ProactiveScheduler
 from companion.replier import Replier
 from companion.stickers import MAX_STICKERS_COUNT, StickerManager, compute_file_md5
+from helpers import make_db, close_db, make_mock_gateway
 
 
 class TestC1ProactiveQuietHours(unittest.TestCase):
@@ -77,10 +78,7 @@ class TestC2DailyUnansweredReset(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.test_db_path = "data/test_c2.db"
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
-        self.db = Database(self.test_db_path)
-        await self.db.init_tables()
+        self.db = await make_db(self.test_db_path)
 
         self.config = ProactiveConfig(enabled=True, max_unanswered=2, quiet_hours=[])
         self.scheduler = ProactiveScheduler(
@@ -97,9 +95,7 @@ class TestC2DailyUnansweredReset(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self):
-        await self.db.close()
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
+        await close_db(self.db, self.test_db_path)
 
     async def test_unanswered_count_resets_across_midnight(self):
         """23:50 连续 2 条未回触发当天停，次日 00:10 自动失效恢复"""
@@ -232,17 +228,12 @@ class TestA1DiaryCursorConsistency(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.test_db_path = "data/test_a1.db"
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
-        self.db = Database(self.test_db_path)
-        await self.db.init_tables()
-        self.mock_gateway = MagicMock()
+        self.db = await make_db(self.test_db_path)
+        self.mock_gateway = make_mock_gateway()
         self.memory = MemoryManager(self.db, self.mock_gateway)
 
     async def asyncTearDown(self):
-        await self.db.close()
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
+        await close_db(self.db, self.test_db_path)
 
     async def _insert_turns(self, count: int) -> None:
         """插入指定轮次的 user+assistant 对话"""
@@ -310,12 +301,11 @@ class TestA3StickerMD5Deduplication(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.db = Database(":memory:")
-        await self.db.init_tables()
+        self.db = await make_db(":memory:")
         self.sticker_mgr = StickerManager(self.temp_dir, self.db)
 
     async def asyncTearDown(self):
-        await self.db.close()
+        await close_db(self.db)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def test_md5_dedup_different_filenames(self):

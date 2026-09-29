@@ -19,18 +19,16 @@ from companion.prompts import (
 )
 
 
+from helpers import make_db, close_db
+
+
 class TestM3Engines(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.test_db_path = "data/test_m3.db"
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
-        self.db = Database(self.test_db_path)
-        await self.db.init_tables()
+        self.db = await make_db(self.test_db_path)
 
     async def asyncTearDown(self):
-        await self.db.close()
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
+        await close_db(self.db, self.test_db_path)
 
     def test_affection_math(self):
         # 1. 复合分公式验证

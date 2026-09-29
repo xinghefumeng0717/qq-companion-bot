@@ -15,26 +15,23 @@ from companion.persona import Persona
 from companion.replier import Replier
 from companion.safety import SafetyChecker
 from companion.stickers import StickerManager
+from helpers import make_db, close_db, make_engine_stack, make_mock_gateway
 
 
 class TestM7Integration(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.test_db_path = "data/test_m7.db"
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
-        self.db = Database(self.test_db_path)
-        await self.db.init_tables()
+        self.db = await make_db(self.test_db_path)
 
-        self.persona = Persona.load("characters/example")
-        self.affection = AffectionEngine(self.db, self.persona.initial_dims)
-        self.mood = MoodEngine(self.db)
-        self.stickers = StickerManager("characters/example/stickers", self.db)
-        self.replier = Replier(ReplyConfig(), self.stickers)
+        stack = make_engine_stack(self.db)
+        self.persona = stack.persona
+        self.affection = stack.affection
+        self.mood = stack.mood
+        self.stickers = stack.stickers
+        self.replier = stack.replier
 
     async def asyncTearDown(self):
-        await self.db.close()
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
+        await close_db(self.db, self.test_db_path)
 
     def test_safety_checker(self):
         # Crisis
@@ -53,9 +50,8 @@ class TestM7Integration(unittest.IsolatedAsyncioTestCase):
 
     async def test_full_pipeline_simulation(self):
         # 模拟 Gateway
-        mock_gateway = AsyncMock()
-        mock_gateway.config.observer_model = "deepseek-chat"
-        mock_gateway.chat.return_value = """{
+        mock_gateway = make_mock_gateway(
+            chat_return_value="""{
             "self_disclosure": 8.0,
             "responsiveness": 7.5,
             "warmth_score": 8.0,
@@ -68,7 +64,9 @@ class TestM7Integration(unittest.IsolatedAsyncioTestCase):
             "collect_sticker": false,
             "sticker_name": "",
             "user_state": "认真且开心"
-        }"""
+        }""",
+            observer_model="deepseek-chat",
+        )
 
         memory = MemoryManager(self.db, mock_gateway)
         assembler = PromptAssembler(

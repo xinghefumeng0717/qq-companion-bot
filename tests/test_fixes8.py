@@ -31,18 +31,16 @@ from companion.memory import (
 from companion.persona import Persona, Stage
 
 
+from helpers import make_db, close_db, make_mock_gateway
+
+
 class TestFixes8(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.test_db_path = "data/test_fixes8.db"
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
-        self.db = Database(self.test_db_path)
-        await self.db.init_tables()
+        self.db = await make_db(self.test_db_path)
 
     async def asyncTearDown(self):
-        await self.db.close()
-        if os.path.exists(self.test_db_path):
-            os.remove(self.test_db_path)
+        await close_db(self.db, self.test_db_path)
 
     def test_dimensions_clamp_and_resistance(self):
         """测试 1: 六维 clamp 在 100.0，阻力平滑归零"""
@@ -140,15 +138,15 @@ class TestFixes8(unittest.IsolatedAsyncioTestCase):
 
     async def test_diary_transaction_atomic_rollback(self):
         """测试 4: 日记归档事务原子性（异常时完全回滚）"""
-        mock_gateway = MagicMock()
-        mock_gateway.config.observer_model = "test-model"
-        # 返回合法的日记 JSON
-        mock_gateway.chat = AsyncMock(return_value='''{
+        mock_gateway = make_mock_gateway(
+            chat_return_value='''{
             "content": "今天和他在自习室偶遇，聊了几句选课的事情，感觉他挺认真的。",
             "importance": 7,
             "sentiment": "平静",
             "facts": ["机主选了微积分课程"]
-        }''')
+        }''',
+            observer_model="test-model",
+        )
 
         memory = MemoryManager(self.db, mock_gateway)
 
@@ -182,8 +180,6 @@ class TestFixes8(unittest.IsolatedAsyncioTestCase):
 
     async def test_diary_stage_perception_and_prompt_injection(self):
         """测试 5: 日记归档时注入关系阶段感知"""
-        mock_gateway = MagicMock()
-        mock_gateway.config.observer_model = "test-model"
         captured_messages = []
 
         async def capture_chat(messages, **kwargs):
@@ -196,7 +192,10 @@ class TestFixes8(unittest.IsolatedAsyncioTestCase):
                 "facts": []
             }'''
 
-        mock_gateway.chat = capture_chat
+        mock_gateway = make_mock_gateway(
+            chat_side_effect=capture_chat,
+            observer_model="test-model",
+        )
 
         # 模拟阶段 1
         aff = AffectionEngine(self.db, initial_dims={

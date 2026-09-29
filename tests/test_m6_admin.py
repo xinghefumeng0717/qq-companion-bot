@@ -16,46 +16,24 @@ from companion.persona import Persona
 from companion.proactive import ProactiveScheduler
 from companion.replier import Replier
 from companion.stickers import StickerManager
+from helpers import make_db, close_db, make_engine_stack
 
 
 class TestM6Admin(AioHTTPTestCase):
     async def get_application(self):
         self.test_db_path = f"data/test_m6_{id(self)}.db"
-        self.db = Database(self.test_db_path)
-        await self.db.init_tables()
+        self.db = await make_db(self.test_db_path)
 
-        self.persona = Persona.load("characters/example")
-        self.affection = AffectionEngine(self.db)
-        self.mood = MoodEngine(self.db)
-        self.memory = MemoryManager(self.db)
-        self.stickers = StickerManager("characters/example/stickers", self.db)
-        self.replier = Replier(ReplyConfig(), self.stickers)
-        self.proactive = ProactiveScheduler(
-            config=ProactiveConfig(),
-            persona=self.persona,
-            affection=self.affection,
-            mood=self.mood,
-            memory=self.memory,
-            stickers=self.stickers,
-            replier=self.replier,
-            gateway=None,
-            db=self.db,
-            send_msg_fn=None,
-        )
-        self.assembler = PromptAssembler(
-            self.persona, self.affection, self.mood, self.memory, self.stickers, self.db
-        )
-        self.admin = AdminServer(
-            config=AdminConfig(),
-            persona=self.persona,
-            affection=self.affection,
-            mood=self.mood,
-            memory=self.memory,
-            stickers=self.stickers,
-            proactive=self.proactive,
-            assembler=self.assembler,
-            db=self.db,
-        )
+        stack = make_engine_stack(self.db, include_proactive=True, include_admin=True)
+        self.persona = stack.persona
+        self.affection = stack.affection
+        self.mood = stack.mood
+        self.memory = stack.memory
+        self.stickers = stack.stickers
+        self.replier = stack.replier
+        self.proactive = stack.proactive
+        self.assembler = stack.assembler
+        self.admin = stack.admin
 
         app = web.Application()
         app.router.add_get("/", self.admin.handle_overview)
@@ -68,13 +46,8 @@ class TestM6Admin(AioHTTPTestCase):
         return app
 
     async def tearDownAsync(self):
-        await self.db.close()
+        await close_db(self.db, self.test_db_path)
         await super().tearDownAsync()
-        if os.path.exists(self.test_db_path):
-            try:
-                os.remove(self.test_db_path)
-            except Exception:
-                pass
 
     @unittest_run_loop
     async def test_overview_route(self):
