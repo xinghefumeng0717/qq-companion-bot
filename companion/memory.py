@@ -61,6 +61,7 @@ def calc_diary_strength(
     """
     tau_base = max(10.0, importance * 6.8)
     tau_effective = tau_base * (1.0 + 0.15 * recall_count)
+    # "正面"/"负面" 别名仅为兼容 score_simulation.py 的情感系数表，生产路径 sentiment 已收敛到 ALL_SENTIMENTS，此分支不可达
     if sentiment in POSITIVE_SENTIMENTS or sentiment == "正面":
         tau_effective *= 2.0
     elif sentiment in NEGATIVE_SENTIMENTS or sentiment == "负面":

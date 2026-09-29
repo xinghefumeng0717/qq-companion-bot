@@ -17,11 +17,11 @@ from companion.assembler import PromptAssembler
 from companion.config import Config
 from companion.db import Database
 from companion.gateway import LLMGateway
-from companion.main import format_status_text
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.observer import Observer
 from companion.persona import Persona
+from companion.prompts import get_mood_description, get_mood_label
 from companion.replier import Replier
 from companion.stickers import StickerManager
 
@@ -135,8 +135,25 @@ class ChatSession:
 
     async def get_status_str(self) -> str:
         aff = await self.affection.get_state()
+        dims = aff.get("dims", {})
+        comp = float(aff.get("composite", 30.0))
+        stg = int(aff.get("stage", 0))
+        stg_obj = self.persona.get_stage(stg)
+
         mood = await self.mood.get_state()
-        return format_status_text(self.persona, aff, mood)
+        v = float(mood.get("v", 2.0))
+        a = float(mood.get("a", 1.0))
+        t = float(mood.get("t", 7.0))
+        lbl = get_mood_label(v, a)
+        desc = get_mood_description(v, a)
+
+        lines = [
+            f"【好感度】阶段 {stg} ({stg_obj.name}) | 复合分: {comp:.1f}",
+            f"  温暖: {dims.get('warmth', 0):.1f} | 信任: {dims.get('trust', 0):.1f} | 亲密: {dims.get('intimacy', 0):.1f}",
+            f"  好奇: {dims.get('intrigue', 0):.1f} | 包容: {dims.get('patience', 0):.1f} | 紧张: {dims.get('tension', 0):.1f}",
+            f"【心境 (PAD)】{lbl} ({desc}) | 安心度: {t:.2f} | 愉悦度: {v:.1f} | 唤醒度: {a:.1f}",
+        ]
+        return "\n".join(lines)
 
 
 async def run_chat() -> None:

@@ -33,6 +33,8 @@ def parse_dt(s: Optional[str]) -> Optional[datetime]:
     """容错解析时间字符串为 datetime 对象，解析失败返回 None。
     默认按 TIME_FORMAT (%Y-%m-%d %H:%M) 解析，同时兼容 %Y-%m-%d %H:%M:%S。
     """
+    if not isinstance(s, str):
+        return None
     if not s:
         return None
     s = s.strip()

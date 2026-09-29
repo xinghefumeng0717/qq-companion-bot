@@ -88,7 +88,10 @@ class ProactiveScheduler:
         today = datetime.now().strftime("%Y-%m-%d")
         data = await self.db.get_state_json(STATE_KEY_UNANSWERED_PROACTIVE)
         if isinstance(data, dict) and data.get("date") == today:
-            return int(data.get("count", 0))
+            try:
+                return int(data.get("count", 0))
+            except (TypeError, ValueError):
+                return 0
         return 0
 
     async def increment_unanswered_count(self) -> int:
