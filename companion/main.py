@@ -11,7 +11,7 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from companion.admin import AdminServer
 from companion.affection import AffectionEngine
@@ -44,6 +44,55 @@ logging.basicConfig(
 logger = logging.getLogger("companion")
 
 
+def format_status_text(
+    persona: Persona,
+    aff_state: Dict[str, Any],
+    mood_state: Dict[str, Any],
+    facts: Optional[List[str]] = None,
+    diaries: Optional[List[str]] = None,
+) -> str:
+    """统一格式化伴侣机器人的实时状态（好感度、PAD心境、事实与日记）"""
+    dims = aff_state.get("dims", {})
+    comp = float(aff_state.get("composite", 30.0))
+    stage_idx = int(aff_state.get("stage", 0))
+    stage_obj = persona.get_stage(stage_idx)
+
+    v = float(mood_state.get("v", 2.0))
+    a = float(mood_state.get("a", 1.0))
+    t = float(mood_state.get("t", 7.0))
+    frustration = float(mood_state.get("frustration", 0.0))
+
+    lines = [
+        "=" * 50,
+        f"伴侣状态报告：{persona.name}",
+        "=" * 50,
+        f"【好感度】复合分: {comp:.1f} | 阶段 {stage_idx} ({stage_obj.name}: {stage_obj.tone})",
+        f"  - 温暖 (warmth):   {dims.get('warmth', 0.0):.1f}",
+        f"  - 信任 (trust):    {dims.get('trust', 0.0):.1f}",
+        f"  - 亲密 (intimacy): {dims.get('intimacy', 0.0):.1f}",
+        f"  - 好奇 (intrigue): {dims.get('intrigue', 0.0):.1f}",
+        f"  - 包容 (patience): {dims.get('patience', 0.0):.1f}",
+        f"  - 紧张 (tension):  {dims.get('tension', 0.0):.1f}",
+        "-" * 50,
+        f"【情绪 (PAD)】{get_mood_label(v, a)} ({get_mood_description(v, a)})",
+        f"  - 愉悦度 (Valence):  {v:.1f}",
+        f"  - 唤醒度 (Arousal):  {a:.1f}",
+        f"  - 安心度 (Trust):    {t:.2f} ({get_trust_description(t)})",
+        f"  - 冷落驱力 (Frust):  {frustration:.2f}",
+        "-" * 50,
+    ]
+    if facts is not None:
+        lines.append(f"【语义事实 (Facts)】共 {len(facts)} 条:")
+        for f in facts:
+            lines.append(f"  * {f}")
+    if diaries is not None:
+        lines.append(f"【记忆日记 (Active Diaries)】共 {len(diaries)} 条:")
+        for d in diaries[:5]:
+            lines.append(f"  * {d}")
+    lines.append("=" * 50)
+    return "\n".join(lines)
+
+
 async def print_status(config: Config) -> None:
     """CLI 打印当前机器人状态 (--status)"""
     db = Database()
@@ -54,46 +103,13 @@ async def print_status(config: Config) -> None:
     memory = MemoryManager(db)
 
     aff_state = await affection.get_state()
-    dims = aff_state.get("dims", {})
-    comp = aff_state.get("composite", 0.0)
-    stage_idx = aff_state.get("stage", 0)
-    stage_obj = persona.get_stage(stage_idx)
-
     mood_state = await mood.get_state()
-    v = mood_state.get("v", 2.0)
-    a = mood_state.get("a", 1.0)
-    t = mood_state.get("t", 7.0)
-    frustration = mood_state.get("frustration", 0.0)
-
-    print("\n" + "=" * 50)
-    print(f"伴侣状态报告：{persona.name}")
-    print("=" * 50)
-    print(f"【好感度】复合分: {comp:.1f} | 阶段 {stage_idx} ({stage_obj.name}: {stage_obj.tone})")
-    print(f"  - 温暖 (warmth):   {dims.get('warmth', 0.0):.1f}")
-    print(f"  - 信任 (trust):    {dims.get('trust', 0.0):.1f}")
-    print(f"  - 亲密 (intimacy): {dims.get('intimacy', 0.0):.1f}")
-    print(f"  - 好奇 (intrigue): {dims.get('intrigue', 0.0):.1f}")
-    print(f"  - 包容 (patience): {dims.get('patience', 0.0):.1f}")
-    print(f"  - 紧张 (tension):  {dims.get('tension', 0.0):.1f}")
-    print("-" * 50)
-    print(f"【情绪 (PAD)】{get_mood_label(v, a)} ({get_mood_description(v, a)})")
-    print(f"  - 愉悦度 (Valence):  {v:.1f}")
-    print(f"  - 唤醒度 (Arousal):  {a:.1f}")
-    print(f"  - 安心度 (Trust):    {t:.2f} ({get_trust_description(t)})")
-    print(f"  - 冷落驱力 (Frust):  {frustration:.2f}")
-    print("-" * 50)
-
+    v = float(mood_state.get("v", 2.0))
     facts = await memory.get_all_facts()
-    print(f"【语义事实 (Facts)】共 {len(facts)} 条:")
-    for f in facts:
-        print(f"  * {f}")
-
     diaries = await memory.get_active_diaries(current_valence=v)
-    print(f"【记忆日记 (Active Diaries)】共 {len(diaries)} 条:")
-    for d in diaries[:5]:
-        print(f"  * {d}")
 
-    print("=" * 50 + "\n")
+    report = format_status_text(persona, aff_state, mood_state, facts, diaries)
+    print("\n" + report + "\n")
     await db.close()
 
 

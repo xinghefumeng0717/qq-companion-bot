@@ -10,18 +10,18 @@ import asyncio
 import os
 import shutil
 import sys
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from companion.affection import AffectionEngine
 from companion.assembler import PromptAssembler
 from companion.config import Config
 from companion.db import Database
 from companion.gateway import LLMGateway
+from companion.main import format_status_text
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.observer import Observer
 from companion.persona import Persona
-from companion.prompts import get_mood_description, get_mood_label, get_trust_description
 from companion.replier import Replier
 from companion.stickers import StickerManager
 
@@ -86,10 +86,18 @@ class ChatSession:
             except Exception:
                 pass
 
-    async def handle_input(self, text: str) -> str:
-        """处理一轮输入并落沙箱"""
+    async def handle_input(
+        self,
+        text: str,
+        on_piece: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """处理一轮输入并落沙箱库（流式调用 -> 切段 -> 落库 -> 加固 -> 结算）"""
         messages, _ = await self.assembler.assemble_messages(text)
-        target_model = self.config.llm.active().chat
+        if hasattr(self.config.llm, "active"):
+            target_model = self.config.llm.active().chat
+        else:
+            target_model = getattr(self.config.llm, "chat_model", "deepseek-chat")
+
         reply_parts: List[str] = []
         try:
             async for piece in self.gateway.stream_chat(
@@ -97,9 +105,14 @@ class ChatSession:
                 model=target_model,
                 purpose="main_chat",
             ):
+                if on_piece:
+                    on_piece(piece)
                 reply_parts.append(piece)
         except Exception as e:
-            reply_parts = [f"（调用异常: {e}）"]
+            err_msg = f"（调用出错: {e}）"
+            if on_piece:
+                on_piece(err_msg)
+            reply_parts.append(err_msg)
 
         full_reply = "".join(reply_parts).strip()
         chunks, clean_record_text = self.replier.parse_reply(full_reply)
@@ -122,25 +135,8 @@ class ChatSession:
 
     async def get_status_str(self) -> str:
         aff = await self.affection.get_state()
-        dims = aff.get("dims", {})
-        comp = float(aff.get("composite", 30.0))
-        stg = int(aff.get("stage", 0))
-        stg_obj = self.persona.get_stage(stg)
-
         mood = await self.mood.get_state()
-        v = float(mood.get("v", 2.0))
-        a = float(mood.get("a", 1.0))
-        t = float(mood.get("t", 7.0))
-        lbl = get_mood_label(v, a)
-        desc = get_mood_description(v, a)
-
-        lines = [
-            f"【好感度】阶段 {stg} ({stg_obj.name}) | 复合分: {comp:.1f}",
-            f"  温暖: {dims.get('warmth', 0):.1f} | 信任: {dims.get('trust', 0):.1f} | 亲密: {dims.get('intimacy', 0):.1f}",
-            f"  好奇: {dims.get('intrigue', 0):.1f} | 包容: {dims.get('patience', 0):.1f} | 紧张: {dims.get('tension', 0):.1f}",
-            f"【心境 (PAD)】{lbl} ({desc}) | 安心度: {t:.2f} | 愉悦度: {v:.1f} | 唤醒度: {a:.1f}",
-        ]
-        return "\n".join(lines)
+        return format_status_text(self.persona, aff, mood)
 
 
 async def run_chat() -> None:
@@ -184,34 +180,11 @@ async def run_chat() -> None:
                 continue
 
             print(f"\n{session.persona.name}> ", end="", flush=True)
-            messages, _ = await session.assembler.assemble_messages(user_input)
-            if hasattr(session.config.llm, "active"):
-                target_model = session.config.llm.active().chat
-            else:
-                target_model = getattr(session.config.llm, "chat_model", "deepseek-chat")
-            reply_parts = []
-            try:
-                async for piece in session.gateway.stream_chat(
-                    messages=messages,
-                    model=target_model,
-                    purpose="main_chat",
-                ):
-                    print(piece, end="", flush=True)
-                    reply_parts.append(piece)
-            except Exception as e:
-                err_msg = f"（调用出错: {e}）"
-                print(err_msg, end="", flush=True)
-                reply_parts.append(err_msg)
-
+            await session.handle_input(
+                user_input,
+                on_piece=lambda piece: print(piece, end="", flush=True),
+            )
             print()
-            full_reply = "".join(reply_parts).strip()
-            chunks, clean_record_text = session.replier.parse_reply(full_reply)
-            if not clean_record_text:
-                clean_record_text = full_reply
-
-            await session.memory.save_turn_pair(user_input, clean_record_text, has_image=False)
-            await session.memory.reinforce_memories(user_input)
-            await session.observer.settle_turn(user_input, clean_record_text, user_image_path=None)
 
     finally:
         await session.close()
