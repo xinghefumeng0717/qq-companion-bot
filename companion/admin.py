@@ -18,7 +18,7 @@ from aiohttp import web
 from companion.affection import AffectionEngine, calc_composite_score, STAGE_THRESHOLDS
 from companion.assembler import PromptAssembler
 from companion.config import AdminConfig
-from companion.db import Database, now_str
+from companion.db import Database, COUNTER_KEY_TOTAL_TURNS, now_str
 from companion.memory import POSITIVE_SENTIMENTS, NEGATIVE_SENTIMENTS, MemoryManager
 from companion.mood import MoodEngine
 from companion.observer import recent_observer_logs
@@ -233,7 +233,7 @@ class AdminServer:
         else:
             days_known = 0
 
-        turns_cnt_row = await self.db.fetchone("SELECT value FROM counters WHERE key = 'total_turns'")
+        turns_cnt_row = await self.db.fetchone("SELECT value FROM counters WHERE key = ?", (COUNTER_KEY_TOTAL_TURNS,))
         total_turns = int(turns_cnt_row["value"]) if (turns_cnt_row and turns_cnt_row["value"] is not None) else 0
 
         milestone_rows = await self.db.fetchall("SELECT stage, reached_at FROM milestones ORDER BY id DESC")

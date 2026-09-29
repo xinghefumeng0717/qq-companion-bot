@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from companion.db import Database, now_str
+from companion.db import Database, STATE_KEY_AFFECTION, now_str
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +84,9 @@ class AffectionEngine:
 
     async def get_state(self) -> Dict[str, Any]:
         """获取当前好感度状态（含六维、复合分、阶段、上次更新时间）"""
-        row = await self.db.fetchone("SELECT value FROM state WHERE key = 'affection'")
-        if row and row["value"]:
-            try:
-                return json.loads(row["value"])
-            except Exception as e:
-                logger.error(f"[Affection] 解析好感度状态异常: {e}")
+        st = await self.db.get_state_json(STATE_KEY_AFFECTION)
+        if st is not None:
+            return st
 
         # 未初始化则写入初始值
         init_state = {
@@ -102,11 +99,7 @@ class AffectionEngine:
         return init_state
 
     async def save_state(self, state: Dict[str, Any]) -> None:
-        val_str = json.dumps(state, ensure_ascii=False)
-        await self.db.execute(
-            "INSERT OR REPLACE INTO state (key, value) VALUES ('affection', ?)",
-            (val_str,),
-        )
+        await self.db.set_state_json(STATE_KEY_AFFECTION, state)
 
     async def update(
         self,

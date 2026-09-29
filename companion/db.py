@@ -5,12 +5,23 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
+import logging
 import os
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
 import aiosqlite
 
+logger = logging.getLogger(__name__)
+
 TIME_FORMAT = "%Y-%m-%d %H:%M"
+
+STATE_KEY_AFFECTION = "affection"
+STATE_KEY_MOOD = "mood"
+STATE_KEY_UNANSWERED_PROACTIVE = "unanswered_proactive"
+
+COUNTER_KEY_TOTAL_TURNS = "total_turns"
+COUNTER_KEY_ARCHIVED_TURNS = "archived_turns"
 
 
 def now_str() -> str:
@@ -80,6 +91,25 @@ class Database:
         conn = await self.connect()
         async with conn.execute(sql, parameters) as cursor:
             return await cursor.fetchall()
+
+    async def get_state_json(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+        """读取 state 表中指定 key 的 JSON 字符串并反序列化，读取失败或异常时返回 default"""
+        row = await self.fetchone("SELECT value FROM state WHERE key = ?", (key,))
+        if not row or not row["value"]:
+            return default
+        try:
+            return json.loads(row["value"])
+        except Exception as e:
+            logger.error(f"[Database] 解析 state[{key}] JSON 异常: {e}")
+            return default
+
+    async def set_state_json(self, key: str, value: Any) -> None:
+        """将 value 序列化为 JSON 字符串写入 state 表中指定 key"""
+        val_str = json.dumps(value, ensure_ascii=False)
+        await self.execute(
+            "INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)",
+            (key, val_str),
+        )
 
     async def init_tables(self) -> None:
         """初始化全部数据表与默认计数器"""
@@ -192,14 +222,14 @@ class Database:
         await conn.commit()
 
         # 初始化计数器
-        async with conn.execute("SELECT value FROM counters WHERE key = 'total_turns'") as cur:
+        async with conn.execute("SELECT value FROM counters WHERE key = ?", (COUNTER_KEY_TOTAL_TURNS,)) as cur:
             row = await cur.fetchone()
             if row is None:
-                await conn.execute("INSERT INTO counters (key, value) VALUES ('total_turns', 0)")
+                await conn.execute("INSERT INTO counters (key, value) VALUES (?, 0)", (COUNTER_KEY_TOTAL_TURNS,))
 
-        async with conn.execute("SELECT value FROM counters WHERE key = 'archived_turns'") as cur:
+        async with conn.execute("SELECT value FROM counters WHERE key = ?", (COUNTER_KEY_ARCHIVED_TURNS,)) as cur:
             row = await cur.fetchone()
             if row is None:
-                await conn.execute("INSERT INTO counters (key, value) VALUES ('archived_turns', 0)")
+                await conn.execute("INSERT INTO counters (key, value) VALUES (?, 0)", (COUNTER_KEY_ARCHIVED_TURNS,))
 
         await conn.commit()

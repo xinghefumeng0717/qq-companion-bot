@@ -17,7 +17,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from companion.affection import AffectionEngine
 from companion.config import ProactiveConfig
-from companion.db import Database, now_str
+from companion.db import Database, STATE_KEY_UNANSWERED_PROACTIVE, now_str
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
@@ -80,35 +80,21 @@ class ProactiveScheduler:
     async def get_unanswered_count(self) -> int:
         """获取当天连续未回复的主动消息数"""
         today = datetime.now().strftime("%Y-%m-%d")
-        row = await self.db.fetchone("SELECT value FROM state WHERE key = 'unanswered_proactive'")
-        if not row or not row["value"]:
-            return 0
-        try:
-            data = json.loads(row["value"])
-            if data.get("date") == today:
-                return int(data.get("count", 0))
-            return 0
-        except Exception:
-            return 0
+        data = await self.db.get_state_json(STATE_KEY_UNANSWERED_PROACTIVE)
+        if isinstance(data, dict) and data.get("date") == today:
+            return int(data.get("count", 0))
+        return 0
 
     async def increment_unanswered_count(self) -> int:
         today = datetime.now().strftime("%Y-%m-%d")
         cnt = await self.get_unanswered_count() + 1
-        val_str = json.dumps({"date": today, "count": cnt})
-        await self.db.execute(
-            "INSERT OR REPLACE INTO state (key, value) VALUES ('unanswered_proactive', ?)",
-            (val_str,),
-        )
+        await self.db.set_state_json(STATE_KEY_UNANSWERED_PROACTIVE, {"date": today, "count": cnt})
         return cnt
 
     async def reset_unanswered_count(self) -> None:
         """用户回复时清零未回复计数"""
         today = datetime.now().strftime("%Y-%m-%d")
-        val_str = json.dumps({"date": today, "count": 0})
-        await self.db.execute(
-            "INSERT OR REPLACE INTO state (key, value) VALUES ('unanswered_proactive', ?)",
-            (val_str,),
-        )
+        await self.db.set_state_json(STATE_KEY_UNANSWERED_PROACTIVE, {"date": today, "count": 0})
 
     def _is_in_quiet_hours(self, hour: int) -> bool:
         qh = self.config.quiet_hours

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+from companion.db import STATE_KEY_AFFECTION, STATE_KEY_MOOD, COUNTER_KEY_TOTAL_TURNS
 from companion.prompts import get_mood_description, get_mood_label, get_trust_description
 
 STAGE_NAMES = {
@@ -47,7 +48,7 @@ def main() -> None:
     print("=" * 62)
 
     # 1. 好感度
-    c.execute("SELECT value FROM state WHERE key = 'affection'")
+    c.execute("SELECT value FROM state WHERE key = ?", (STATE_KEY_AFFECTION,))
     row = c.fetchone()
     if row and row[0]:
         aff = json.loads(row[0])
@@ -65,7 +66,7 @@ def main() -> None:
         print("\n【好感度】: 暂无数据（默认初识阶段 30.0）")
 
     # 2. 情绪与心境
-    c.execute("SELECT value FROM state WHERE key = 'mood'")
+    c.execute("SELECT value FROM state WHERE key = ?", (STATE_KEY_MOOD,))
     row = c.fetchone()
     if row and row[0]:
         mood = json.loads(row[0])
@@ -79,7 +80,7 @@ def main() -> None:
         print(f"【安心程度】: {t:.1f} / 10.0（{trust_desc}）")
 
     # 3. 统计概览
-    c.execute("SELECT value FROM counters WHERE key = 'total_turns'")
+    c.execute("SELECT value FROM counters WHERE key = ?", (COUNTER_KEY_TOTAL_TURNS,))
     t_row = c.fetchone()
     total_turns = t_row[0] if t_row else 0
 

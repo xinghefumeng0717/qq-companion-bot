@@ -12,7 +12,13 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from companion.db import Database, now_str
+from companion.db import (
+    Database,
+    COUNTER_KEY_TOTAL_TURNS,
+    COUNTER_KEY_ARCHIVED_TURNS,
+    STATE_KEY_AFFECTION,
+    now_str,
+)
 from companion.gateway import LLMGateway
 from companion.prompts import DIARY_SYSTEM_PROMPT, DIARY_USER_PROMPT
 
@@ -99,7 +105,8 @@ class MemoryManager:
 
         # 更新计数器
         await self.db.execute(
-            "UPDATE counters SET value = value + 1 WHERE key = 'total_turns'"
+            "UPDATE counters SET value = value + 1 WHERE key = ?",
+            (COUNTER_KEY_TOTAL_TURNS,),
         )
 
         # 异步非阻塞执行日记归档检查（加锁防并发，PLAN §1.1）
@@ -128,7 +135,8 @@ class MemoryManager:
             try:
                 # 获取上次归档到的 turn id 游标 (archived_turns)
                 arch_row = await self.db.fetchone(
-                    "SELECT value FROM counters WHERE key = 'archived_turns'"
+                    "SELECT value FROM counters WHERE key = ?",
+                    (COUNTER_KEY_ARCHIVED_TURNS,),
                 )
                 last_archived_id = arch_row["value"] if arch_row else 0
 
@@ -183,10 +191,9 @@ class MemoryManager:
             except Exception:
                 stage_num = 0
         else:
-            state_row = await self.db.fetchone("SELECT value FROM state WHERE key = 'affection'")
-            if state_row and state_row["value"]:
+            aff_data = await self.db.get_state_json(STATE_KEY_AFFECTION)
+            if aff_data and isinstance(aff_data, dict):
                 try:
-                    aff_data = json.loads(state_row["value"])
                     stage_num = int(aff_data.get("stage", 0))
                 except Exception:
                     stage_num = 0
@@ -247,8 +254,8 @@ class MemoryManager:
 
             # 更新已归档游标为本次处理的最新 turn id
             await self.db.execute(
-                "UPDATE counters SET value = ? WHERE key = 'archived_turns'",
-                (new_cursor_id,),
+                "UPDATE counters SET value = ? WHERE key = ?",
+                (new_cursor_id, COUNTER_KEY_ARCHIVED_TURNS),
             )
 
             # 检查日记总数是否 > 500

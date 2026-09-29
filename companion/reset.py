@@ -14,6 +14,8 @@ import sqlite3
 import sys
 from typing import Any, Dict, List, Optional
 
+from companion.db import COUNTER_KEY_TOTAL_TURNS, COUNTER_KEY_ARCHIVED_TURNS
+
 RELATIONSHIP_TABLES = [
     "turns",
     "diary",
@@ -63,13 +65,15 @@ def reset_database(
         # counters 归零
         if "counters" in existing_tables:
             c.execute(
-                "UPDATE counters SET value = 0 WHERE key IN ('total_turns', 'archived_turns')"
+                f"UPDATE counters SET value = 0 WHERE key IN ('{COUNTER_KEY_TOTAL_TURNS}', '{COUNTER_KEY_ARCHIVED_TURNS}')"
             )
             c.execute(
-                "INSERT OR IGNORE INTO counters (key, value) VALUES ('total_turns', 0)"
+                "INSERT OR IGNORE INTO counters (key, value) VALUES (?, 0)",
+                (COUNTER_KEY_TOTAL_TURNS,),
             )
             c.execute(
-                "INSERT OR IGNORE INTO counters (key, value) VALUES ('archived_turns', 0)"
+                "INSERT OR IGNORE INTO counters (key, value) VALUES (?, 0)",
+                (COUNTER_KEY_ARCHIVED_TURNS,),
             )
 
         if purge_all:
@@ -87,7 +91,7 @@ def reset_database(
     return {
         "backup_path": backup_path,
         "cleared_counts": cleared_counts,
-        "counters_reset": ["total_turns", "archived_turns"],
+        "counters_reset": [COUNTER_KEY_TOTAL_TURNS, COUNTER_KEY_ARCHIVED_TURNS],
         "purge_all": purge_all,
     }
 
@@ -145,7 +149,7 @@ def main() -> None:
         print("🧹 已清空表及数据行数:")
         for tbl, cnt in res["cleared_counts"].items():
             print(f"  • {tbl:<20}: {cnt} 行已清除")
-        print("🔄 计数器归零: total_turns=0, archived_turns=0")
+        print(f"🔄 计数器归零: {COUNTER_KEY_TOTAL_TURNS}=0, {COUNTER_KEY_ARCHIVED_TURNS}=0")
         print("💡 好感度与情绪状态已清空，下次交互时将从角色卡默认初始值重建。")
         print("=" * 55 + "\n")
     except Exception as e:

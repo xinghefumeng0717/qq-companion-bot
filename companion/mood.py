@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from companion.affection import determine_stage
-from companion.db import Database, now_str
+from companion.db import Database, STATE_KEY_MOOD, now_str
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +24,9 @@ class MoodEngine:
 
     async def get_state(self) -> Dict[str, Any]:
         """获取当前情绪状态"""
-        row = await self.db.fetchone("SELECT value FROM state WHERE key = 'mood'")
-        if row and row["value"]:
-            try:
-                return json.loads(row["value"])
-            except Exception as e:
-                logger.error(f"[Mood] 解析情绪状态失败: {e}")
+        st = await self.db.get_state_json(STATE_KEY_MOOD)
+        if st is not None:
+            return st
 
         # 默认初始状态
         init_state = {
@@ -45,11 +42,7 @@ class MoodEngine:
         return init_state
 
     async def save_state(self, state: Dict[str, Any]) -> None:
-        val_str = json.dumps(state, ensure_ascii=False)
-        await self.db.execute(
-            "INSERT OR REPLACE INTO state (key, value) VALUES ('mood', ?)",
-            (val_str,),
-        )
+        await self.db.set_state_json(STATE_KEY_MOOD, state)
 
     async def get_hours_since_last_chat(self) -> float:
         """获取距工作记忆最后一轮的小时数"""
