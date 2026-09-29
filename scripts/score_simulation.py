@@ -25,7 +25,12 @@ from companion.affection import (
     determine_stage,
 )
 from companion.db import Database
-from companion.memory import ALL_SENTIMENTS, NEGATIVE_SENTIMENTS, POSITIVE_SENTIMENTS
+from companion.memory import (
+    ALL_SENTIMENTS,
+    NEGATIVE_SENTIMENTS,
+    POSITIVE_SENTIMENTS,
+    calc_diary_strength,
+)
 from companion.mood import MoodEngine
 from companion.persona import Persona
 
@@ -276,11 +281,9 @@ def compute_forgetting_table() -> List[Dict[str, Any]]:
 
     rows = []
     for imp in importances:
-        for sent_name, sent_factor in sentiments:
+        for sent_name, _ in sentiments:
             for rec in recall_counts:
-                tau_base = max(10.0, imp * 6.8)
-                tau_eff = tau_base * (1.0 + 0.15 * rec) * sent_factor
-                s0 = imp * (1.0 + 0.3 * math.log2(rec + 1))
+                s0, tau_eff = calc_diary_strength(imp, rec, sent_name, 0.0)
                 if s0 > 0.5:
                     days_to_threshold = tau_eff * math.log(s0 / 0.5)
                 else:

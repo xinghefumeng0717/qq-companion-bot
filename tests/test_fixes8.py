@@ -22,7 +22,12 @@ from companion.affection import (
     STAGE_THRESHOLDS,
 )
 from companion.db import Database, now_str
-from companion.memory import MemoryManager, POSITIVE_SENTIMENTS, NEGATIVE_SENTIMENTS
+from companion.memory import (
+    MemoryManager,
+    POSITIVE_SENTIMENTS,
+    NEGATIVE_SENTIMENTS,
+    calc_diary_strength,
+)
 from companion.persona import Persona, Stage
 
 
@@ -92,14 +97,7 @@ class TestFixes8(unittest.IsolatedAsyncioTestCase):
     def test_forgetting_tau_calibration(self):
         """测试 2: 遗忘曲线 Tau 标定验证（4 个关键基准点）"""
         def calc_half_decay_days(imp: float, sentiment: str, recall: int) -> float:
-            tau_base = max(10.0, imp * 6.8)
-            tau_effective = tau_base * (1.0 + 0.15 * recall)
-            if sentiment in POSITIVE_SENTIMENTS:
-                tau_effective *= 2.0
-            elif sentiment in NEGATIVE_SENTIMENTS:
-                tau_effective *= 1.5
-
-            s0 = imp * (1.0 + 0.3 * math.log2(recall + 1))
+            s0, tau_effective = calc_diary_strength(imp, recall, sentiment, 0.0)
             return tau_effective * math.log(s0 / 0.5)
 
         # 1. 重要性 1 (中性, 0次回忆): 衰减至 0.5 约 1 周 (7 天，+-20% 容差即 [5.6, 8.4])

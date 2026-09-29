@@ -43,6 +43,36 @@ DEFAULT_STAGE_NAMES = {
 }
 
 
+def calc_diary_strength(
+    importance: float,
+    recall_count: int,
+    sentiment: str,
+    days: float,
+) -> Tuple[float, float]:
+    """计算单条日记随时间衰减后的记忆强度 (strength) 与有效时间常数 (tau_effective)。
+
+    返回: (strength, tau_effective)
+    标定基准：
+      - imp 1 ~ 7d
+      - imp 5 ~ 78d
+      - imp 8 pos ~ 300d
+      - imp 10 pos 8 recalls ~ 3y
+    """
+    tau_base = max(10.0, importance * 6.8)
+    tau_effective = tau_base * (1.0 + 0.15 * recall_count)
+    if sentiment in POSITIVE_SENTIMENTS or sentiment == "正面":
+        tau_effective *= 2.0
+    elif sentiment in NEGATIVE_SENTIMENTS or sentiment == "负面":
+        tau_effective *= 1.5
+
+    strength = (
+        importance
+        * (1.0 + 0.3 * math.log2(recall_count + 1))
+        * math.exp(-days / tau_effective)
+    )
+    return strength, tau_effective
+
+
 class MemoryManager:
     def __init__(
         self,
@@ -339,15 +369,7 @@ class MemoryManager:
             except Exception:
                 days = 0.0
 
-            # 遗忘曲线公式 (标定：imp 1 ~ 7d, imp 5 ~ 78d, imp 8 pos ~ 300d, imp 10 pos 8 recalls ~ 3y)
-            tau_base = max(10.0, importance * 6.8)
-            tau_effective = tau_base * (1.0 + 0.15 * recall_count)
-            if sentiment in POSITIVE_SENTIMENTS:
-                tau_effective *= 2.0
-            elif sentiment in NEGATIVE_SENTIMENTS:
-                tau_effective *= 1.5
-
-            strength = importance * (1.0 + 0.3 * math.log2(recall_count + 1)) * math.exp(-days / tau_effective)
+            strength, tau_effective = calc_diary_strength(importance, recall_count, sentiment, days)
 
             if strength >= 0.5:
                 # 情绪一致性加权排序

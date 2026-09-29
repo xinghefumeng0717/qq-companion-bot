@@ -19,7 +19,7 @@ from companion.affection import AffectionEngine, calc_composite_score, STAGE_THR
 from companion.assembler import PromptAssembler
 from companion.config import AdminConfig
 from companion.db import Database, COUNTER_KEY_TOTAL_TURNS, now_str
-from companion.memory import POSITIVE_SENTIMENTS, NEGATIVE_SENTIMENTS, MemoryManager
+from companion.memory import POSITIVE_SENTIMENTS, NEGATIVE_SENTIMENTS, MemoryManager, calc_diary_strength
 from companion.mood import MoodEngine
 from companion.observer import recent_observer_logs
 from companion.persona import Persona
@@ -425,15 +425,7 @@ class AdminServer:
             except Exception:
                 days = 0.0
 
-            # 遗忘曲线公式与 memory.py 生产逻辑保持一致
-            tau_base = max(10.0, imp * 6.8)
-            tau_eff = tau_base * (1.0 + 0.15 * rc)
-            if st in POSITIVE_SENTIMENTS:
-                tau_eff *= 2.0
-            elif st in NEGATIVE_SENTIMENTS:
-                tau_eff *= 1.5
-
-            strength = imp * (1.0 + 0.3 * math.log2(rc + 1)) * math.exp(-days / tau_eff)
+            strength, tau_eff = calc_diary_strength(imp, rc, st, days)
             percent = min(100.0, (strength / 10.0) * 100.0)
             color = get_sentiment_color(st)
 
