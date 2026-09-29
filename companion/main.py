@@ -14,7 +14,7 @@ import sys
 from typing import Any, Dict, Optional
 
 from companion.admin import AdminServer
-from companion.affection import AffectionEngine, calc_composite_score
+from companion.affection import AffectionEngine
 from companion.aggregator import MessageAggregator
 from companion.assembler import PromptAssembler
 from companion.backup import DailyBackupScheduler
@@ -29,7 +29,7 @@ from companion.persona import Persona
 from companion.prompts import get_mood_description, get_mood_label, get_trust_description
 from companion.proactive import ProactiveScheduler
 from companion.replier import Replier
-from companion.stickers import StickerManager, image_to_base64_data_url
+from companion.stickers import StickerManager
 from companion.turn_handler import TurnHandler
 from companion.voice import VoiceProcessor
 

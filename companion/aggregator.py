@@ -55,7 +55,7 @@ class MessageAggregator:
 
     async def push_message(self, text: str, image_path: Optional[str] = None) -> None:
         """接收一条新消息进行缓冲与聚合"""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         now = loop.time()
 
         # 1. 包含图片：不等待聚合，单独触发一轮

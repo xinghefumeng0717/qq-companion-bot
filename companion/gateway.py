@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional
 import aiohttp
 
 from companion.config import LLMConfig

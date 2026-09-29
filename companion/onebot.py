@@ -84,7 +84,6 @@ class OneBotClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._running = False
-        self._last_heartbeat: float = 0.0
         self._pending_echoes: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
 
     @property
@@ -163,10 +162,9 @@ class OneBotClient:
                 fut.set_result(data)
             return
 
-        # 2. 心跳与存活时间戳
+        # 2. 心跳与存活
         post_type = data.get("post_type")
         if post_type == "meta_event":
-            self._last_heartbeat = asyncio.get_event_loop().time()
             return
 
         # 3. 私聊消息过滤
@@ -265,7 +263,7 @@ class OneBotClient:
                 "echo": echo_id,
             }
 
-            fut = asyncio.get_event_loop().create_future()
+            fut = asyncio.get_running_loop().create_future()
             self._pending_echoes[echo_id] = fut
 
             try:

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from aiohttp import web
 
-from companion.affection import AffectionEngine, calc_composite_score, STAGE_THRESHOLDS
+from companion.affection import AffectionEngine, STAGE_THRESHOLDS
 from companion.assembler import PromptAssembler
 from companion.config import AdminConfig
 from companion.db import Database, COUNTER_KEY_TOTAL_TURNS, TIME_FORMAT, parse_dt, now_str

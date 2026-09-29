@@ -110,7 +110,7 @@ class LLMConfig:
         thinking_effort_tasks: str = "low",
         thinking_tasks_purposes: Optional[List[str]] = None,
         pricing: Optional[PricingConfig] = None,
-        # 兼容旧版参数
+        # [DEPRECATED] 兼容旧版参数：构造签名保留以确保外部兼容，内部推荐使用 presets 字典
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         text_model: Optional[str] = None,

@@ -81,6 +81,7 @@ class TurnHandler:
                 except Exception as e:
                     logger.warning(f"[Bot] 视觉模型提取异常，降级为占位符: {e}")
                     user_text = f"{user_text} [发来一张图片，但没能看清]".strip()
+                # 设计承重墙：两段式视觉设计（flash 看图 -> 描述注入主提示词），置空避免激活 assembler 的直接多模态分支
                 image_data_url = None
             else:
                 user_text = (user_text + " [对方发来一张图片，你看不到内容]").strip()

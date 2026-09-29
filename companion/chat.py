@@ -10,7 +10,7 @@ import asyncio
 import os
 import shutil
 import sys
-from typing import Any, AsyncIterator, Callable, List, Optional
+from typing import List, Optional
 
 from companion.affection import AffectionEngine
 from companion.assembler import PromptAssembler
