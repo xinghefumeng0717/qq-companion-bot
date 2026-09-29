@@ -409,6 +409,12 @@ class QingziHomeApp:
                         f"备份拉取完成: data/backups/latest.db ({now_str})"
                     ),
                 )
+                self.root.after(
+                    0,
+                    lambda: messagebox.showinfo(
+                        "备份拉取完成", f"最新备份已保存到:\ndata/backups/latest.db\n\n时间: {now_str}"
+                    ),
+                )
             else:
                 err = proc.stderr.strip() or "SCP 命令退出异常"
                 self.root.after(
