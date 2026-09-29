@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 import aiohttp
@@ -15,6 +16,17 @@ from companion.config import LLMConfig
 from companion.db import Database, now_str
 
 logger = logging.getLogger(__name__)
+
+
+def parse_llm_json(raw_text: str) -> Any:
+    """容错解析 LLM 返回的 JSON 字符串。
+    优先直接 json.loads，若包含 Markdown 代码块标记 (```json ... ```) 则剥离后再解析。
+    """
+    try:
+        return json.loads(raw_text)
+    except Exception:
+        clean = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
+        return json.loads(clean)
 
 
 def apply_thinking(payload: Dict[str, Any], enabled: bool, effort: str, base_url: str = "") -> Dict[str, Any]:

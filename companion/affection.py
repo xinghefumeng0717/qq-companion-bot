@@ -10,7 +10,7 @@ import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from companion.db import Database, STATE_KEY_AFFECTION, now_str
+from companion.db import Database, STATE_KEY_AFFECTION, parse_dt, now_str
 
 logger = logging.getLogger(__name__)
 
@@ -117,10 +117,10 @@ class AffectionEngine:
         last_updated_str = state.get("last_updated", now_str())
 
         # 1. 计算日衰减
-        try:
-            last_dt = datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M")
+        last_dt = parse_dt(last_updated_str)
+        if last_dt:
             days = min(30, max(0, int((datetime.now() - last_dt).total_seconds() / 86400)))
-        except Exception:
+        else:
             days = 0
 
         if days > 0:

@@ -29,6 +29,21 @@ def now_str() -> str:
     return datetime.now().strftime(TIME_FORMAT)
 
 
+def parse_dt(s: Optional[str]) -> Optional[datetime]:
+    """容错解析时间字符串为 datetime 对象，解析失败返回 None。
+    默认按 TIME_FORMAT (%Y-%m-%d %H:%M) 解析，同时兼容 %Y-%m-%d %H:%M:%S。
+    """
+    if not s:
+        return None
+    s = s.strip()
+    for fmt, cut_len in (("%Y-%m-%d %H:%M:%S", 19), (TIME_FORMAT, 16)):
+        try:
+            return datetime.strptime(s[:cut_len], fmt)
+        except Exception:
+            pass
+    return None
+
+
 class Database:
     def __init__(self, db_path: str = "data/companion.db"):
         self.db_path = db_path

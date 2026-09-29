@@ -17,7 +17,13 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from companion.affection import AffectionEngine
 from companion.config import ProactiveConfig
-from companion.db import Database, STATE_KEY_UNANSWERED_PROACTIVE, now_str
+from companion.db import (
+    Database,
+    STATE_KEY_UNANSWERED_PROACTIVE,
+    TIME_FORMAT,
+    parse_dt,
+    now_str,
+)
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
@@ -119,12 +125,9 @@ class ProactiveScheduler:
             "SELECT created_at FROM turns WHERE role = 'assistant' ORDER BY id DESC LIMIT 1"
         )
         if last_bot_row and last_bot_row["created_at"]:
-            try:
-                b_dt = datetime.strptime(last_bot_row["created_at"], "%Y-%m-%d %H:%M")
-                if (now_dt - b_dt).total_seconds() < 3600:
-                    return True, "距机器人上次发言不足 60 分钟"
-            except Exception:
-                pass
+            b_dt = parse_dt(last_bot_row["created_at"])
+            if b_dt and (now_dt - b_dt).total_seconds() < 3600:
+                return True, "距机器人上次发言不足 60 分钟"
 
         # 3. 连续未回主动消息 >= max_unanswered 当天停止
         unanswered = await self.get_unanswered_count()
@@ -144,12 +147,9 @@ class ProactiveScheduler:
         )
         if last_user_row and last_user_row["created_at"] and last_user_row["content"]:
             if "晚安" in last_user_row["content"]:
-                try:
-                    u_dt = datetime.strptime(last_user_row["created_at"], "%Y-%m-%d %H:%M")
-                    if (now_dt - u_dt).total_seconds() < 6 * 3600:
-                        return True, "机主已道晚安且不足 6 小时"
-                except Exception:
-                    pass
+                u_dt = parse_dt(last_user_row["created_at"])
+                if u_dt and (now_dt - u_dt).total_seconds() < 6 * 3600:
+                    return True, "机主已道晚安且不足 6 小时"
 
         # 6. 当前 valence < -6（心情太差不装没事）
         mood_state = await self.mood.get_state()
@@ -163,7 +163,7 @@ class ProactiveScheduler:
         ① 到期未完成待跟进 -> ② 欲言又止池 -> ③ 作息活动+时间 -> ④ 高强度日记回忆 -> ⑤ 日期感
         """
         now_dt = datetime.now()
-        current_time_str = now_dt.strftime("%Y-%m-%d %H:%M")
+        current_time_str = now_dt.strftime(TIME_FORMAT)
 
         # ① 到期未完成的待跟进事项
         fu_row = await self.db.fetchone(
@@ -221,7 +221,7 @@ class ProactiveScheduler:
         recent_diary_str = diaries[0] if diaries else "暂无特别回忆"
 
         decision_user_prompt = PROACTIVE_DECISION_PROMPT.format(
-            current_time=now_dt.strftime("%Y-%m-%d %H:%M"),
+            current_time=now_dt.strftime(TIME_FORMAT),
             stage_name=self.persona.get_stage(aff_state.get("stage", 0)).name,
             composite_affection=float(aff_state.get("composite", 30.0)),
             mood_label=get_mood_label(v, a),

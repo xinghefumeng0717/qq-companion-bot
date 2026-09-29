@@ -13,6 +13,8 @@ import shutil
 import sqlite3
 from typing import List, Optional
 
+from companion.db import TIME_FORMAT
+
 logger = logging.getLogger(__name__)
 
 BACKUP_PATTERN = re.compile(r"^companion-(\d{8}-\d{4})\.db$")
@@ -93,7 +95,7 @@ def get_last_backup_time(backup_dir: str = "data/backup/daily") -> Optional[str]
         latest_file = os.path.join(backup_dir, "latest.db")
         if os.path.exists(latest_file):
             mtime = os.path.getmtime(latest_file)
-            return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(mtime).strftime(TIME_FORMAT)
         return None
 
     daily_files.sort()
@@ -103,13 +105,13 @@ def get_last_backup_time(backup_dir: str = "data/backup/daily") -> Optional[str]
         raw_ts = match.group(1)  # 20260930-0417
         try:
             dt = datetime.strptime(raw_ts, "%Y%m%d-%H%M")
-            return dt.strftime("%Y-%m-%d %H:%M")
+            return dt.strftime(TIME_FORMAT)
         except ValueError:
             pass
 
     file_path = os.path.join(backup_dir, latest_name)
     mtime = os.path.getmtime(file_path)
-    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+    return datetime.fromtimestamp(mtime).strftime(TIME_FORMAT)
 
 
 class DailyBackupScheduler:

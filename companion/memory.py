@@ -17,9 +17,10 @@ from companion.db import (
     COUNTER_KEY_TOTAL_TURNS,
     COUNTER_KEY_ARCHIVED_TURNS,
     STATE_KEY_AFFECTION,
+    parse_dt,
     now_str,
 )
-from companion.gateway import LLMGateway
+from companion.gateway import LLMGateway, parse_llm_json
 from companion.prompts import DIARY_SYSTEM_PROMPT, DIARY_USER_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -251,11 +252,7 @@ class MemoryManager:
             purpose="diary_archive",
         )
 
-        try:
-            data = json.loads(resp)
-        except Exception:
-            clean = re.sub(r"^```json\s*|\s*```$", "", resp.strip(), flags=re.MULTILINE)
-            data = json.loads(clean)
+        data = parse_llm_json(resp)
 
         content = str(data.get("content", "")).strip()
         importance = max(1, min(10, int(data.get("importance", 5))))
@@ -363,11 +360,8 @@ class MemoryManager:
             sentiment = str(r["sentiment"] or "平静")
             last_recall_str = r["last_recall_at"] or r["created_at"] or now_str()
 
-            try:
-                last_dt = datetime.strptime(last_recall_str, "%Y-%m-%d %H:%M")
-                days = max(0.0, (now_dt - last_dt).total_seconds() / 86400.0)
-            except Exception:
-                days = 0.0
+            last_dt = parse_dt(last_recall_str)
+            days = max(0.0, (now_dt - last_dt).total_seconds() / 86400.0) if last_dt else 0.0
 
             strength, tau_effective = calc_diary_strength(importance, recall_count, sentiment, days)
 

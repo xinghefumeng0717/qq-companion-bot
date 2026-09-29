@@ -18,7 +18,7 @@ from aiohttp import web
 from companion.affection import AffectionEngine, calc_composite_score, STAGE_THRESHOLDS
 from companion.assembler import PromptAssembler
 from companion.config import AdminConfig
-from companion.db import Database, COUNTER_KEY_TOTAL_TURNS, now_str
+from companion.db import Database, COUNTER_KEY_TOTAL_TURNS, TIME_FORMAT, parse_dt, now_str
 from companion.memory import POSITIVE_SENTIMENTS, NEGATIVE_SENTIMENTS, MemoryManager, calc_diary_strength
 from companion.mood import MoodEngine
 from companion.observer import recent_observer_logs
@@ -169,20 +169,11 @@ class AdminServer:
 
         last_hours_phrase = ""
         if last_user_turn and last_user_turn["created_at"]:
-            try:
-                l_str = str(last_user_turn["created_at"]).strip()
-                if len(l_str) >= 19:
-                    l_dt = datetime.strptime(l_str[:19], "%Y-%m-%d %H:%M:%S")
-                elif len(l_str) >= 16:
-                    l_dt = datetime.strptime(l_str[:16], "%Y-%m-%d %H:%M")
-                else:
-                    l_dt = None
-                if l_dt:
-                    hours_diff = (now_dt - l_dt).total_seconds() / 3600.0
-                    if hours_diff >= 1.0:
-                        last_hours_phrase = f" 他已有 {int(hours_diff)} 小时没说话了。"
-            except Exception:
-                pass
+            l_dt = parse_dt(str(last_user_turn["created_at"]))
+            if l_dt:
+                hours_diff = (now_dt - l_dt).total_seconds() / 3600.0
+                if hours_diff >= 1.0:
+                    last_hours_phrase = f" 他已有 {int(hours_diff)} 小时没说话了。"
 
         moment_sentence = f"{date_str}{mood_dsc}，{act_phrase}。{last_hours_phrase}".strip()
 
@@ -419,11 +410,8 @@ class AdminServer:
             rc = int(r["recall_count"] or 0)
             st = str(r["sentiment"] or "平静")
             l_str = r["last_recall_at"] or r["created_at"] or now_str()
-            try:
-                l_dt = datetime.strptime(l_str, "%Y-%m-%d %H:%M")
-                days = max(0.0, (now_dt - l_dt).total_seconds() / 86400.0)
-            except Exception:
-                days = 0.0
+            l_dt = parse_dt(l_str)
+            days = max(0.0, (now_dt - l_dt).total_seconds() / 86400.0) if l_dt else 0.0
 
             strength, tau_eff = calc_diary_strength(imp, rc, st, days)
             percent = min(100.0, (strength / 10.0) * 100.0)
@@ -524,7 +512,7 @@ class AdminServer:
                    AVG(warmth_score) as wa, AVG(resonance) as re FROM observer_scores
             """
         )
-        past_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
+        past_7d = (datetime.now() - timedelta(days=7)).strftime(TIME_FORMAT)
         score_row_7d = await self.db.fetchone(
             """
             SELECT COUNT(*) as cnt, AVG(self_disclosure) as sd, AVG(responsiveness) as rs,
@@ -575,7 +563,7 @@ class AdminServer:
         total_calls = total_row["calls"] if total_row else 0
         total_cost = float(total_row["total_cost"] or 0.0) if total_row else 0.0
 
-        past_24h_str = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M")
+        past_24h_str = (datetime.now() - timedelta(hours=24)).strftime(TIME_FORMAT)
         row_24h = await self.db.fetchone(
             "SELECT SUM(cost_estimate) as cost_24h FROM llm_calls WHERE created_at >= ?",
             (past_24h_str,),

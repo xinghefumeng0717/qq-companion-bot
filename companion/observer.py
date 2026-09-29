@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 from typing import Any, Deque, Dict, List, Optional
 
 from companion.affection import AffectionEngine
-from companion.db import Database, now_str
-from companion.gateway import LLMGateway
+from companion.db import Database, TIME_FORMAT, now_str
+from companion.gateway import LLMGateway, parse_llm_json
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.prompts import OBSERVER_SYSTEM_PROMPT, OBSERVER_USER_PROMPT
@@ -161,7 +161,7 @@ class Observer:
                     remind_hours = int(fu.get("remind_after_hours", 24))
                     if topic:
                         remind_dt = now_dt + timedelta(hours=remind_hours)
-                        remind_str = remind_dt.strftime("%Y-%m-%d %H:%M")
+                        remind_str = remind_dt.strftime(TIME_FORMAT)
                         await self.db.execute(
                             """
                             INSERT INTO followups (topic, remind_after, done, created_at)
@@ -221,12 +221,7 @@ class Observer:
                 json_mode=True,
                 purpose="observer",
             )
-            try:
-                data = json.loads(resp)
-            except Exception:
-                clean = re.sub(r"^```json\s*|\s*```$", "", resp.strip(), flags=re.MULTILINE)
-                data = json.loads(clean)
-            return data
+            return parse_llm_json(resp)
         except Exception as e:
             logger.warning(f"[Observer] 观察者调用或解析失败，使用中性默认: {e}")
             return default_res

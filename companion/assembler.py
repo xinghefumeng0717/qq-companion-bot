@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from companion.affection import AffectionEngine
-from companion.db import Database, now_str
+from companion.db import Database, TIME_FORMAT, parse_dt, now_str
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.persona import Persona
@@ -124,14 +124,11 @@ class PromptAssembler:
             valid_items = []
             now_dt = datetime.now()
             for r in rows:
-                try:
-                    c_dt = datetime.strptime(r["created_at"], "%Y-%m-%d %H:%M")
-                    if (now_dt - c_dt).total_seconds() > 48 * 3600:
-                        # 超过 48 小时清除
-                        await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (r["id"],))
-                        continue
-                except Exception:
-                    pass
+                c_dt = parse_dt(r["created_at"])
+                if c_dt and (now_dt - c_dt).total_seconds() > 48 * 3600:
+                    # 超过 48 小时清除
+                    await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (r["id"],))
+                    continue
                 valid_items.append(r["content"])
 
             if not valid_items:
@@ -147,7 +144,7 @@ class PromptAssembler:
         """按 §6.2 组装完整的 System Prompt"""
         now_dt = datetime.now()
         weekday_str = WEEKDAYS[now_dt.weekday()]
-        current_time_str = f"{now_dt.strftime('%Y-%m-%d %H:%M')} 星期{weekday_str}"
+        current_time_str = f"{now_dt.strftime(TIME_FORMAT)} 星期{weekday_str}"
 
         # 1. 好感度与情绪状态
         aff_state = await self.affection.get_state()

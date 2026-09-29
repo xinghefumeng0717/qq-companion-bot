@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from companion.affection import determine_stage
-from companion.db import Database, STATE_KEY_MOOD, now_str
+from companion.db import Database, STATE_KEY_MOOD, parse_dt, now_str
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +49,11 @@ class MoodEngine:
         row = await self.db.fetchone("SELECT created_at FROM turns ORDER BY id DESC LIMIT 1")
         if not row or not row["created_at"]:
             return 0.0
-        try:
-            last_dt = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M")
+        last_dt = parse_dt(row["created_at"])
+        if last_dt:
             delta_sec = (datetime.now() - last_dt).total_seconds()
             return max(0.0, delta_sec / 3600.0)
-        except Exception:
-            return 0.0
+        return 0.0
 
     async def update_mood(
         self,
@@ -73,10 +72,10 @@ class MoodEngine:
         frustration = float(state.get("frustration", 0.0))
         last_updated_str = state.get("last_updated", now_str())
 
-        try:
-            last_dt = datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M")
+        last_dt = parse_dt(last_updated_str)
+        if last_dt:
             real_elapsed = max(0.0, (datetime.now() - last_dt).total_seconds() / 3600.0)
-        except Exception:
+        else:
             real_elapsed = 1.0
 
         # >=1 按实际，<1 按 1 参与回归计算
