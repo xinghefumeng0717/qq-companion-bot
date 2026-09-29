@@ -1,0 +1,18 @@
+[Unit]
+Description=QQ Companion Bot
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/qq-companion
+ExecStart=/opt/qq-companion/venv/bin/python -m companion.main
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/qq-companion/data/logs/bot.log
+StandardError=append:/opt/qq-companion/data/logs/bot.log
+
+[Install]
+WantedBy=multi-user.target

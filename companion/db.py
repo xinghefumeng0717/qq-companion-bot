@@ -1,0 +1,182 @@
+"""SQLite 异步数据库连接与建表 (db.py)
+使用 aiosqlite 管理单文件数据库 data/companion.db。
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from typing import Any, List, Optional, Tuple
+import aiosqlite
+
+TIME_FORMAT = "%Y-%m-%d %H:%M"
+
+
+def now_str() -> str:
+    """获取当前时间字符串 (%Y-%m-%d %H:%M)"""
+    return datetime.now().strftime(TIME_FORMAT)
+
+
+class Database:
+    def __init__(self, db_path: str = "data/companion.db"):
+        self.db_path = db_path
+        self._conn: Optional[aiosqlite.Connection] = None
+
+    async def connect(self) -> aiosqlite.Connection:
+        if self._conn is None:
+            dir_name = os.path.dirname(self.db_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            self._conn = await aiosqlite.connect(self.db_path)
+            self._conn.row_factory = aiosqlite.Row
+        return self._conn
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
+    async def execute(self, sql: str, parameters: Tuple[Any, ...] | List[Any] = ()) -> aiosqlite.Cursor:
+        conn = await self.connect()
+        cursor = await conn.execute(sql, parameters)
+        await conn.commit()
+        return cursor
+
+    async def executemany(self, sql: str, seq_of_parameters: List[Tuple[Any, ...]]) -> aiosqlite.Cursor:
+        conn = await self.connect()
+        cursor = await conn.executemany(sql, seq_of_parameters)
+        await conn.commit()
+        return cursor
+
+    async def fetchone(self, sql: str, parameters: Tuple[Any, ...] | List[Any] = ()) -> Optional[aiosqlite.Row]:
+        conn = await self.connect()
+        async with conn.execute(sql, parameters) as cursor:
+            return await cursor.fetchone()
+
+    async def fetchall(self, sql: str, parameters: Tuple[Any, ...] | List[Any] = ()) -> List[aiosqlite.Row]:
+        conn = await self.connect()
+        async with conn.execute(sql, parameters) as cursor:
+            return await cursor.fetchall()
+
+    async def init_tables(self) -> None:
+        """初始化全部数据表与默认计数器"""
+        conn = await self.connect()
+        await conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT,
+                content TEXT,
+                proactive INTEGER DEFAULT 0,
+                has_image INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS counters (
+                key TEXT PRIMARY KEY,
+                value INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS diary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT,
+                importance INTEGER,
+                sentiment TEXT,
+                recall_count INTEGER DEFAULT 0,
+                created_at TEXT,
+                last_recall_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS diary_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT,
+                importance INTEGER,
+                sentiment TEXT,
+                recall_count INTEGER DEFAULT 0,
+                created_at TEXT,
+                last_recall_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT UNIQUE,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS followups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT,
+                remind_after TEXT,
+                done INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS suppressed_desires (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS milestones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stage INTEGER,
+                reached_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS stickers (
+                name TEXT PRIMARY KEY,
+                file TEXT,
+                desc TEXT,
+                md5 TEXT UNIQUE,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS llm_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                purpose TEXT,
+                model TEXT,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                cache_hit_tokens INTEGER DEFAULT 0,
+                cache_miss_tokens INTEGER DEFAULT 0,
+                cost_estimate REAL,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS observer_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                self_disclosure REAL,
+                responsiveness REAL,
+                warmth_score REAL,
+                resonance REAL,
+                created_at TEXT
+            );
+            """
+        )
+        await conn.commit()
+
+        # 旧库迁移：llm_calls 补充缓存命中两列
+        async with conn.execute("PRAGMA table_info(llm_calls)") as cur:
+            existing_cols = {row[1] for row in await cur.fetchall()}
+        for col in ("cache_hit_tokens", "cache_miss_tokens"):
+            if col not in existing_cols:
+                await conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {col} INTEGER DEFAULT 0")
+        await conn.commit()
+
+        # 初始化计数器
+        async with conn.execute("SELECT value FROM counters WHERE key = 'total_turns'") as cur:
+            row = await cur.fetchone()
+            if row is None:
+                await conn.execute("INSERT INTO counters (key, value) VALUES ('total_turns', 0)")
+
+        async with conn.execute("SELECT value FROM counters WHERE key = 'archived_turns'") as cur:
+            row = await cur.fetchone()
+            if row is None:
+                await conn.execute("INSERT INTO counters (key, value) VALUES ('archived_turns', 0)")
+
+        await conn.commit()

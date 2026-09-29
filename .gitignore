@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Project private data
+config.toml
+data/
+
+# Private characters (keep example only)
+characters/*
+!characters/example/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

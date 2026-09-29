@@ -1,0 +1,83 @@
+[account]
+allowed_user_id = 123456789        # 机主大号 QQ 号，只响应此人，其余一律忽略
+bot_qq = 987654321                 # 小号 QQ 号（日志用）
+
+[onebot]
+ws_url = "ws://127.0.0.1:3001"
+access_token = "在这里填 NapCat 设置的 token"
+
+[llm]
+current = "deepseek"          # 当前激活的模型预设，切换只改这一行
+thinking_chat = true
+thinking_effort_chat = "low"
+thinking_tasks = false               # 后台总开关：true 则全部用途开思考（旧行为）
+thinking_effort_tasks = "low"
+# 总开关关闭时，按用途白名单开思考（默认即下列三项：写出来的文字用户看得见，不思考的 flash 行文会不通顺）
+thinking_tasks_purposes = ["diary_archive", "vision_perception", "proactive_message"]
+
+# 每个 [models.<名>] 是一家厂商的完整档案
+[models.deepseek]
+provider = "deepseek"         # deepseek / minimax / openai（generic，不传任何思考参数）
+base_url = "https://api.deepseek.com"
+api_key = "sk-在这里填"
+chat = "deepseek-flash"
+vision = "deepseek-flash"     # 留空字符串则禁用识图
+tasks = "deepseek-flash"
+
+[models.minimax]
+provider = "minimax"
+base_url = "https://api.minimaxi.com/v1"
+api_key = "在这里填"
+chat = "MiniMax-M3"
+vision = "MiniMax-M3"
+tasks = "MiniMax-M2.7"
+
+[models.seed]
+provider = "openai"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = "在这里填"
+chat = "doubao-seed-2-1-pro-260915"
+vision = "doubao-seed-2-1-pro-260915"
+tasks = "doubao-seed-2-1-turbo-260628"
+# DeepSeek 计费（元/百万 tokens，按北京时间判峰谷、按模型分表，需按官网更新）
+[llm.pricing]
+holidays = []                # 中国法定节假日，如 ["2026-10-01"]，留空则仅按工作日规则
+
+[llm.pricing."deepseek-flash"]
+cache_hit_peak = 0.04        # 输入·缓存命中·高峰
+cache_hit_offpeak = 0.02     # 输入·缓存命中·空闲
+cache_miss_peak = 2.0        # 输入·缓存未命中·高峰
+cache_miss_offpeak = 1.0     # 输入·缓存未命中·空闲
+output_peak = 8.0            # 输出·高峰
+output_offpeak = 4.0         # 输出·空闲
+
+[llm.pricing."deepseek-v4-pro"]
+cache_hit_peak = 0.30
+cache_hit_offpeak = 0.15
+cache_miss_peak = 9.0
+cache_miss_offpeak = 4.5
+output_peak = 27.0
+output_offpeak = 13.5
+
+[character]
+path = "characters/example"        # 当前激活的角色卡目录
+
+[reply]
+max_chunks = 5                     # 单轮最多拆几条发送
+chunk_delay_min = 0.8              # 段间延迟秒数下限
+chunk_delay_max = 2.2
+
+[proactive]
+enabled = true
+wake_interval_min = 20             # 唤醒间隔（分钟）下限，每次随机取 [min,max]
+wake_interval_max = 40
+quiet_hours = [0, 8]               # 免打扰时段
+max_unanswered = 2                 # 连续 N 条主动消息未获回复，当天停止
+
+[voice]
+enabled = true
+model_dir = "data/models/sensevoice"
+
+[admin]
+host = "127.0.0.1"
+port = 8080
