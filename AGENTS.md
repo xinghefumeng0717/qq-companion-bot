@@ -29,4 +29,4 @@
 ## 三、项目角色分工备忘
 
 - 角色卡（青梓人设）由项目所有者与其指定流程维护，任何执行代理不得改动；
-- PLAN.md 为架构蓝图，FIXES*.md 为历次迭代任务书，DEPLOY.md 为部署手册。
+- PLAN.md、FIXES*.md、DEPLOY.md 等历史文档均已归入 `docs/` 目录：PLAN.md 为架构蓝图，FIXES*.md 为历次迭代任务书，DEPLOY.md 为部署手册。
