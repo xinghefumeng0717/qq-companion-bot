@@ -342,6 +342,15 @@ class TestTask3AdminAPIAndManagement(AioHTTPTestCase):
         data = await resp.json()
         self.assertEqual(data.get("status"), "ok")
 
+        # 备份必须落在注入的临时 backup_dir 里，不能污染真实 data/backup/（无轮转）
+        backup_path = str((data.get("result") or {}).get("backup_path", ""))
+        self.assertTrue(backup_path, "重置结果必须带 backup_path")
+        self.assertTrue(os.path.exists(backup_path))
+        self.assertTrue(
+            os.path.abspath(backup_path).startswith(os.path.abspath(self.backup_dir)),
+            f"重置备份必须落在注入的 backup_dir，实际: {backup_path}",
+        )
+
         # 检查 turns 表已被清空
         row = await self.db.fetchone("SELECT COUNT(*) as cnt FROM turns")
         self.assertEqual(row["cnt"], 0)

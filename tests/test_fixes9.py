@@ -265,6 +265,8 @@ def _mk_client(responses=None, drop=False):
         image_save_dir="data/test_fixes9_imgs",
     )
     c._ws = _FakeWS(c, responses, drop)
+    # 生产上读循环只在 start() 之后跑；dispatcher 带停机守卫，这里模拟"已启动"
+    c._running = True
     return c, got
 
 
@@ -769,9 +771,11 @@ class TestPlainExamplesInjection(unittest.IsolatedAsyncioTestCase):
         self.assertIn("日常废话流基线", prompt)
         for ex in examples:
             self.assertIn(f"  - {ex}", prompt)
-        # 注入位置：错误示范之后、说话习惯之前
-        self.assertLess(prompt.index("错误示范（禁止）"), prompt.index("日常废话流基线"))
-        self.assertLess(prompt.index("日常废话流基线"), prompt.index("她的具体说话习惯"))
+        # 注入位置：正确示范之后、错误示范之前——基线是要鼓励的语气，
+        # 挂在"错误示范（禁止）"下面会被读成禁止内容
+        self.assertLess(prompt.index("正确示范"), prompt.index("日常废话流基线"))
+        self.assertLess(prompt.index("日常废话流基线"), prompt.index("错误示范（禁止）"))
+        self.assertLess(prompt.index("错误示范（禁止）"), prompt.index("她的具体说话习惯"))
 
 
 if __name__ == "__main__":

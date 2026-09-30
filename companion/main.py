@@ -43,6 +43,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("companion")
 
+# 停机时单个组件允许占用的最长时间：组件卡死不能拖死整个进程（systemd 会 SIGKILL）
+ADMIN_STOP_TIMEOUT = 5.0
+
+# 库文件路径唯一来源（构造时可注入，测试/多环境不必改代码）
+DEFAULT_DB_PATH = "data/companion.db"
+
 
 def format_status_text(
     persona: Persona,
@@ -114,9 +120,11 @@ async def print_status(config: Config) -> None:
 
 
 class CompanionBot:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, db_path: str = DEFAULT_DB_PATH):
         self.config = config
-        self.db = Database("data/companion.db")
+        # 库路径的唯一源头：db / backup_scheduler / admin 三处共用，不再各自硬编码
+        self.db_path = db_path
+        self.db = Database(self.db_path)
         self.persona = Persona.load(config.character.path)
 
         stickers_dir = os.path.join(self.persona.base_dir, self.persona.stickers_dir)
@@ -164,7 +172,7 @@ class CompanionBot:
         self.aggregator = MessageAggregator(turn_handler=self.turn_handler.handle_turn)
 
         self.backup_scheduler = DailyBackupScheduler(
-            db_path="data/companion.db",
+            db_path=self.db_path,
             backup_dir="data/backup/daily",
         )
 
@@ -189,7 +197,7 @@ class CompanionBot:
             assembler=self.assembler,
             db=self.db,
             onebot=self.onebot,
-            db_path="data/companion.db",
+            db_path=self.db_path,
             backup_dir="data/backup/daily",
         )
 
@@ -226,22 +234,13 @@ class CompanionBot:
         finally:
             await self.close()
 
-    async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        logger.info("[Bot] 正在关闭伴侣机器人...")
+    async def _cancel_background_tasks(self) -> None:
+        """取消并等待全部后台定时/消费任务退出。
 
-        self.backup_scheduler.stop()
-        self.aggregator.stop()
-        self.proactive.stop()
-        await self.admin.stop()
-        await self.onebot.stop()
-        await self.gateway.close()
-        await self.db.close()
-
-        # 等待后台任务彻底取消，杜绝 pending task 警告
-        bg_tasks = []
+        必须在 db.close() 之前做：库连接关掉之后，任何仍在跑的任务
+        再执行一条 SQL 都会静默重开连接，aiosqlite 的非守护线程会把进程挂住。
+        """
+        tasks = []
         for t in [
             getattr(self.aggregator, "_debounce_task", None),
             getattr(self.aggregator, "_consumer_task", None),
@@ -250,9 +249,42 @@ class CompanionBot:
         ]:
             if t and not t.done():
                 t.cancel()
-                bg_tasks.append(t)
-        if bg_tasks:
-            await asyncio.gather(*bg_tasks, return_exceptions=True)
+                tasks.append(t)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        logger.info("[Bot] 正在关闭伴侣机器人...")
+        # 每一步都打日志：停机若再被 systemd 超时 SIGKILL，日志能直接指出卡在哪一步
+
+        logger.info("[Bot] 正在关闭 后台调度器 (aggregator/proactive/backup)")
+        self.backup_scheduler.stop()
+        self.aggregator.stop()
+        self.proactive.stop()
+
+        logger.info("[Bot] 正在取消后台任务")
+        await self._cancel_background_tasks()
+
+        logger.info("[Bot] 正在关闭 OneBot 客户端")
+        await self.onebot.stop()
+
+        logger.info("[Bot] 正在关闭 Admin 仪表盘")
+        try:
+            # 有界停机：aiohttp 清理偶尔会卡住，超时就放弃它继续往下走
+            await asyncio.wait_for(self.admin.stop(), timeout=ADMIN_STOP_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(f"[Bot] Admin 仪表盘关闭超时 ({ADMIN_STOP_TIMEOUT}s)，跳过继续停机")
+        except Exception as e:
+            logger.warning(f"[Bot] Admin 仪表盘关闭异常，跳过继续停机: {e}")
+
+        logger.info("[Bot] 正在关闭 LLM 网关")
+        await self.gateway.close()
+
+        logger.info("[Bot] 正在关闭 数据库")
+        await self.db.close()
 
         logger.info("[Bot] 关闭完成")
 

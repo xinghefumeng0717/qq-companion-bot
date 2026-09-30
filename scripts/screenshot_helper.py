@@ -1,3 +1,10 @@
+"""仪表盘截图辅助脚本 (scripts/screenshot_helper.py)
+
+给 admin 仪表盘各页面截图，用于生成文档配图。演示数据一律写入独立的演示库
+data/screenshot_demo.db —— 绝不使用生产库 data/companion.db，
+否则会把假日记、假事实、假计费记录混进真实相处数据里。
+"""
+
 import asyncio
 import os
 import subprocess
@@ -23,10 +30,11 @@ from companion.stickers import StickerManager
 OUTPUT_DIR = r"C:\Users\user\.gemini\antigravity\brain\7ad6ecf4-cb87-4dfd-8807-763774c45336"
 EDGE_EXE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
+# 演示库：独立文件，跟生产库 data/companion.db 无任何关系（要重新截图可整份删掉重跑）
+DEMO_DB_PATH = "data/screenshot_demo.db"
+
 async def main():
-    db_path = "data/companion.db"
-    if not os.path.exists(db_path):
-        db_path = "data/test_screenshot.db"
+    db_path = DEMO_DB_PATH
     db = Database(db_path)
     await db.init_tables()
     config = Config.load("config.example.toml")

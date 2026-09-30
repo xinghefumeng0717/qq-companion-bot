@@ -109,13 +109,40 @@ def chunk_text_sentences(text: str, max_chunks: int = 5) -> List[str]:
         return []
 
     # 3. 总段数 <= max_chunks，超出部分并入最后一段
+    #    用 \n 而不是空串黏合：换行是硬边界，"" 会把两条独立气泡拼成一句黏话
     if len(chunks) > max_chunks:
         kept = chunks[: max_chunks - 1]
-        tail = "".join(chunks[max_chunks - 1 :])
+        tail = "\n".join(chunks[max_chunks - 1 :])
         kept.append(tail)
         chunks = kept
 
     return [c.strip() for c in chunks if c.strip()]
+
+
+def fit_chunks(chunks: List[Dict[str, Any]], max_chunks: int) -> List[Dict[str, Any]]:
+    """把段列表压到 max_chunks 以内：优先保留表情包段，先丢普通文本段。
+
+    表情包是模型明确要求的整条内容，静默丢掉会改变回复的语义与态度；
+    文字段少发一句只损失信息，不影响表达。保留的段维持原有先后顺序。
+    """
+    if max_chunks <= 0 or len(chunks) <= max_chunks:
+        return chunks
+
+    stickers = [c for c in chunks if c["type"] == "sticker"]
+    if len(stickers) >= max_chunks:
+        # 表情包自身就超限：只能按顺序取前 max_chunks 个，文字段全部让位
+        return stickers[:max_chunks]
+
+    text_quota = max_chunks - len(stickers)
+    kept: List[Dict[str, Any]] = []
+    text_used = 0
+    for c in chunks:
+        if c["type"] == "sticker":
+            kept.append(c)
+        elif text_used < text_quota:
+            kept.append(c)
+            text_used += 1
+    return kept
 
 
 class Replier:
@@ -133,8 +160,11 @@ class Replier:
         2. 行首触发方向标签剥离
         3. 旁白剥离
         4. sticker 标记与文字混排拆分
-        5. 句子切段
+        5. 句子切段并压到 max_chunks 以内（优先保表情包）
         返回: (发送消息段列表, 纯文本记录)
+
+        落库记录由最终发出的段反推，实发多少就记多少：
+        被截断丢弃的文字段不会留在记录里，不丢表情包段。
         """
         # 1. 字面量 \n 还原为真换行（模型常把换行写成两个字符）
         clean_text = unescape_literal_newlines(raw_text)
@@ -148,7 +178,6 @@ class Replier:
         # 4. 表情包标记匹配与切分
         segments: List[Dict[str, Any]] = []
         last_idx = 0
-        clean_record_parts = []
 
         for m in STICKER_PATTERN.finditer(clean_text):
             start, end = m.span()
@@ -157,14 +186,15 @@ class Replier:
                 txt = clean_text[last_idx:start]
                 if txt.strip():
                     segments.append({"type": "text", "content": txt})
-                    clean_record_parts.append(txt)
 
             # 表情包
             sticker_desc = m.group(1).strip()
             sticker_path = self.stickers.match_sticker(sticker_desc)
             if sticker_path:
-                segments.append({"type": "sticker", "file": sticker_path})
-                clean_record_parts.append(f"[表情:{sticker_desc}]")
+                # desc 只用于落库记录，发送方只认 file
+                segments.append(
+                    {"type": "sticker", "file": sticker_path, "desc": sticker_desc}
+                )
             else:
                 logger.info(f"[Replier] 表情包未匹配，丢弃标记: [sticker:{sticker_desc}]")
 
@@ -175,7 +205,6 @@ class Replier:
             txt = clean_text[last_idx:]
             if txt.strip():
                 segments.append({"type": "text", "content": txt})
-                clean_record_parts.append(txt)
 
         # 5. 展开文字段切句并控制总段数 <= max_chunks
         final_chunks: List[Dict[str, Any]] = []
@@ -187,25 +216,15 @@ class Replier:
                 for sc in sub_chunks:
                     final_chunks.append({"type": "text", "content": sc})
 
-        # 控制总段数 <= max_chunks
-        if len(final_chunks) > self.config.max_chunks:
-            kept = final_chunks[: self.config.max_chunks - 1]
-            remaining = final_chunks[self.config.max_chunks - 1 :]
-            # 将多余内容合并（如果是文字）
-            merged_content = ""
-            for r in remaining:
-                if r["type"] == "text":
-                    merged_content += r["content"]
-                elif r["type"] == "sticker":
-                    if merged_content:
-                        kept.append({"type": "text", "content": merged_content})
-                        merged_content = ""
-                    kept.append(r)
-            if merged_content:
-                kept.append({"type": "text", "content": merged_content})
-            final_chunks = kept[: self.config.max_chunks]
+        # 6. 总量控制：超限先丢普通文本段，表情包段优先保留
+        final_chunks = fit_chunks(final_chunks, self.config.max_chunks)
 
-        clean_record_text = "".join(clean_record_parts).strip()
+        # 7. 记录与实发一致：每段一条，段间用换行对齐 QQ 上的多条气泡
+        record_parts = [
+            c["content"] if c["type"] == "text" else f"[表情:{c.get('desc', '')}]"
+            for c in final_chunks
+        ]
+        clean_record_text = "\n".join(record_parts).strip()
         return final_chunks, clean_record_text
 
     async def send_reply_chunks(

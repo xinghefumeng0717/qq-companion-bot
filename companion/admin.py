@@ -873,7 +873,11 @@ class AdminServer:
             return web.Response(text=html_shell("重置被拒绝", "/admin", content), content_type="text/html", status=400)
 
         try:
-            res = reset_database(db_path=self.db_path, purge_all=False)
+            res = reset_database(
+                db_path=self.db_path,
+                backup_dir=self.backup_dir,
+                purge_all=False,
+            )
             logger.warning(f"[AdminAction] 数据重置成功: 备份至 {res.get('backup_path')}, 清理统计: {res.get('cleared_counts')}")
             if "application/json" in request.headers.get("Accept", "") or request.content_type == "application/json":
                 return web.json_response({"status": "ok", "result": res})

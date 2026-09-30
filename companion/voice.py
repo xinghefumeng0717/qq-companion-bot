@@ -14,6 +14,7 @@ import subprocess
 import uuid
 import wave
 from typing import Optional
+from urllib.parse import unquote
 import aiohttp
 
 from companion.config import VoiceConfig
@@ -21,6 +22,30 @@ from companion.config import VoiceConfig
 logger = logging.getLogger(__name__)
 
 FALLBACK_VOICE_TEXT = "[对方发来一条语音，但没能听清]"
+
+FILE_URI_PREFIX = "file://"
+
+
+def file_uri_to_path(uri: str) -> str:
+    """file:// URI 还原为本地路径，兼容三种写法：
+    - POSIX:   file:///opt/qq-companion/voice/a.silk -> /opt/qq-companion/voice/a.silk
+    - Windows: file:///D:/qq-companion/a.silk          -> D:/qq-companion/a.silk
+    - Windows: file://D:/qq-companion/a.silk           -> D:/qq-companion/a.silk
+    非 file:// 开头或非字符串时原样返回，交给调用方按本地路径处理。
+    """
+    if not isinstance(uri, str) or not uri.startswith(FILE_URI_PREFIX):
+        return uri
+
+    path = uri[len(FILE_URI_PREFIX):]
+    # NapCat 偶尔在 file URI 后带查询串/锚点
+    for sep in ("?", "#"):
+        path = path.split(sep, 1)[0]
+    # 百分号转义还原（中文路径常见）
+    path = unquote(path)
+    # Windows 盘符：file:///D:/x -> /D:/x -> D:/x
+    if re.match(r"^/[A-Za-z]:", path):
+        path = path[1:]
+    return path
 
 
 class VoiceProcessor:
@@ -153,6 +178,10 @@ class VoiceProcessor:
                 else:
                     temp_silk = await self._download_silk(voice_url_or_path, session)
                 is_downloaded = True
+            elif voice_url_or_path.startswith(FILE_URI_PREFIX):
+                # NapCat record 段可能回 file:// URI（onebot 里 url or file 兜底）。
+                # 它不是网络资源，直接剥 scheme 当本地路径用，且不能当临时文件删掉。
+                temp_silk = file_uri_to_path(voice_url_or_path)
             else:
                 temp_silk = voice_url_or_path
 

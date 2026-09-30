@@ -188,7 +188,13 @@ class OneBotClient:
                 self._dispatch_message_event(data.get("message"))
 
     def _dispatch_message_event(self, raw_msg: Any) -> None:
-        """把消息事件投进内部队列，立即返回，读循环不被消息处理拖住"""
+        """把消息事件投进内部队列，立即返回，读循环不被消息处理拖住。
+
+        stop() 之后仍可能收到在途帧：此时必须直接丢弃，
+        否则 _ensure_dispatcher 会把已经收尾的消费协程重新拉起来。
+        """
+        if not self._running:
+            return
         self._ensure_dispatcher()
         self._message_queue.put_nowait(raw_msg)
 
