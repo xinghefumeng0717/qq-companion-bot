@@ -168,6 +168,7 @@ characters/my_character/
       "绝对禁止输出动作心理描写"
     ],
     "good_examples": ["哈哈真的假的", "快看我刚刚画的！"],
+    "plain_examples": ["机主：「在干嘛」→ 她：「吃饭」"],
     "bad_examples": ["（笑了笑）今天很开心"]
   },
   "initial_dims": {
@@ -279,11 +280,11 @@ sudo systemctl enable --now qq-companion
   - `--purge-all`：连同表情包与计费记录彻底清空；
   - `--yes` 或 `-y`：跳过交互式二次确认。
 
-### 8.3 状态看板查看 (`companion.status`)
+### 8.3 状态看板查看 (`companion.main --status`)
 
 在终端中快速以字符进度条查看当前伴侣好感度、心境、记住的事实与最新日记：
 ```bash
-./venv/bin/python -m companion.status
+./venv/Scripts/python.exe -m companion.main --status
 ```
 
 ---
