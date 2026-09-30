@@ -1,5 +1,5 @@
 """消息聚合器 (aggregator.py)
-对机主连发的短消息进行 3 秒静默聚合与 8 秒硬等待合并，图片消息即刻触发独立轮次。
+对机主连发的短消息进行 6 秒静默聚合与 15 秒硬等待合并，图片消息与文本共用同一缓冲窗口。
 使用异步任务队列保证生成回复时不丢弃、不插队。
 """
 
@@ -11,6 +11,11 @@ from typing import Any, Callable, Coroutine, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# 静默窗：机主停手这么久就认为这一轮说完了（真人想一句发一句常见间隔 4~6 秒）
+SILENCE_WINDOW = 6.0
+# 硬上限：从本轮第一条消息起算，无论后续来多少条，最多等这么久
+HARD_LIMIT = 15.0
+
 
 class MessageAggregator:
     def __init__(
@@ -19,6 +24,7 @@ class MessageAggregator:
     ):
         self.turn_handler = turn_handler
         self._text_buffer: List[str] = []
+        self._image_buffer: Optional[str] = None
         self._first_msg_time: float = 0.0
         self._debounce_task: Optional[asyncio.Task] = None
         self._queue: asyncio.Queue[Tuple[str, Optional[str]]] = asyncio.Queue()
@@ -54,66 +60,63 @@ class MessageAggregator:
                 logger.error(f"[Aggregator] 消费队列发生异常: {e}")
 
     async def push_message(self, text: str, image_path: Optional[str] = None) -> None:
-        """接收一条新消息进行缓冲与聚合"""
+        """接收一条新消息（文本/图片/两者）进行缓冲与聚合。
+        图片不再即时触发独立轮次，与文本走同一套缓冲逻辑，避免"几句话+一个表情包"被拆开。
+        """
         loop = asyncio.get_running_loop()
         now = loop.time()
 
-        # 1. 包含图片：不等待聚合，单独触发一轮
-        if image_path:
-            if self._debounce_task and not self._debounce_task.done():
-                self._debounce_task.cancel()
-                self._debounce_task = None
-
-            # 将之前缓冲的文字与当前文字合并
-            combined_text = "\n".join(self._text_buffer + ([text] if text else [])).strip()
-            self._text_buffer.clear()
-            self._first_msg_time = 0.0
-
-            logger.info(f"[Aggregator] 收到图片消息，即刻提交本轮: '{combined_text}', img={image_path}")
-            await self._queue.put((combined_text, image_path))
-            return
-
-        # 2. 纯文本消息：启动/重置 3 秒静默计时器，上限 8 秒
         if text:
             self._text_buffer.append(text)
+        if image_path:
+            # 一轮内多图时保留最后一张（更可能是机主当下要问的那张）
+            self._image_buffer = image_path
 
-        if not self._text_buffer:
+        if not self._text_buffer and not self._image_buffer:
             return
 
+        # 首条计时：图片与文本都只负责"起表"，不重置已开始的计时
         if self._first_msg_time == 0.0:
             self._first_msg_time = now
 
         elapsed = now - self._first_msg_time
-        if elapsed >= 8.0:
-            # 达到 8 秒硬上限，立即触发
+
+        # 达到硬上限（从本轮第一条消息起算），立即触发
+        if elapsed >= HARD_LIMIT:
             if self._debounce_task and not self._debounce_task.done():
                 self._debounce_task.cancel()
-            self._flush_text_buffer()
+            self._flush_buffer()
             return
 
-        # 重置 3 秒静默计时器（但不超过 8 秒硬上限）
+        # 重置静默计时器，但永不越过硬上限
         if self._debounce_task and not self._debounce_task.done():
             self._debounce_task.cancel()
 
-        remaining_to_hard_limit = 8.0 - elapsed
-        wait_time = min(3.0, remaining_to_hard_limit)
+        wait_time = min(SILENCE_WINDOW, HARD_LIMIT - elapsed)
         self._debounce_task = asyncio.create_task(self._wait_and_flush(wait_time))
 
     async def _wait_and_flush(self, wait_seconds: float) -> None:
         try:
             await asyncio.sleep(wait_seconds)
-            self._flush_text_buffer()
+            self._flush_buffer()
         except asyncio.CancelledError:
             pass
 
-    def _flush_text_buffer(self) -> None:
-        """合并缓冲消息并提交到队列"""
-        if not self._text_buffer:
+    def _flush_buffer(self) -> None:
+        """合并缓冲中的文本与图片并提交到队列"""
+        if not self._text_buffer and not self._image_buffer:
             return
+
         combined_text = "\n".join(self._text_buffer).strip()
+        image_path = self._image_buffer
+
         self._text_buffer.clear()
+        self._image_buffer = None
         self._first_msg_time = 0.0
         self._debounce_task = None
 
-        logger.info(f"[Aggregator] 聚合静默到期，提交一轮文本输入: '{combined_text}'")
-        self._queue.put_nowait((combined_text, None))
+        logger.info(
+            f"[Aggregator] 聚合静默到期，提交一轮: text='{combined_text}'"
+            f"{f', img={image_path}' if image_path else ''}"
+        )
+        self._queue.put_nowait((combined_text, image_path))

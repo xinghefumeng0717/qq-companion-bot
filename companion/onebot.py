@@ -85,6 +85,9 @@ class OneBotClient:
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._running = False
         self._pending_echoes: Dict[str, asyncio.Future[Dict[str, Any]]] = {}
+        # 消息事件与读循环解耦：读循环只负责收帧，消息处理由这个内部队列串行消费
+        self._message_queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._dispatcher_task: Optional[asyncio.Task] = None
 
     @property
     def is_connected(self) -> bool:
@@ -135,6 +138,8 @@ class OneBotClient:
     async def stop(self) -> None:
         """停止客户端并释放资源"""
         self._running = False
+        if self._dispatcher_task and not self._dispatcher_task.done():
+            self._dispatcher_task.cancel()
         try:
             if self._ws and not self._ws.closed:
                 await self._ws.close()
@@ -148,13 +153,19 @@ class OneBotClient:
         logger.info("[OneBot] 客户端已停止")
 
     async def _handle_raw_message(self, raw_text: str) -> None:
-        """处理收到的 JSON 报文"""
+        """处理收到的 JSON 报文。
+
+        echo 应答帧必须在本函数内同步兑现 future：get_msg / send_msg 的调用方
+        就等在那些 future 上，晚一步兑现就是等满超时。
+        消息事件只做派发，不在此等待处理完成——否则带引用的消息会在
+        _fetch_reply_context 里等一个只有读循环才能送进来的回包，自己等自己。
+        """
         try:
             data = json.loads(raw_text)
         except json.JSONDecodeError:
             return
 
-        # 1. 响应帧 echo 匹配
+        # 1. 响应帧 echo 匹配（同步，读循环内完成）
         echo = data.get("echo")
         if echo and echo in self._pending_echoes:
             fut = self._pending_echoes.pop(echo)
@@ -174,13 +185,36 @@ class OneBotClient:
 
             # 只响应机主大号 QQ 号，其余一律忽略
             if msg_type == "private" and user_id == self.allowed_user_id:
-                raw_msg = data.get("message")
+                self._dispatch_message_event(data.get("message"))
+
+    def _dispatch_message_event(self, raw_msg: Any) -> None:
+        """把消息事件投进内部队列，立即返回，读循环不被消息处理拖住"""
+        self._ensure_dispatcher()
+        self._message_queue.put_nowait(raw_msg)
+
+    def _ensure_dispatcher(self) -> None:
+        """惰性启动（并在异常退出后重启）消息消费协程；强引用常驻 client 实例"""
+        if self._dispatcher_task is None or self._dispatcher_task.done():
+            self._dispatcher_task = asyncio.create_task(self._consume_message_queue())
+
+    async def _consume_message_queue(self) -> None:
+        """串行消费消息事件：同一用户连发的消息仍按到达顺序处理，不插队、不丢弃"""
+        while True:
+            raw_msg = await self._message_queue.get()
+            try:
                 await self._process_incoming_message(raw_msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[OneBot] 处理消息事件异常: {e}", exc_info=True)
+            finally:
+                self._message_queue.task_done()
 
     async def _process_incoming_message(self, raw_msg: Any) -> None:
-        """解析机主发来的消息段，下载图片，交给聚合器回调"""
+        """解析机主发来的消息段，下载图片，取引用上下文，交给聚合器回调"""
         text_parts = []
         image_local_path: Optional[str] = None
+        reply_prefix: Optional[str] = None
 
         if isinstance(raw_msg, str):
             text_parts.append(raw_msg)
@@ -193,6 +227,10 @@ class OneBotClient:
 
                 if stype == "text":
                     text_parts.append(sdata.get("text", ""))
+                elif stype == "reply":
+                    # OneBot 引用回复段：取被引消息文本并入本轮输入
+                    if reply_prefix is None:
+                        reply_prefix = await self._fetch_reply_context(sdata.get("id"))
                 elif stype == "record":
                     rec_url = sdata.get("url") or sdata.get("file")
                     if rec_url:
@@ -209,6 +247,10 @@ class OneBotClient:
                             image_local_path = local_path
 
         full_text = "".join(text_parts).strip()
+        if reply_prefix:
+            # 引用上下文进入文本流，与普通文本共用聚合窗口
+            full_text = f"{reply_prefix}\n{full_text}" if full_text else reply_prefix
+
         if self.on_message_callback:
             await self.on_message_callback(full_text, image_local_path)
 
@@ -239,6 +281,113 @@ class OneBotClient:
         except Exception as e:
             logger.error(f"[OneBot] 下载图片网络异常: {e}")
         return None
+
+    async def _call_action(
+        self,
+        action: str,
+        params: Dict[str, Any],
+        timeout: float = 2.0,
+    ) -> Optional[Dict[str, Any]]:
+        """通过现有 WS 通道发起一次 OneBot action 并等待 echo 回包（通用）
+        失败/超时/未连接一律返回 None，调用方负责降级，不抛异常。
+        """
+        if not self.is_connected or not self._ws:
+            logger.warning(f"[OneBot] 调用 {action} 失败: WebSocket 未连接")
+            return None
+
+        echo_id = str(uuid.uuid4())
+        payload = {"action": action, "params": params, "echo": echo_id}
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending_echoes[echo_id] = fut
+
+        try:
+            await self._ws.send_str(json.dumps(payload))
+            res = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending_echoes.pop(echo_id, None)
+            logger.warning(f"[OneBot] 调用 {action} 超时 ({timeout}s)，降级处理")
+            return None
+        except Exception as e:
+            self._pending_echoes.pop(echo_id, None)
+            logger.warning(f"[OneBot] 调用 {action} 异常，降级处理: {e}")
+            return None
+
+        if res.get("status") == "ok" or res.get("retcode", -1) == 0:
+            return res.get("data") or {}
+        logger.warning(f"[OneBot] 调用 {action} 返回错误: {res.get('retcode')} {res.get('wording', '')}")
+        return None
+
+    @staticmethod
+    def _extract_message_text(msg_data: Dict[str, Any]) -> str:
+        """从 get_msg 返回的 data 中提取文本段。
+        文本+图片混排时保留文本部分，只有真的没有任何文本才返回空串。
+        """
+        segments = msg_data.get("message")
+        texts: List[str] = []
+
+        if isinstance(segments, str):
+            texts.append(segments)
+        elif isinstance(segments, list):
+            for seg in segments:
+                if not isinstance(seg, dict):
+                    continue
+                if seg.get("type") == "text":
+                    sdata = seg.get("data", {}) or {}
+                    texts.append(sdata.get("text", ""))
+        else:
+            fallback = msg_data.get("message_str")
+            if isinstance(fallback, str):
+                texts.append(fallback)
+
+        return "".join(texts).strip()
+
+    @staticmethod
+    def _quoted_media_desc(msg_data: Dict[str, Any]) -> Optional[str]:
+        """被引消息里的非文本内容描述：图片/表情包写「一张图」，语音写「一条语音」"""
+        segments = msg_data.get("message")
+        if not isinstance(segments, list):
+            return None
+        kinds = {seg.get("type") for seg in segments if isinstance(seg, dict)}
+        if kinds & {"image", "face", "mface"}:
+            return "一张图"
+        if "record" in kinds:
+            return "一条语音"
+        return None
+
+    @classmethod
+    def _describe_quoted_message(cls, msg_data: Dict[str, Any]) -> Optional[str]:
+        """被引内容的一句话描述（文本截断 80 字）；取不到任何内容时返回 None"""
+        text = cls._extract_message_text(msg_data)
+        if text:
+            return text[:80]
+        return cls._quoted_media_desc(msg_data)
+
+    async def _fetch_reply_context(self, reply_id: Any) -> Optional[str]:
+        """取被引用消息，拼成「（他引用了你之前说的「XXX」）」前缀。
+        任何失败都返回 None（调用方按无引用继续），不阻塞主流程。
+        """
+        if reply_id is None:
+            return None
+
+        data = await self._call_action("get_msg", {"message_id": reply_id}, timeout=2.0)
+        if not data:
+            return None
+
+        try:
+            sender_id = (data.get("sender") or {}).get("user_id")
+            desc = self._describe_quoted_message(data)
+
+            if sender_id is not None and sender_id == self.allowed_user_id:
+                # 引用的是机主自己发过的消息（同样 80 字截断）
+                body = f"「{desc}」" if desc else "一条消息"
+                return f"（他之前说的{body}）"
+
+            if not desc:
+                return "（他引用了你的一条消息）"
+            return f"（他引用了你之前说的「{desc}」）"
+        except Exception as e:
+            logger.warning(f"[OneBot] 解析引用消息异常，降级为无引用: {e}")
+            return None
 
     async def send_private_msg(
         self,

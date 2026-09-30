@@ -167,6 +167,16 @@ class PromptAssembler:
         bad_examples = "\n  - " + "\n  - ".join(self.persona.chat_style.bad_examples)
         chat_rules = "\n  - " + "\n  - ".join(self.persona.chat_style.rules)
 
+        # 日常废话流基线（角色卡可选字段 plain_examples）：为空时整块（含标题）不渲染，
+        # 组装结果与旧角色卡逐字节一致
+        plain_examples_block = ""
+        if self.persona.chat_style.plain_examples:
+            plain_examples = "\n  - " + "\n  - ".join(self.persona.chat_style.plain_examples)
+            plain_examples_block = (
+                "\n  日常废话流基线（她大部分消息就是这样平淡的一句，"
+                f"不必每条都接话、提问或表达点什么）：{plain_examples}"
+            )
+
         stickers_list = "、".join(self.stickers.get_prompt_sticker_list())
 
         routine_activity = self.persona.get_current_activity(now_dt.hour, now_dt.weekday())
@@ -191,6 +201,7 @@ class PromptAssembler:
             user_address=self.persona.user_address,
             good_examples=good_examples,
             bad_examples=bad_examples,
+            plain_examples_block=plain_examples_block,
             chat_rules=chat_rules,
             stickers_list=stickers_list,
             stage_block=stage_block,

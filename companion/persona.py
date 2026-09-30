@@ -15,6 +15,8 @@ class ChatStyle:
     rules: List[str] = field(default_factory=list)
     good_examples: List[str] = field(default_factory=list)
     bad_examples: List[str] = field(default_factory=list)
+    # 日常废话流基线示例（可选字段；旧角色卡没有该字段时为空列表）
+    plain_examples: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -68,6 +70,7 @@ class Persona:
             rules=list(chat_style_data.get("rules", [])),
             good_examples=list(chat_style_data.get("good_examples", [])),
             bad_examples=list(chat_style_data.get("bad_examples", [])),
+            plain_examples=list(chat_style_data.get("plain_examples", [])),
         )
 
         stages_raw = data.get("stages", [])
