@@ -312,18 +312,41 @@ class MemoryManager:
     # ==========================================
 
     async def reinforce_memories(self, user_message: str) -> None:
-        """回忆加固：含‘还记得’/‘想你’全部+1；与日记有 >= 3 个共同汉字时该条+1"""
+        """回忆加固：含‘还记得’/‘想你’时强度 >= 0.5 的日记 +1；与日记有 >= 3 个共同汉字时该条+1"""
         if not user_message:
             return
 
         current_time = now_str()
-        # 1. 触发关键词全部加固
+        # 1. 触发关键词加固（只加固当前强度 >= 0.5 的日记，与回忆注入可见阈值一致）
         if "还记得" in user_message or "想你" in user_message:
-            await self.db.execute(
-                "UPDATE diary SET recall_count = recall_count + 1, last_recall_at = ?",
-                (current_time,),
+            rows = await self.db.fetchall(
+                """
+                SELECT id, importance, recall_count, sentiment, created_at, last_recall_at
+                FROM diary
+                """
             )
-            logger.info("[Memory] 触发关键词全部回忆加固")
+            now_dt = datetime.now()
+            reinforced = 0
+            for r in rows:
+                importance = float(r["importance"] or 5)
+                recall_count = int(r["recall_count"] or 0)
+                sentiment = str(r["sentiment"] or "平静")
+                last_recall_str = r["last_recall_at"] or r["created_at"] or current_time
+                last_dt = parse_dt(last_recall_str)
+                days = max(0.0, (now_dt - last_dt).total_seconds() / 86400.0) if last_dt else 0.0
+
+                strength, _ = calc_diary_strength(importance, recall_count, sentiment, days)
+                if strength < 0.5:
+                    continue
+                await self.db.execute(
+                    "UPDATE diary SET recall_count = recall_count + 1, last_recall_at = ? WHERE id = ?",
+                    (current_time, r["id"]),
+                )
+                reinforced += 1
+            if reinforced:
+                logger.info(f"[Memory] 触发关键词回忆加固 {reinforced} 条")
+            else:
+                logger.info("[Memory] 关键词触发但无可加固日记（强度均低于 0.5）")
             return
 
         # 2. 汉字共现加固 (≥ 3 个共同汉字)

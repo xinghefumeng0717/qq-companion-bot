@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # 北京时间固定为 UTC+8（中国不实行夏令时），避免依赖系统时区数据库
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -46,7 +49,10 @@ DEFAULT_PRICE_RATES: Dict[str, "PriceRate"] = {
 @dataclass
 class PricingConfig:
     """DeepSeek 计费（元/百万 tokens），时段按北京时间判定，按模型分别计价"""
-    holidays: List[str] = field(default_factory=list)  # 法定节假日，格式 YYYY-MM-DD
+    holidays: List[str] = field(default_factory=list)
+    # 法定节假日低谷豁免是本项目的保守假设：DeepSeek 官方峰谷规则只规定
+    # 工作日 9:00-12:00 / 14:00-18:00 高峰 + 周末低谷，并无节假日条款；
+    # 填了日期则这些日子强制按低谷计价（宁可少收不多收）。格式 YYYY-MM-DD
     rates: Dict[str, PriceRate] = field(default_factory=lambda: dict(DEFAULT_PRICE_RATES))
 
     def is_peak(self, dt: Optional[datetime] = None) -> bool:
@@ -60,8 +66,16 @@ class PricingConfig:
         return (9 <= now.hour < 12) or (14 <= now.hour < 18)
 
     def rate_for(self, model: str) -> PriceRate:
-        """按模型名取价目，未知模型回退到 deepseek-flash 价格"""
-        return self.rates.get(model, self.rates["deepseek-flash"])
+        """按模型名取价目，未知模型回退到 deepseek-flash 价格（rates 缺键时回退内置默认价）"""
+        rate = self.rates.get(model)
+        if rate is not None:
+            return rate
+        fallback = self.rates.get("deepseek-flash") or DEFAULT_PRICE_RATES["deepseek-flash"]
+        logger.warning(
+            f"[Pricing] 未知模型 '{model}'，计费回退到 deepseek-flash 价目"
+            f"{'（rates 中无该键，使用内置默认价）' if 'deepseek-flash' not in self.rates else ''}"
+        )
+        return fallback
 
 
 @dataclass

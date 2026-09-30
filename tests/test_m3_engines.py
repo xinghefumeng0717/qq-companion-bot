@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from datetime import datetime, timedelta
 
 from companion.affection import (
     AffectionEngine,
@@ -106,7 +107,8 @@ class TestM3Engines(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(diaries), 1)
         self.assertIn("清晰地记得", diaries[0])
 
-        # 回忆加固测试：共同汉字 >= 3 ("星空下散步")
+        # 回忆加固测试：消息含"还记得"，走关键词分支（新语义：只加固强度 >= 0.5 的日记，
+        # 本条 importance=8 且刚写入，强度足够，仍会被加固）
         await memory.reinforce_memories("你还记得那次在星空下散步吗？")
         row = await self.db.fetchone("SELECT recall_count FROM diary WHERE id = 1")
         self.assertGreaterEqual(row["recall_count"], 1)
@@ -117,6 +119,66 @@ class TestM3Engines(unittest.IsolatedAsyncioTestCase):
         facts = await memory.get_all_facts()
         self.assertEqual(len(facts), 1)
         self.assertEqual(facts[0], "机主喜欢喝拿铁")
+
+    async def test_keyword_reinforce_skips_faded_diaries(self):
+        """关键词加固带遗忘闸门：强度 < 0.5 的旧日记不被复活，只有新日记被加固"""
+        memory = MemoryManager(self.db)
+        old_time = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d %H:%M")
+        await self.db.execute(
+            """
+            INSERT INTO diary (content, importance, sentiment, recall_count, created_at, last_recall_at)
+            VALUES ('很久以前的一件小事。', 1, '平静', 0, ?, ?)
+            """,
+            (old_time, old_time),
+        )
+        await self.db.execute(
+            """
+            INSERT INTO diary (content, importance, sentiment, recall_count, created_at, last_recall_at)
+            VALUES ('今天一起喝了新开的拿铁。', 6, '温暖', 0, ?, ?)
+            """,
+            (now_str(), now_str()),
+        )
+
+        await memory.reinforce_memories("想你了")
+
+        rows = await self.db.fetchall("SELECT content, recall_count, last_recall_at FROM diary ORDER BY id")
+        # 200 天前 importance=1 的旧日记强度远低于 0.5，不得复活
+        self.assertEqual(rows[0]["recall_count"], 0)
+        # 新日记被正常加固
+        self.assertEqual(rows[1]["recall_count"], 1)
+
+    async def test_hours_since_last_chat_ignores_assistant_turns(self):
+        """冷落信号只看 user 行：机器人主动消息不得刷新/伪造最近对话时间"""
+        mood = MoodEngine(self.db)
+
+        # ① 库里只有一条 assistant 主动消息 → 视为从未对话，返回 0.0
+        await self.db.execute(
+            """
+            INSERT INTO turns (role, content, proactive, has_image, created_at)
+            VALUES ('assistant', '在吗？', 1, 0, ?)
+            """,
+            (now_str(),),
+        )
+        self.assertEqual(await mood.get_hours_since_last_chat(), 0.0)
+
+        # ② user 消息在 5 小时前，assistant 回复刚发 → 仍按 user 行计 ~5 小时
+        five_hours_ago = (datetime.now() - timedelta(hours=5)).strftime("%Y-%m-%d %H:%M")
+        await self.db.execute(
+            """
+            INSERT INTO turns (role, content, proactive, has_image, created_at)
+            VALUES ('user', '早', 0, 0, ?)
+            """,
+            (five_hours_ago,),
+        )
+        await self.db.execute(
+            """
+            INSERT INTO turns (role, content, proactive, has_image, created_at)
+            VALUES ('assistant', '早呀', 0, 0, ?)
+            """,
+            (now_str(),),
+        )
+        hours = await mood.get_hours_since_last_chat()
+        self.assertAlmostEqual(hours, 5.0, delta=0.1)
 
 
 if __name__ == "__main__":

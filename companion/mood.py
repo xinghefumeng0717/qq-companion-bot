@@ -45,8 +45,10 @@ class MoodEngine:
         await self.db.set_state_json(STATE_KEY_MOOD, state)
 
     async def get_hours_since_last_chat(self) -> float:
-        """获取距工作记忆最后一轮的小时数"""
-        row = await self.db.fetchone("SELECT created_at FROM turns ORDER BY id DESC LIMIT 1")
+        """获取距机主最近一次发言的小时数（只看 user 行，机器人主动消息不计）"""
+        row = await self.db.fetchone(
+            "SELECT created_at FROM turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
+        )
         if not row or not row["created_at"]:
             return 0.0
         last_dt = parse_dt(row["created_at"])

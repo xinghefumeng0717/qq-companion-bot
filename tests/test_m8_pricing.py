@@ -4,7 +4,7 @@ import os
 import unittest
 from datetime import datetime
 
-from companion.config import LLMConfig, PricingConfig, BEIJING_TZ
+from companion.config import LLMConfig, PricingConfig, PriceRate, BEIJING_TZ
 from companion.db import Database
 from companion.gateway import LLMGateway
 
@@ -102,6 +102,30 @@ class TestCostEstimate(unittest.TestCase):
             model="some-future-model",
         )
         self.assertAlmostEqual(cost, 2.0, places=6)
+
+
+class TestRateFor(unittest.TestCase):
+    """rate_for 取价：默认参数即时求值坑回归 + 未知模型回落"""
+
+    def test_rates_without_flash_key_does_not_raise(self):
+        # 旧实现 dict.get(model, self.rates["deepseek-flash"]) 会先求值默认值，
+        # rates 里没有 deepseek-flash 时即使 model 命中也抛 KeyError
+        pro_rate = PriceRate(0.30, 0.15, 9.0, 4.5, 27.0, 13.5)
+        pricing = PricingConfig(rates={"deepseek-v4-pro": pro_rate})
+        rate = pricing.rate_for("deepseek-v4-pro")
+        self.assertIs(rate, pro_rate)
+
+    def test_unknown_model_falls_back_to_builtin_default(self):
+        # rates 缺 deepseek-flash 键时，未知模型回落到内置默认价而非抛异常
+        pro_rate = PriceRate(0.30, 0.15, 9.0, 4.5, 27.0, 13.5)
+        pricing = PricingConfig(rates={"deepseek-v4-pro": pro_rate})
+        rate = pricing.rate_for("some-future-model")
+        self.assertAlmostEqual(rate.cache_miss_peak, 2.0)
+        self.assertAlmostEqual(rate.output_peak, 8.0)
+
+    def test_known_model_no_fallback(self):
+        pricing = PricingConfig()
+        self.assertIs(pricing.rate_for("deepseek-flash"), pricing.rates["deepseek-flash"])
 
 
 class TestOldDbMigration(unittest.IsolatedAsyncioTestCase):
