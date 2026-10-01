@@ -168,7 +168,9 @@ class PromptAssembler:
         chat_rules = "\n  - " + "\n  - ".join(self.persona.chat_style.rules)
 
         # 日常废话流基线（角色卡可选字段 plain_examples）：为空时整块（含标题）不渲染，
-        # 组装结果与旧角色卡逐字节一致
+        # 组装结果与旧角色卡逐字节一致。
+        # 渲染位置在【正确示范】之后、【错误示范（禁止）】之前，自成一段——
+        # 基线是要鼓励的正常语气，不能挂到"禁止"标题下。
         plain_examples_block = ""
         if self.persona.chat_style.plain_examples:
             plain_examples = "\n  - " + "\n  - ".join(self.persona.chat_style.plain_examples)
@@ -192,7 +194,8 @@ class PromptAssembler:
         followups_block = await self._build_followups_block()
         suppressed_block = await self._build_suppressed_block()
 
-        # 安全边界检查 (§13)
+        # 安全边界检查 (§13)：模板里占位符位于 {stage_block} 之后、收尾句之前，
+        # 保证危机/依赖指引排在"最高优先级"阶段规则之后，不被阶段规则压过
         safety_text = SafetyChecker.check_message(user_message)
         safety_block = f"\n【安全边界】\n{safety_text}" if safety_text else ""
 

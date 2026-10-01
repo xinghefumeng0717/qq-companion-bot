@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 import json
 import logging
 import os
@@ -51,6 +52,11 @@ class Database:
         self.db_path = db_path
         self._conn: Optional[aiosqlite.Connection] = None
         self._in_transaction: bool = False
+        # 事务属主任务：只有属主自己的 execute 能免锁复用当前事务，
+        # 其他任务在事务期间必须等锁（否则会被卷进别人的事务、随其回滚而静默丢失）
+        self._txn_owner: Optional[asyncio.Task] = None
+        # 写锁：transaction() 全程持有；普通 execute/executemany 的提交路径也要取锁
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> aiosqlite.Connection:
         if self._conn is None:
@@ -66,38 +72,62 @@ class Database:
             await self._conn.close()
             self._conn = None
 
+    def _owned_by_current_task(self) -> bool:
+        return self._in_transaction and self._txn_owner is asyncio.current_task()
+
     @asynccontextmanager
     async def transaction(self):
-        """异步事务上下文管理器，异常时自动回滚，正常退出时自动提交"""
+        """异步事务上下文管理器，异常/取消时自动回滚，正常退出时自动提交。
+
+        整个事务体持写锁：其他任务的 execute 会等到事务结束再各自提交，
+        不会被并进本事务；同一任务内的嵌套事务直接复用最外层事务。
+        """
         conn = await self.connect()
-        if self._in_transaction:
-            # 嵌套事务中直接复用
+        if self._owned_by_current_task():
+            # 嵌套事务中直接复用（只有属主任务能复用，别的任务必须排队）
             yield conn
             return
 
-        self._in_transaction = True
-        try:
-            yield conn
-            await conn.commit()
-        except Exception:
-            await conn.rollback()
-            raise
-        finally:
-            self._in_transaction = False
+        async with self._write_lock:
+            if self._owned_by_current_task():
+                yield conn
+                return
+
+            self._in_transaction = True
+            self._txn_owner = asyncio.current_task()
+            try:
+                yield conn
+                await conn.commit()
+            except BaseException:
+                # 含 CancelledError：事务体内被取消同样必须回滚，
+                # 否则半个事务会被下一次普通 execute 顺手提交
+                try:
+                    await conn.rollback()
+                except BaseException as rb_err:
+                    logger.error(f"[Database] 事务回滚失败: {rb_err}")
+                raise
+            finally:
+                self._in_transaction = False
+                self._txn_owner = None
 
     async def execute(self, sql: str, parameters: Tuple[Any, ...] | List[Any] = ()) -> aiosqlite.Cursor:
         conn = await self.connect()
-        cursor = await conn.execute(sql, parameters)
-        if not self._in_transaction:
+        if self._owned_by_current_task():
+            # 事务属主的写入由 transaction() 统一提交
+            return await conn.execute(sql, parameters)
+        async with self._write_lock:
+            cursor = await conn.execute(sql, parameters)
             await conn.commit()
-        return cursor
+            return cursor
 
     async def executemany(self, sql: str, seq_of_parameters: List[Tuple[Any, ...]]) -> aiosqlite.Cursor:
         conn = await self.connect()
-        cursor = await conn.executemany(sql, seq_of_parameters)
-        if not self._in_transaction:
+        if self._owned_by_current_task():
+            return await conn.executemany(sql, seq_of_parameters)
+        async with self._write_lock:
+            cursor = await conn.executemany(sql, seq_of_parameters)
             await conn.commit()
-        return cursor
+            return cursor
 
     async def fetchone(self, sql: str, parameters: Tuple[Any, ...] | List[Any] = ()) -> Optional[aiosqlite.Row]:
         conn = await self.connect()

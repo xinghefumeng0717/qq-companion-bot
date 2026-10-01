@@ -89,18 +89,20 @@ class MoodEngine:
 
         # 1. O-U 均值回归 + 噪声（θ = 0.12）
         baseline_v = 2.0 + min(2.0, composite_affection / 50.0)
-        decay = 0.12 * elapsed
-        noise_v = random.gauss(0, 0.5) * math.sqrt(min(decay, 2.0))
-        noise_a = random.gauss(0, 0.4) * math.sqrt(min(decay, 2.0))
+        # decay 上限 1.0：elapsed > 8.33h 时若任由 decay 超过 1，一次更新会把 v 推过基线
+        # 打到反向（隔夜符号反转）。clamp 只影响 > 8.33h 的长间隔，≤ 8.33h 逐点不变。
+        decay = min(1.0, 0.12 * elapsed)
+        noise_v = random.gauss(0, 0.5) * math.sqrt(decay)
+        noise_a = random.gauss(0, 0.4) * math.sqrt(decay)
 
         v += (baseline_v - v) * decay + noise_v
         a += (1.0 - a) * decay + noise_a
 
-        # 2. 情感动量（惯性）
+        # 2. 情感动量（惯性），上限 ±5.0：动量的自激回路会把情绪钉死在极值多轮
         v += m_v * 0.3
         a += m_a * 0.3
-        m_v = m_v * 0.8 + (v - orig_v) * 0.2
-        m_a = m_a * 0.8 + (a - orig_a) * 0.2
+        m_v = max(-5.0, min(5.0, m_v * 0.8 + (v - orig_v) * 0.2))
+        m_a = max(-5.0, min(5.0, m_a * 0.8 + (a - orig_a) * 0.2))
 
         # 3. 安心度极慢回归基线（每天回归 5%）
         # 基线随关系阶段走：3.0 + 阶段×0.6（初识只有 3+ 的"小心翼翼"，深爱才到 8+ 的"完全安心"）

@@ -29,6 +29,9 @@ POSITIVE_SENTIMENTS = {"温暖", "感动", "幸福", "思念", "欢喜"}
 NEGATIVE_SENTIMENTS = {"不安", "伤感"}
 ALL_SENTIMENTS = POSITIVE_SENTIMENTS | NEGATIVE_SENTIMENTS | {"平静", "释然"}
 
+# 记忆"可见/可加固"强度阈值：低于此值的日记视为已淡出，既不被召回注入，也不被加固复活
+RECALL_VISIBLE_THRESHOLD = 0.5
+
 
 DEFAULT_STAGE_NAMES = {
     0: "初识",
@@ -260,7 +263,18 @@ class MemoryManager:
         sentiment = str(data.get("sentiment", "平静")).strip()
         if sentiment not in ALL_SENTIMENTS:
             sentiment = "平静"
-        facts = list(data.get("facts", []))
+        # 只接受字符串项：LLM 把 facts 写成整串时，list() 会把一句话拆成一条条单字事实
+        facts_raw = data.get("facts", [])
+        if not isinstance(facts_raw, list):
+            logger.warning(f"[Memory] 日记 facts 类型异常 ({type(facts_raw).__name__}: {facts_raw!r})，已忽略")
+            facts = []
+        else:
+            facts = []
+            for item in facts_raw:
+                if isinstance(item, str) and item.strip():
+                    facts.append(item.strip())
+                else:
+                    logger.warning(f"[Memory] 丢弃畸形 fact ({type(item).__name__}: {item!r})")
 
         # 事务包裹：日记写入、事实更新与已归档游标推进原子执行
         async with self.db.transaction():
@@ -274,11 +288,9 @@ class MemoryManager:
             )
 
             # 重要性 >= 6 写入语义记忆
-            if importance >= 6 and facts:
+            if importance >= 6:
                 for fact in facts:
-                    fact_str = str(fact).strip()
-                    if fact_str:
-                        await self.add_fact(fact_str)
+                    await self.add_fact(fact)
 
             # 更新已归档游标为本次处理的最新 turn id
             await self.db.execute(
@@ -311,12 +323,25 @@ class MemoryManager:
     # 3. 回忆加固与遗忘曲线 (§8.3)
     # ==========================================
 
+    @staticmethod
+    def calc_row_strength(row: Any, now_dt: datetime, fallback_time: str) -> float:
+        """按遗忘曲线计算一行日记的当前强度（last_recall_at 缺失时退化为 created_at）"""
+        importance = float(row["importance"] or 5)
+        recall_count = int(row["recall_count"] or 0)
+        sentiment = str(row["sentiment"] or "平静")
+        last_recall_str = row["last_recall_at"] or row["created_at"] or fallback_time
+        last_dt = parse_dt(last_recall_str)
+        days = max(0.0, (now_dt - last_dt).total_seconds() / 86400.0) if last_dt else 0.0
+        strength, _ = calc_diary_strength(importance, recall_count, sentiment, days)
+        return strength
+
     async def reinforce_memories(self, user_message: str) -> None:
-        """回忆加固：含‘还记得’/‘想你’时强度 >= 0.5 的日记 +1；与日记有 >= 3 个共同汉字时该条+1"""
+        """回忆加固：含‘还记得’/‘想你’时强度 >= 0.5 的日记 +1；与日记有 >= 3 个共同汉字时该条+1（同样只加固强度 >= 0.5 的日记）"""
         if not user_message:
             return
 
         current_time = now_str()
+        now_dt = datetime.now()
         # 1. 触发关键词加固（只加固当前强度 >= 0.5 的日记，与回忆注入可见阈值一致）
         if "还记得" in user_message or "想你" in user_message:
             rows = await self.db.fetchall(
@@ -325,18 +350,9 @@ class MemoryManager:
                 FROM diary
                 """
             )
-            now_dt = datetime.now()
             reinforced = 0
             for r in rows:
-                importance = float(r["importance"] or 5)
-                recall_count = int(r["recall_count"] or 0)
-                sentiment = str(r["sentiment"] or "平静")
-                last_recall_str = r["last_recall_at"] or r["created_at"] or current_time
-                last_dt = parse_dt(last_recall_str)
-                days = max(0.0, (now_dt - last_dt).total_seconds() / 86400.0) if last_dt else 0.0
-
-                strength, _ = calc_diary_strength(importance, recall_count, sentiment, days)
-                if strength < 0.5:
+                if self.calc_row_strength(r, now_dt, current_time) < RECALL_VISIBLE_THRESHOLD:
                     continue
                 await self.db.execute(
                     "UPDATE diary SET recall_count = recall_count + 1, last_recall_at = ? WHERE id = ?",
@@ -349,20 +365,32 @@ class MemoryManager:
                 logger.info("[Memory] 关键词触发但无可加固日记（强度均低于 0.5）")
             return
 
-        # 2. 汉字共现加固 (≥ 3 个共同汉字)
+        # 2. 汉字共现加固 (≥ 3 个共同汉字)，与关键词分支同语义：已淡出的日记不得被复活
         user_hanzi = set(re.findall(r"[\u4e00-\u9fa5]", user_message))
         if len(user_hanzi) < 3:
             return
 
-        rows = await self.db.fetchall("SELECT id, content FROM diary")
+        rows = await self.db.fetchall(
+            """
+            SELECT id, content, importance, recall_count, sentiment, created_at, last_recall_at
+            FROM diary
+            """
+        )
+        reinforced = 0
         for r in rows:
             diary_hanzi = set(re.findall(r"[\u4e00-\u9fa5]", r["content"]))
             common = user_hanzi.intersection(diary_hanzi)
-            if len(common) >= 3:
-                await self.db.execute(
-                    "UPDATE diary SET recall_count = recall_count + 1, last_recall_at = ? WHERE id = ?",
-                    (current_time, r["id"]),
-                )
+            if len(common) < 3:
+                continue
+            if self.calc_row_strength(r, now_dt, current_time) < RECALL_VISIBLE_THRESHOLD:
+                continue
+            await self.db.execute(
+                "UPDATE diary SET recall_count = recall_count + 1, last_recall_at = ? WHERE id = ?",
+                (current_time, r["id"]),
+            )
+            reinforced += 1
+        if reinforced:
+            logger.info(f"[Memory] 汉字共现回忆加固 {reinforced} 条")
 
     async def get_active_diaries(self, current_valence: float = 2.0) -> List[str]:
         """按遗忘曲线计算记忆强度，返回按强度降序且分级前缀格式化的日记列表（最多 15 条）"""
@@ -389,7 +417,7 @@ class MemoryManager:
 
             strength, tau_effective = calc_diary_strength(importance, recall_count, sentiment, days)
 
-            if strength >= 0.5:
+            if strength >= RECALL_VISIBLE_THRESHOLD:
                 # 情绪一致性加权排序
                 sort_weight = strength
                 if current_valence < 0 and sentiment in NEGATIVE_SENTIMENTS:
