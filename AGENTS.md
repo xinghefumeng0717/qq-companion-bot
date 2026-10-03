@@ -8,7 +8,8 @@
   - 项目根目录（PowerShell/CMD）：`D:\qq-companion`
   - 项目根目录（Git Bash）：`/d/qq-companion`
 - **云服务器**：Ubuntu
-  - IP：`SERVER_IP`，SSH 用户：`ubuntu`
+  - 真实 IP 与本机私有路径见根目录 `local_env.md`（已被 .gitignore 拦截，不入库；本文件随公开仓库分发，故不写明文 IP）
+  - SSH 用户：`ubuntu`
   - 部署路径：`/opt/qq-companion`
   - Python 虚拟环境：`/opt/qq-companion/venv/bin/python`
   - Systemd 服务名：`qq-companion.service`

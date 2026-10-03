@@ -8,6 +8,7 @@ venv/
 # Project private data
 config.toml
 data/
+local_env.md
 
 # Private characters (keep example only)
 characters/*

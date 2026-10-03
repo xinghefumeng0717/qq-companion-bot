@@ -69,11 +69,11 @@
 
 ### 4.2 功能（全部为界面按钮或自动行为）
 
-1. **一键连接/断开**：后台隐藏进程 `ssh -N -L 8080:127.0.0.1:8080 ubuntu@SERVER_IP`（CREATE_NO_WINDOW）；窗口关闭时自动终止该进程；
+1. **一键连接/断开**：后台隐藏进程 `ssh -N -L 8080:127.0.0.1:8080 ubuntu@<你的服务器IP>`（CREATE_NO_WINDOW）；窗口关闭时自动终止该进程；
 2. **三盏状态灯**（每 10 秒轮询）：隧道（本地 8080 端口可连接）/ 看板（http://localhost:8080 可访问）/ 机器人（`/api/status` 返回 bot_alive 且 onebot_connected）；
 3. **打开看板**：默认浏览器打开 `http://localhost:8080`；
-4. **一键拉备份**：`scp ubuntu@SERVER_IP:/opt/qq-companion/data/backup/daily/latest.db "D:\qq-companion\data\backups\"`，完成后显示"上次同步：HH:MM"（持久化到 `data/backups/sync_state.json`）；
-5. **仿真对话**：新开一个 cmd 窗口执行 `ssh -t ubuntu@SERVER_IP "cd /opt/qq-companion && ./venv/bin/python -m companion.chat"`（给用户调试人设用）；
+4. **一键拉备份**：`scp ubuntu@<你的服务器IP>:/opt/qq-companion/data/backup/daily/latest.db "D:\qq-companion\data\backups\"`，完成后显示"上次同步：HH:MM"（持久化到 `data/backups/sync_state.json`）；
+5. **仿真对话**：新开一个 cmd 窗口执行 `ssh -t ubuntu@<你的服务器IP> "cd /opt/qq-companion && ./venv/bin/python -m companion.chat"`（给用户调试人设用）；
 6. **掉线提醒**：轮询发现 `onebot_connected=false` 时，界面红灯 + 弹出提示"青梓掉线了，该去 NapCat 扫码了"（每 10 分钟最多提醒一次）；
 7. **头部信息栏**：从 `/api/status` 读取显示"当前阶段：相识 · 今日费用：¥0.42"；
 8. **快捷链接**：打开项目文件夹、打开 /logs 页。

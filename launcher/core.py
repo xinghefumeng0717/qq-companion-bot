@@ -8,6 +8,10 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+# 远程服务器地址。公开仓库不硬编码真实基础设施 IP：
+# 优先读环境变量 QQC_REMOTE_HOST，未设置时使用占位符（fork 者填自己的服务器即可）。
+DEFAULT_REMOTE_HOST = os.environ.get("QQC_REMOTE_HOST", "ubuntu@<你的服务器IP>")
+
 
 def parse_status_data(api_json: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """解析 /api/status 接口返回的 JSON 数据"""
@@ -70,7 +74,7 @@ def save_sync_state(file_path: str, state: Dict[str, Any]) -> None:
 
 
 def get_backup_command(
-    remote_host: str = "ubuntu@SERVER_IP",
+    remote_host: str = DEFAULT_REMOTE_HOST,
     remote_path: str = "/opt/qq-companion/data/backup/daily/latest.db",
     local_dest: str = r"D:\qq-companion\data\backups\\",
 ) -> List[str]:
@@ -79,7 +83,7 @@ def get_backup_command(
 
 
 def get_ssh_tunnel_command(
-    remote_host: str = "ubuntu@SERVER_IP",
+    remote_host: str = DEFAULT_REMOTE_HOST,
     local_port: int = 8080,
     remote_target: str = "127.0.0.1:8080",
 ) -> List[str]:
@@ -95,7 +99,7 @@ def get_ssh_tunnel_command(
 
 
 def get_simulation_cmd_args(
-    remote_host: str = "ubuntu@SERVER_IP",
+    remote_host: str = DEFAULT_REMOTE_HOST,
 ) -> List[str]:
     """生成新开 cmd 窗口执行仿真对话的命令"""
     remote_cmd = "cd /opt/qq-companion && ./venv/bin/python -m companion.chat"

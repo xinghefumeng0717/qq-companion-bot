@@ -32,6 +32,7 @@ from companion.replier import Replier
 from companion.stickers import StickerManager
 from helpers import make_db, close_db, make_engine_stack
 from launcher.core import (
+    DEFAULT_REMOTE_HOST,
     format_header_info,
     get_backup_command,
     get_simulation_cmd_args,
@@ -423,7 +424,7 @@ class TestTask4LauncherCore(unittest.TestCase):
                 "-o", "StrictHostKeyChecking=accept-new",
                 "-o", "ExitOnForwardFailure=yes",
                 "-o", "ServerAliveInterval=30",
-                "-L", "8080:127.0.0.1:8080", "ubuntu@SERVER_IP",
+                "-L", "8080:127.0.0.1:8080", DEFAULT_REMOTE_HOST,
             ],
         )
 

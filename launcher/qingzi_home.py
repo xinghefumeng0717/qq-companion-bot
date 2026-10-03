@@ -28,6 +28,7 @@ except Exception:
     pass
 
 from launcher.core import (
+    DEFAULT_REMOTE_HOST,
     format_header_info,
     get_backup_command,
     get_simulation_cmd_args,
@@ -325,7 +326,7 @@ class QingziHomeApp:
     def _on_tunnel_ok(self) -> None:
         self.btn_tunnel.configure(text="断开 SSH 隧道", bg="#a54242")
         self.btn_tunnel._default_bg = "#a54242"
-        self._set_status_msg("SSH 端口转发隧道已启动 (8080 -> SERVER_IP)")
+        self._set_status_msg(f"SSH 端口转发隧道已启动 (8080 -> {DEFAULT_REMOTE_HOST})")
 
     def _on_tunnel_failed(self, detail: str) -> None:
         self._stop_tunnel()
