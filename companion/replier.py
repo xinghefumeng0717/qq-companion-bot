@@ -145,6 +145,30 @@ def fit_chunks(chunks: List[Dict[str, Any]], max_chunks: int) -> List[Dict[str, 
     return kept
 
 
+def keep_first_sticker(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """整轮只保留第一个表情包段，多余的表情包段丢弃（FIXES11 任务5 硬上限）。
+
+    提示词里"整轮最多一次"只是软约束，模型照样可能连发几个 [sticker:...]。
+    这里是代码层的防线：无论模型输出几个表情包，实发最多一个，且保留最靠前的那个
+    （位置最贴近她本该发的那句话）。位于表情包解析之后、fit_chunks 之前。
+    """
+    seen_sticker = False
+    dropped: List[str] = []
+    kept: List[Dict[str, Any]] = []
+    for c in chunks:
+        if c["type"] == "sticker":
+            if seen_sticker:
+                dropped.append(str(c.get("desc", "")))
+                continue
+            seen_sticker = True
+        kept.append(c)
+    if dropped:
+        logger.info(
+            f"[Replier] 表情包硬上限：整轮只保留 1 个，丢弃多余 {len(dropped)} 个: {dropped}"
+        )
+    return kept
+
+
 class Replier:
     def __init__(
         self,
@@ -160,7 +184,9 @@ class Replier:
         2. 行首触发方向标签剥离
         3. 旁白剥离
         4. sticker 标记与文字混排拆分
-        5. 句子切段并压到 max_chunks 以内（优先保表情包）
+        5. 句子切段
+        6. 表情包硬上限（整轮只留第一个）
+        7. 压到 max_chunks 以内（优先保表情包）
         返回: (发送消息段列表, 纯文本记录)
 
         落库记录由最终发出的段反推，实发多少就记多少：
@@ -206,7 +232,7 @@ class Replier:
             if txt.strip():
                 segments.append({"type": "text", "content": txt})
 
-        # 5. 展开文字段切句并控制总段数 <= max_chunks
+        # 5. 展开文字段切句
         final_chunks: List[Dict[str, Any]] = []
         for seg in segments:
             if seg["type"] == "sticker":
@@ -216,10 +242,13 @@ class Replier:
                 for sc in sub_chunks:
                     final_chunks.append({"type": "text", "content": sc})
 
-        # 6. 总量控制：超限先丢普通文本段，表情包段优先保留
+        # 6. 表情包硬上限：整轮只保留最靠前的第一个（提示词软约束之外的代码防线）
+        final_chunks = keep_first_sticker(final_chunks)
+
+        # 7. 总量控制：超限先丢普通文本段，表情包段优先保留
         final_chunks = fit_chunks(final_chunks, self.config.max_chunks)
 
-        # 7. 记录与实发一致：每段一条，段间用换行对齐 QQ 上的多条气泡
+        # 8. 记录与实发一致：每段一条，段间用换行对齐 QQ 上的多条气泡
         record_parts = [
             c["content"] if c["type"] == "text" else f"[表情:{c.get('desc', '')}]"
             for c in final_chunks

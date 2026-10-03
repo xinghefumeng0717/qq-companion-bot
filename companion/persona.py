@@ -9,6 +9,27 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+# 法定节假日按"周末节奏"匹配作息时使用的星期索引（5 = 周六，与 daily_routine 的 days 约定一致）
+HOLIDAY_WEEKDAY = 5
+
+
+def is_holiday_date(date_str: str, holidays: Optional[List[str]]) -> bool:
+    """当天（YYYY-MM-DD）是否命中法定节假日列表。holidays 为空时一律 False。
+
+    节假日列表的唯一数据源是 Config.get_holidays()（转发自 [llm.pricing].holidays），
+    这里不做任何日期推算：填了什么就是什么。
+    """
+    if not holidays:
+        return False
+    return date_str in holidays
+
+
+def _hour_in_item(item: "RoutineItem", hour: int) -> bool:
+    """小时是否落在作息区间内（支持 23:00~07:00 这类跨午夜区间）"""
+    if item.start <= item.end:
+        return item.start <= hour < item.end
+    return hour >= item.start or hour < item.end
+
 
 @dataclass
 class ChatStyle:
@@ -139,24 +160,31 @@ class Persona:
         clamped = max(0, min(len(self.stages) - 1, stage_idx))
         return self.stages[clamped]
 
-    def get_current_activity(self, hour: int, weekday: Optional[int] = None) -> str:
-        """根据当前小时查找作息表当前活动。若提供 weekday (0=周一..6=周日)，优先匹配指定星期的作息"""
+    def get_current_activity(
+        self,
+        hour: int,
+        weekday: Optional[int] = None,
+        is_holiday: bool = False,
+    ) -> str:
+        """根据当前小时查找作息表当前活动。若提供 weekday (0=周一..6=周日)，优先匹配指定星期的作息。
+
+        is_holiday=True（当天日期命中 Config.get_holidays()，即法定节假日）时先按周六
+        作息匹配——假期不上课，节奏≈周末；周六作息也覆盖不到时再回落到 weekday 的现有逻辑。
+        """
+        if is_holiday:
+            for item in self.daily_routine:
+                if item.days is not None and HOLIDAY_WEEKDAY in item.days:
+                    if _hour_in_item(item, hour):
+                        return item.activity
+
         if weekday is not None:
             for item in self.daily_routine:
                 if item.days is not None and weekday in item.days:
-                    if item.start <= item.end:
-                        if item.start <= hour < item.end:
-                            return item.activity
-                    else:
-                        if hour >= item.start or hour < item.end:
-                            return item.activity
+                    if _hour_in_item(item, hour):
+                        return item.activity
 
         for item in self.daily_routine:
             if item.days is None or (weekday is not None and weekday in item.days):
-                if item.start <= item.end:
-                    if item.start <= hour < item.end:
-                        return item.activity
-                else:
-                    if hour >= item.start or hour < item.end:
-                        return item.activity
+                if _hour_in_item(item, hour):
+                    return item.activity
         return "在度过属于自己的时间"

@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from companion.affection import AffectionEngine
 from companion.db import Database, TIME_FORMAT, parse_dt, now_str
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
-from companion.persona import Persona
+from companion.persona import Persona, is_holiday_date
 from companion.prompts import (
+    HOLIDAY_PROMPT_NOTE,
     SYSTEM_PROMPT_TEMPLATE,
     get_frustration_description,
     get_mood_description,
@@ -38,6 +39,7 @@ class PromptAssembler:
         memory: MemoryManager,
         stickers: StickerManager,
         db: Database,
+        holidays_provider: Optional[Callable[[], List[str]]] = None,
     ):
         self.persona = persona
         self.affection = affection
@@ -45,7 +47,20 @@ class PromptAssembler:
         self.memory = memory
         self.stickers = stickers
         self.db = db
+        # 节假日唯一数据源是 Config.get_holidays()（转发自 [llm.pricing].holidays）。
+        # 这里只收一个只读取值函数，脚本/测试不传即视为"无节假日"，行为与旧版一致。
+        self._holidays_provider = holidays_provider
         self.last_assembled_prompt: str = ""
+
+    def get_holidays(self) -> List[str]:
+        """取节假日列表（provider 缺失或抛错时退回空列表，绝不因此炸掉组装）"""
+        if self._holidays_provider is None:
+            return []
+        try:
+            return list(self._holidays_provider())
+        except Exception as e:
+            logger.warning(f"[Assembler] 读取节假日列表失败，按无节假日处理: {e}")
+            return []
 
     def _build_role_block(self) -> str:
         try:
@@ -146,6 +161,12 @@ class PromptAssembler:
         weekday_str = WEEKDAYS[now_dt.weekday()]
         current_time_str = f"{now_dt.strftime(TIME_FORMAT)} 星期{weekday_str}"
 
+        # 法定节假日：学校放假不上课（FIXES11 任务2）
+        holidays = self.get_holidays()
+        is_holiday = is_holiday_date(now_dt.strftime("%Y-%m-%d"), holidays)
+        if is_holiday:
+            current_time_str += f"{HOLIDAY_PROMPT_NOTE}"
+
         # 1. 好感度与情绪状态
         aff_state = await self.affection.get_state()
         composite_aff = float(aff_state.get("composite", 30.0))
@@ -181,7 +202,9 @@ class PromptAssembler:
 
         stickers_list = "、".join(self.stickers.get_prompt_sticker_list())
 
-        routine_activity = self.persona.get_current_activity(now_dt.hour, now_dt.weekday())
+        routine_activity = self.persona.get_current_activity(
+            now_dt.hour, now_dt.weekday(), is_holiday=is_holiday
+        )
         mood_desc = get_mood_description(v, a)
         trust_desc = get_trust_description(t)
         frustration_desc = get_frustration_description(frustration)

@@ -65,7 +65,13 @@ class ChatSession:
         self.gateway = LLMGateway(self.config.llm, self.db)
         self.memory = MemoryManager(self.db, self.gateway, self.affection, self.persona)
         self.assembler = PromptAssembler(
-            self.persona, self.affection, self.mood, self.memory, self.stickers, self.db
+            self.persona,
+            self.affection,
+            self.mood,
+            self.memory,
+            self.stickers,
+            self.db,
+            holidays_provider=self.config.get_holidays,
         )
         self.replier = Replier(self.config.reply, self.stickers)
         self.observer = Observer(

@@ -27,10 +27,12 @@ from companion.db import (
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
-from companion.persona import Persona
+from companion.persona import Persona, is_holiday_date
 from companion.prompts import (
+    HOLIDAY_PROMPT_NOTE,
     PROACTIVE_DECISION_PROMPT,
     PROACTIVE_GENERATE_PROMPT,
+    STAGE_GATING_RESTRICTED,
     get_mood_description,
     get_mood_label,
     get_trust_description,
@@ -39,6 +41,50 @@ from companion.replier import Replier
 from companion.stickers import StickerManager
 
 logger = logging.getLogger(__name__)
+
+# 念头题材去重阈值：与 memory.add_fact 的字符 Jaccard 同源，阈值一致
+TOPIC_DEDUP_THRESHOLD = 0.4
+# 阶段 0~2（含）禁止"想他/喜欢/心疼"类依恋念头，与日记门控同源
+RESTRICTED_STAGE_MAX = 2
+
+
+def _char_jaccard(a: str, b: str) -> float:
+    """字符级 Jaccard 相似度（汉字集合，无汉字时退化为小写词/字符集合）。
+
+    与 memory.add_fact / memory.supersede_fact 的实现同源。
+    按 FIXES11 负面清单，本次不跨模块合并这几份拷贝，仅在此保留一份局部实现。
+    """
+    a_chars = set(re.findall(r"[\u4e00-\u9fa5]", a))
+    if not a_chars:
+        a_chars = set(a.lower().split()) or set(a.lower())
+    b_chars = set(re.findall(r"[\u4e00-\u9fa5]", b))
+    if not b_chars:
+        b_chars = set(b.lower().split()) or set(b.lower())
+    union = a_chars | b_chars
+    return len(a_chars & b_chars) / len(union) if union else 0.0
+
+
+def format_recent_chat(turns: List[Dict[str, Any]], max_chars: int = 60) -> str:
+    """把工作记忆格式化成提示词里的"最近的聊天记录"块。
+
+    每行 `MM-DD HH:MM 他/你：内容`，内容截断 max_chars 字；
+    turns 为空（今天还没聊过 / 第一次聊天）时给出兜底说明。
+    """
+    if not turns:
+        return "（今天是你们第一次聊天）"
+    lines = []
+    for t in turns:
+        content = str(t.get("content") or "").strip().replace("\n", " ")
+        if len(content) > max_chars:
+            content = content[:max_chars] + "…"
+        who = "他" if t.get("role") == "user" else "你"
+        created = str(t.get("created_at") or "")
+        try:
+            ts = datetime.strptime(created, TIME_FORMAT).strftime("%m-%d %H:%M")
+        except (TypeError, ValueError):
+            ts = created[:16] or "??"
+        lines.append(f"{ts} {who}：{content}")
+    return "\n".join(lines)
 
 
 class ProactiveScheduler:
@@ -55,6 +101,7 @@ class ProactiveScheduler:
         db: Database,
         send_msg_fn: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
         assembler: Optional[Any] = None,
+        holidays_provider: Optional[Callable[[], List[str]]] = None,
     ):
         self.config = config
         self.persona = persona
@@ -67,8 +114,28 @@ class ProactiveScheduler:
         self.db = db
         self.send_msg_fn = send_msg_fn
         self.assembler = assembler
+        # 节假日唯一数据源 Config.get_holidays()；不传即视为无节假日
+        self._holidays_provider = holidays_provider
         self._running = False
         self._task: Optional[asyncio.Task] = None
+
+    def get_holidays(self) -> List[str]:
+        """取节假日列表（provider 缺失或抛错时退回空列表）"""
+        if self._holidays_provider is None:
+            return []
+        try:
+            return list(self._holidays_provider())
+        except Exception as e:
+            logger.warning(f"[Proactive] 读取节假日列表失败，按无节假日处理: {e}")
+            return []
+
+    def _build_stage_gating(self, stage_idx: int) -> str:
+        """阶段 0~2 注入克制条款（C 分支念头与日记同门控），3+ 注入空串"""
+        try:
+            stage = int(stage_idx)
+        except (TypeError, ValueError):
+            stage = 0
+        return STAGE_GATING_RESTRICTED if stage <= RESTRICTED_STAGE_MAX else ""
 
     def start(self) -> None:
         if not self.config.enabled:
@@ -167,6 +234,8 @@ class ProactiveScheduler:
         """
         now_dt = datetime.now()
         current_time_str = now_dt.strftime(TIME_FORMAT)
+        holidays = self.get_holidays()
+        is_holiday = is_holiday_date(now_dt.strftime("%Y-%m-%d"), holidays)
 
         # ① 到期未完成的待跟进事项
         fu_row = await self.db.fetchone(
@@ -185,9 +254,13 @@ class ProactiveScheduler:
             await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (sup_row["id"],))
             return f"之前想对他说但忍住的话题：{sup_row['content']}"
 
-        # ③ 作息活动 + 当前时间
-        current_activity = self.persona.get_current_activity(now_dt.hour, now_dt.weekday())
+        # ③ 作息活动 + 当前时间（法定节假日按周六作息，学校放假）
+        current_activity = self.persona.get_current_activity(
+            now_dt.hour, now_dt.weekday(), is_holiday=is_holiday
+        )
         if current_activity:
+            if is_holiday:
+                current_activity += f"{HOLIDAY_PROMPT_NOTE}"
             return f"现在是 {now_dt.hour}点多，自己此刻正在：{current_activity}"
 
         # ④ 高强度日记回忆
@@ -199,6 +272,35 @@ class ProactiveScheduler:
         weekday_map = {0: "周一，新的一周开始啦", 4: "周五啦，快要周末了", 5: "周六休息日", 6: "周日时光"}
         date_sense = weekday_map.get(now_dt.weekday(), "平常的一天")
         return f"日期感念：今天好像是{date_sense}"
+
+    async def _is_duplicate_desire(self, topic_hint: str) -> bool:
+        """C 分支念头是否与既有题材重复。
+
+        比对对象：现存 suppressed_desires 全部行 + 最近 3 条已发主动消息
+        （turns 表 proactive=1，即"这个念头她其实已经说出口过了"也算重复）。
+        字符 Jaccard >= 0.4 判为同题材。
+        """
+        candidates: List[str] = []
+        try:
+            rows = await self.db.fetchall("SELECT content FROM suppressed_desires")
+            candidates.extend([str(r["content"]) for r in rows if r["content"]])
+            turns = await self.db.fetchall(
+                "SELECT content FROM turns WHERE proactive = 1 ORDER BY id DESC LIMIT 3"
+            )
+            candidates.extend([str(t["content"]) for t in turns if t["content"]])
+        except Exception as e:
+            # 查不出来就按"不重复"放行：去重是防复读的加分项，不能反过来吞掉念头
+            logger.warning(f"[Proactive] 念头去重比对失败，跳过去重: {e}")
+            return False
+
+        for existing in candidates:
+            sim = _char_jaccard(topic_hint, existing)
+            if sim >= TOPIC_DEDUP_THRESHOLD:
+                logger.info(
+                    f"[Proactive] 念头题材重复命中: 《{topic_hint}》 vs 《{existing}》 相似度 {sim:.2f}"
+                )
+                return True
+        return False
 
     async def trigger_cycle(self) -> None:
         """执行单次主动消息评估周期"""
@@ -223,16 +325,46 @@ class ProactiveScheduler:
         diaries = await self.memory.get_active_diaries()
         recent_diary_str = diaries[0] if diaries else "暂无特别回忆"
 
+        # 一次读取配置，决策/生成/C 分支共用（任务2：别重复读配置）
+        now_dt = datetime.now()
+        holidays = self.get_holidays()
+        is_holiday = is_holiday_date(now_dt.strftime("%Y-%m-%d"), holidays)
+        current_time_str = now_dt.strftime(TIME_FORMAT)
+        if is_holiday:
+            current_time_str += HOLIDAY_PROMPT_NOTE
+        stage_idx = aff_state.get("stage", 0)
+
+        # 任务1：决策层也要看得见最近聊过什么 / 已有定论 / 已忍住的念头，
+        # 否则它会选一个"他上轮刚说过"的话题（E1/E2）或复读同一念头（E5）
+        recent_turns = await self.memory.get_recent_turns(limit=5)
+        recent_chat_brief = format_recent_chat(recent_turns, max_chars=30)
+        facts_all = await self.memory.get_all_facts()
+        known_facts_str = "、".join(facts_all) if facts_all else "无"
+        desire_rows = await self.db.fetchall(
+            "SELECT content FROM suppressed_desires ORDER BY id DESC LIMIT 5"
+        )
+        pending_desires_str = (
+            "、".join([str(r["content"]) for r in desire_rows if r["content"]])
+            if desire_rows
+            else "无"
+        )
+
         decision_user_prompt = PROACTIVE_DECISION_PROMPT.format(
-            current_time=now_dt.strftime(TIME_FORMAT),
-            stage_name=self.persona.get_stage(aff_state.get("stage", 0)).name,
+            current_time=current_time_str,
+            stage_name=self.persona.get_stage(stage_idx).name,
             composite_affection=float(aff_state.get("composite", 30.0)),
             mood_label=get_mood_label(v, a),
             mood_desc=get_mood_description(v, a),
             trust_desc=get_trust_description(t),
-            current_activity=self.persona.get_current_activity(now_dt.hour, now_dt.weekday()),
+            current_activity=self.persona.get_current_activity(
+                now_dt.hour, now_dt.weekday(), is_holiday=is_holiday
+            ),
             pending_followups=fu_str,
             recent_diary=recent_diary_str,
+            recent_chat_brief=recent_chat_brief,
+            known_facts=known_facts_str,
+            pending_desires=pending_desires_str,
+            stage_gating=self._build_stage_gating(stage_idx),
         )
 
         try:
@@ -253,9 +385,14 @@ class ProactiveScheduler:
         decision_reason = str(data.get("reason", ""))
         logger.info(f"[Proactive] 决策结果: choice={choice}, reason={decision_reason}, topic_hint={topic_hint}")
 
-        # C 分支：写入欲言又止池
+        # C 分支：写入欲言又止池（同题材不落库，FIXES11 任务4/E5）
         if choice == "C":
             if topic_hint:
+                if await self._is_duplicate_desire(topic_hint):
+                    logger.info(
+                        f"[Proactive] 欲言又止念头与既有题材重复，跳过入库（念头仍算发生过）: {topic_hint}"
+                    )
+                    return
                 await self.db.execute(
                     "INSERT INTO suppressed_desires (content, created_at) VALUES (?, ?)",
                     (topic_hint, now_str()),
@@ -277,9 +414,16 @@ class ProactiveScheduler:
         material = topic_hint or await self._select_topic_material()
         stickers_list = "、".join(self.stickers.get_prompt_sticker_list())
 
+        # 任务1：生成层注入最近 8 条对话历史。E1 的根因就是这里 0 条历史，
+        # 她对"他已经坐动车到家"完全无知，只能拿永不更新的 facts 硬编
+        gen_turns = await self.memory.get_recent_turns(limit=8)
+        recent_chat_block = format_recent_chat(gen_turns, max_chars=60)
+
         gen_user_prompt = PROACTIVE_GENERATE_PROMPT.format(
             user_address=self.persona.user_address,
+            current_time=current_time_str,
             topic_material=material,
+            recent_chat=recent_chat_block,
             stickers_list=stickers_list,
         )
 

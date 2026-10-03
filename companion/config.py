@@ -260,6 +260,15 @@ class Config:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
 
+    def get_holidays(self) -> List[str]:
+        """法定节假日日期列表（格式 YYYY-MM-DD）。
+
+        唯一数据源是 [llm.pricing].holidays（所有者每年手动填）。计费侧
+        PricingConfig.is_peak 与行为侧（persona 作息、assembler/主动消息提示词）
+        都经由这里取值，本方法只做只读转发，不写回、不做任何日期推算。
+        """
+        return list(self.llm.pricing.holidays)
+
     @classmethod
     def load(cls, config_path: str = "config.toml") -> Config:
         if not os.path.exists(config_path):

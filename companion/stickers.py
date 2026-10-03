@@ -10,7 +10,6 @@ import io
 import json
 import logging
 import os
-import random
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
@@ -122,12 +121,23 @@ class StickerManager:
         except Exception as e:
             logger.error(f"[Stickers] 保存表情包索引失败: {e}")
 
+    # 提示词可用表情包列表的硬上限：当前 42 键远未到顶，超出才截断（确定性：按键名排序取前 N）
+    PROMPT_STICKER_LIST_MAX = 60
+
     def get_prompt_sticker_list(self) -> List[str]:
-        """获取提示词可用的表情包描述词列表（>30 时随机抽 30 个）"""
-        all_keys = list(self._index.keys())
-        if len(all_keys) <= 30:
-            return all_keys
-        return random.sample(all_keys, 30)
+        """获取提示词可用的表情包描述词列表（确定性：按键名排序全量返回）。
+
+        FIXES11 任务5/E6：旧实现键数 >30 时 random.sample 随机抽 30，同一个描述词
+        这轮在列表、下轮消失，模型建立不了稳定手感。这里改为排序后全量返回，
+        保证同一份 index.json 每次给出完全相同的列表；超过
+        PROMPT_STICKER_LIST_MAX 时按同一排序取前 N 个（仍然确定性）。
+        index.json 本身不含 created_at，故截断按键名序而非入库时间序——
+        42 键的现状下该分支不可达，取哪种稳定序对模型手感没有区别。
+        """
+        keys = sorted(self._index.keys())
+        if len(keys) <= self.PROMPT_STICKER_LIST_MAX:
+            return keys
+        return keys[: self.PROMPT_STICKER_LIST_MAX]
 
     def match_sticker(self, word: str) -> Optional[str]:
         """按描述词匹配表情包文件路径（优先精确，失败则模糊子串匹配）

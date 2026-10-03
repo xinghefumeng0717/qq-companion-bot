@@ -210,18 +210,25 @@ class TestReplierChunkLimit(unittest.TestCase):
         self.assertEqual(record, sent)
 
     def test_stickers_survive_truncation_and_record_matches_sent(self):
-        """7 段（含 2 个表情包）超限：sticker 不丢、落库记录与实发一致"""
+        """9 段（含 2 个表情包）超限：最靠前的 sticker 不丢、落库记录与实发一致
+
+        FIXES11 任务5 起 parse_reply 多了"整轮只保留第一个表情包段"的硬上限，
+        故第二条表情包 [sticker:狗头] 在进入 fit_chunks 之前就被丢弃；
+        "sticker 段不被 fit_chunks 挤掉"这条原语义仍然成立（猫猫保住）。
+        """
         replier = _make_replier(max_chunks=5)
         chunks, record = replier.parse_reply(self.RAW_7_SEGMENTS)
 
         self.assertEqual(len(chunks), 5, "总量必须压到 max_chunks 以内")
 
         stickers = [c for c in chunks if c["type"] == "sticker"]
-        self.assertEqual(len(stickers), 2, "超限时不得丢弃表情包段")
-        self.assertEqual([c["desc"] for c in stickers], ["猫猫", "狗头"])
+        self.assertEqual(len(stickers), 1, "整轮只允许一个表情包段")
+        self.assertEqual([c["desc"] for c in stickers], ["猫猫"], "保留最靠前的那个")
 
         texts = [c["content"] for c in chunks if c["type"] == "text"]
-        self.assertEqual(texts, ["第一句", "第二句", "看看这个"], "先丢普通文本段，且不黏合")
+        self.assertEqual(
+            texts, ["第一句", "第二句", "看看这个", "第三句"], "先丢普通文本段，且不黏合"
+        )
         for t in texts:
             self.assertNotIn("\n", t)
 
@@ -231,8 +238,9 @@ class TestReplierChunkLimit(unittest.TestCase):
         )
         self.assertEqual(record, sent, "落库记录必须逐段等于实发内容")
         self.assertIn("[表情:猫猫]", record)
-        self.assertIn("[表情:狗头]", record)
-        self.assertNotIn("第三句", record, "被丢弃的段不得留在记录里")
+        self.assertNotIn("[表情:狗头]", record, "硬上限丢弃的表情包不得留在记录里")
+        self.assertNotIn("第四句", record, "被丢弃的段不得留在记录里")
+        self.assertNotIn("第五句", record, "被丢弃的段不得留在记录里")
 
     def test_fit_chunks_prefers_stickers(self):
         chunks = [

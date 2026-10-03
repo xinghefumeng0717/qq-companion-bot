@@ -136,7 +136,13 @@ class CompanionBot:
         self.memory = MemoryManager(self.db, self.gateway, self.affection, self.persona)
 
         self.assembler = PromptAssembler(
-            self.persona, self.affection, self.mood, self.memory, self.stickers, self.db
+            self.persona,
+            self.affection,
+            self.mood,
+            self.memory,
+            self.stickers,
+            self.db,
+            holidays_provider=config.get_holidays,
         )
         self.replier = Replier(config.reply, self.stickers)
         self.observer = Observer(
@@ -157,6 +163,7 @@ class CompanionBot:
             db=self.db,
             send_msg_fn=self._send_chunk_to_onebot,
             assembler=self.assembler,
+            holidays_provider=config.get_holidays,
         )
 
         self.turn_handler = TurnHandler(

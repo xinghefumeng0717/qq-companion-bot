@@ -82,11 +82,20 @@ class Observer:
             else "（当前无未完成事项）"
         )
 
+        # 既有事实：让观察者知道"什么已经有定论"，updated_facts 才有参照物（FIXES11 任务3）
+        try:
+            known = await self.memory.get_all_facts()
+        except Exception as e:
+            logger.warning(f"[Observer] 读取既有事实失败，按空处理: {e}")
+            known = []
+        known_facts_text = "\n".join([f"- {f}" for f in known]) if known else "（当前无已确立事实）"
+
         user_prompt = OBSERVER_USER_PROMPT.format(
             user_message=user_trunc,
             assistant_reply=bot_trunc,
             image_notice=image_notice,
             pending_followups=pending_text,
+            known_facts=known_facts_text,
         )
 
         messages = [
@@ -179,7 +188,11 @@ class Observer:
                 elif fact:
                     logger.warning(f"[Observer] 丢弃畸形 fact ({type(fact).__name__}: {fact!r})")
 
-        # 4. 待跟进事项入库（逐项校验：坏项丢单项，不丢整轮）
+        # 4. 事实作废/更新通路（FIXES11 任务3）：字段可选，缺省或畸形一律跳过，
+        #    绝不允许因此炸掉整轮结算
+        await self._apply_updated_facts(data.get("updated_facts"))
+
+        # 5. 待跟进事项入库（逐项校验：坏项丢单项，不丢整轮）
         followups = data.get("followups")
         if followups is not None and not isinstance(followups, list):
             logger.warning(f"[Observer] 字段 followups 类型异常 ({type(followups).__name__}: {followups!r})，已忽略")
@@ -211,7 +224,7 @@ class Observer:
                     (topic, remind_str, now_str()),
                 )
 
-        # 5. 标记完成的待跟进事项（精确匹配，不匹配则记日志；非字符串项跳过）
+        # 6. 标记完成的待跟进事项（精确匹配，不匹配则记日志；非字符串项跳过）
         done_topics = data.get("done_followups")
         if done_topics is not None and not isinstance(done_topics, list):
             logger.warning(f"[Observer] 字段 done_followups 类型异常 ({type(done_topics).__name__}: {done_topics!r})，已忽略")
@@ -229,7 +242,7 @@ class Observer:
                     if cur.rowcount == 0:
                         logger.info(f"[Observer] done_followups 未精确匹配到待处理事项: '{dt_str}'")
 
-        # 6. 收藏表情包回路 (§7.4)
+        # 7. 收藏表情包回路 (§7.4)
         if user_image_path and data.get("collect_sticker") is True:
             raw_sticker_name = data.get("sticker_name")
             sticker_name = raw_sticker_name.strip() if isinstance(raw_sticker_name, str) else ""
@@ -242,6 +255,38 @@ class Observer:
             )
 
         return data
+
+    async def _apply_updated_facts(self, raw_updated: Any) -> None:
+        """应用 updated_facts（观察者回传的"某条既有事实已过时"）。
+
+        整个方法被 try/except 包死：字段缺失、非 list、单项畸形、supersede_fact 抛错，
+        都只丢这一项/整段，绝不牵连整轮观察结算（沿用 FIXES10 的 observer 容错原则）。
+        """
+        if raw_updated is None:
+            return
+        if not isinstance(raw_updated, list):
+            logger.warning(
+                f"[Observer] 字段 updated_facts 类型异常 ({type(raw_updated).__name__}: {raw_updated!r})，已忽略"
+            )
+            return
+
+        for item in raw_updated:
+            try:
+                if not isinstance(item, dict):
+                    logger.warning(f"[Observer] 丢弃畸形 updated_fact ({type(item).__name__}: {item!r})")
+                    continue
+                raw_old = item.get("old")
+                raw_new = item.get("new")
+                old_str = raw_old.strip() if isinstance(raw_old, str) else ""
+                new_str = raw_new.strip() if isinstance(raw_new, str) else ""
+                if not old_str or not new_str:
+                    logger.warning(
+                        f"[Observer] 丢弃残缺 updated_fact (old={raw_old!r}, new={raw_new!r})"
+                    )
+                    continue
+                await self.memory.supersede_fact(old_str, new_str)
+            except Exception as e:
+                logger.warning(f"[Observer] 应用 updated_fact 失败，已跳过该项: {e}")
 
     async def _call_observer_llm(self, messages: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], bool]:
         """调用模型并容错解析 JSON。返回 (结算数据, 是否走了失败兜底)。
@@ -257,6 +302,7 @@ class Observer:
             "moments": [],
             "mood_impact": {"v": 0.0, "a": 0.0, "trust": 0.0},
             "facts": [],
+            "updated_facts": [],
             "followups": [],
             "done_followups": [],
             "collect_sticker": False,

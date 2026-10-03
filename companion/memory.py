@@ -491,3 +491,51 @@ class MemoryManager:
         """获取所有关于机主的事实"""
         rows = await self.db.fetchall("SELECT content FROM facts ORDER BY id ASC")
         return [r["content"] for r in rows]
+
+    async def supersede_fact(self, old_content: str, new_content: str) -> bool:
+        """用新事实作废旧事实（"国庆期间打算坐动车回家" → "国庆已坐动车到家"）。
+
+        匹配算法与 add_fact 同源（字符 Jaccard，此处为模块内第三份拷贝，
+        按 FIXES11 负面清单不重构合并），但阈值放宽到 >= 0.4：观察者回传的 old
+        常有表述漂移，add_fact 的 0.6 命中不了。
+        命中：同事务内删旧行 + 走 add_fact 插新事实，返回 True；
+        未命中：只插新事实（等价 add_fact），返回 False。
+        """
+        new_content = (new_content or "").strip()
+        if not new_content:
+            logger.warning("[Memory] supersede_fact 收到空的新事实，已忽略")
+            return False
+
+        old_content = (old_content or "").strip()
+        old_chars = set(re.findall(r"[\u4e00-\u9fa5]", old_content))
+        if not old_chars:
+            old_chars = set(old_content.lower().split()) or set(old_content.lower())
+
+        rows = await self.db.fetchall("SELECT id, content FROM facts")
+        best_sim = 0.0
+        best_fact = ""
+        best_id = None
+        for r in rows:
+            exist_content = r["content"]
+            exist_chars = set(re.findall(r"[\u4e00-\u9fa5]", exist_content))
+            if not exist_chars:
+                exist_chars = set(exist_content.lower().split()) or set(exist_content.lower())
+            union = old_chars | exist_chars
+            sim = len(old_chars & exist_chars) / len(union) if union else 0.0
+            if sim > best_sim:
+                best_sim = sim
+                best_fact = exist_content
+                best_id = r["id"]
+
+        if best_id is None or best_sim < 0.4:
+            await self.add_fact(new_content)
+            logger.info(f"[Memory] 事实作废未命中(相似度 {best_sim:.2f} < 0.4)，仅新增: 《{new_content}》")
+            return False
+
+        async with self.db.transaction():
+            await self.db.execute("DELETE FROM facts WHERE id = ?", (best_id,))
+            await self.add_fact(new_content)
+        logger.info(
+            f"[Memory] 事实作废命中: 《{best_fact}》(相似度 {best_sim:.2f}) → 《{new_content}》"
+        )
+        return True
