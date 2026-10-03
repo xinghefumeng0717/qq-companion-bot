@@ -325,8 +325,7 @@ class ProactiveScheduler:
         diaries = await self.memory.get_active_diaries()
         recent_diary_str = diaries[0] if diaries else "暂无特别回忆"
 
-        # 一次读取配置，决策/生成/C 分支共用（任务2：别重复读配置）
-        now_dt = datetime.now()
+        # 一次读取配置，决策/生成/C 分支共用（任务2：别重复读配置；now_dt 沿用上方闸门后那次）
         holidays = self.get_holidays()
         is_holiday = is_holiday_date(now_dt.strftime("%Y-%m-%d"), holidays)
         current_time_str = now_dt.strftime(TIME_FORMAT)
