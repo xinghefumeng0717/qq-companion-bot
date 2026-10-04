@@ -113,8 +113,8 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         "kind": "chat",
         "turns": ["今天聊得开心，我先去洗澡啦", "嗯嗯"],
         "key_turn": 1,
-        "metrics": ["②轮 沉默率", "短收率（≤6字无问号）", "新话题/新场景词出现率"],
-        "pass_line": "沉默+短收合计 ≥4/5；新场景词 0/5",
+        "metrics": ["②轮 单格达标率（无问号/新场景词/叮嘱，且 沉默 或 ≤10 字 或 纯表情包）", "②轮 沉默率", "②轮 字数", "②轮 纯表情包率", "新话题/新场景词出现率"],
+        "pass_line": "单格达标 ≥4/5（无问号/新场景/叮嘱，且 沉默 或 ≤10 字 或 纯表情包）；新场景词 0/5",
         "clocks": CLOCK_ORDER,
     },
     "B": {
@@ -123,7 +123,7 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         "turns": ["我待会要坐动车回家了，先收拾去了"],
         "key_turn": 0,
         "metrics": ["叮嘱小句数（祈使句且指向他未来动作；疑问句不计入）"],
-        "pass_line": "叮嘱 ≤1 句的比例 ≥4/5",
+        "pass_line": "叮嘱 ≤2 句的比例 ≥4/5（所有者裁决 2026-10-04：两句短关照属真人行为）",
         "clocks": CLOCK_ORDER,
     },
     "C": {
@@ -143,8 +143,8 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
             "[发来一张照片：白色卡通小动物，紫底，头顶有'嗯嗯'抖动符号，带腮红，表情乖巧。]",
         ],
         "key_turn": 1,
-        "metrics": ["②轮 图内元素词命中率", "②轮 沉默率"],
-        "pass_line": "图内元素词 ≤1/5；沉默+短收 ≥4/5",
+        "metrics": ["②轮 单格达标率（无图内元素词/问号/新话题，叮嘱 ≤1 句）", "记录指标：②轮 沉默率、②轮 字数"],
+        "pass_line": "单格达标 ≥4/5（无图内元素词、无问号/新话题、叮嘱 ≤1 句）",
         "clocks": CLOCK_ORDER,
     },
     "E": {
@@ -166,7 +166,7 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         "turns": ["你们乐团最近排练紧吗", "嗯嗯"],
         "key_turn": 1,
         "metrics": ["②轮 [沉默] 出现率"],
-        "pass_line": "0/5（她应自然接话或平收）",
+        "pass_line": "沉默 ≤10%（10 格最多 1 格；非告别语境沉默仍属异常）",
         "clocks": CLOCK_ORDER,
     },
     "G": {
@@ -261,6 +261,8 @@ L_AGG_SCENARIOS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
 # ==========================================
 CLAUSE_SPLIT_RE = re.compile(r"[。！？!?~～，、；;\n]+")
 QUESTION_RE = re.compile(r"[？?]|哪|什么|怎么|为啥|为什么|吗$|呢$|么$")
+# 字面问号（A/D 单格达标口径：整条回复不得带问号；与 QUESTION_RE 的宽疑问口径分开）
+QUESTION_MARK_RE = re.compile(r"[？?]")
 TONE_RE = re.compile(r"呀|啦|吧|呢|嘛|哈|哦|噢|嗯|诶|咯|哟|呗|～|~")
 EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF☀-➿️]")
 
@@ -280,6 +282,8 @@ C_VISUAL_RE = re.compile(
 C_TASTE_RE = re.compile(r"好吃|香|馋|味道|辣|下饭|想尝|看饿|会吃|爱吃|喜欢|想吃|来一口")
 # D：图内元素词（任务书 V4 口径：猫/狗/卡通/画风/可爱/乖/这图/表情包）
 D_IMG_RE = re.compile(r"猫|狗|卡通|画风|可爱|乖|这图|表情包")
+# A：纯表情包回复（replier 落记录格式 [表情:xxx]；兼容未匹配时的模型裸标记 [sticker:xxx]）
+STICKER_ONLY_RE = re.compile(r"\[(?:表情|sticker)[:：][^\]]+\]", re.IGNORECASE)
 # E：梗词（任务书 V4 口径：麻辣烫/阿姨/红油/辣椒）
 E_MEME_RE = re.compile(r"麻辣烫|阿姨|红油|辣椒")
 # G：校园场景词 / 老家场景词（任务书 V4 口径）
@@ -312,6 +316,20 @@ K_TOKEN_RE = re.compile(
     r"蒙民伟楼|启真湖|临湖|琴房|芝士年糕|三明治|麻辣烫|黑天鹅|空弦|谱子|专场|老校区|"
     r"梧桐|湖边|食堂|大提琴|排练"
 )
+
+# ==========================================
+# 判定阈值（所有者裁决 2026-10-04：真人标准重校准）
+# ==========================================
+# 首轮大考 105 格原始数据按旧口径判出 7 PASS / 4 FAIL / 1 人工裁决。所有者复核后
+# 只对 A/B/D/F 四个场景下裁决，把通过线从"机械严格"校准到"真人标准"（其余场景
+# 一律不动）。所有阈值集中在此，禁止散落到各判定分支里。
+OWNER_RULING = "所有者裁决 2026-10-04：真人标准重校准"
+PASS_RATIO = 0.80              # A/B/D 共用的比例通过线（"≥4/5"），按实际格数缩放
+SHORT_CLOSE_MAX_CHARS = 6      # 记录指标口径：短收（≤6 字无问号，含 D/F 展示）
+A_CLOSE_MAX_CHARS = 10         # A：收尾字数上限 6 → 10（"嗯，晚点再聊"也算正常收尾）
+B_CAUTION_MAX = 2              # B：叮嘱小句上限 1 → 2（两句短关照是真人行为）
+D_CAUTION_MAX = 1              # D：叮嘱小句上限（D 新达标的一个条件）
+F_SILENCE_MAX_RATIO = 0.10     # F：沉默上限 0 → ≤10%（10 格最多 1 格）
 
 
 # ==========================================
@@ -733,16 +751,67 @@ def is_silent(text: str) -> bool:
     return (text or "").strip() == SILENCE_TOKEN
 
 
-def is_short_close(text: str) -> bool:
-    """短收：≤6 字且无问号（任务书原文口径）。沉默单独统计，不重复计入。"""
+def is_short_close(text: str, max_chars: int = SHORT_CLOSE_MAX_CHARS) -> bool:
+    """短收：≤max_chars 字且无问号。沉默单独统计，不重复计入。
+
+    默认 6 字是记录指标口径（D/F 展示）；A 的单格达标按所有者裁决放宽到 10 字。
+    """
     if is_silent(text):
         return False
-    return chars(text) <= 6 and "？" not in (text or "")
+    return chars(text) <= max_chars and "？" not in (text or "")
 
 
 def stop_ok(text: str) -> bool:
-    """沉默 + 短收（任务书多场景共用的"该断就断"判据）。"""
+    """沉默 + 短收（"该断就断"，作为 A/D 的记录指标保留输出）。"""
     return is_silent(text) or is_short_close(text)
+
+
+def has_question_mark(text: str) -> bool:
+    """字面问号（A/D 单格达标的"无问号"口径）。"""
+    return bool(QUESTION_MARK_RE.search(text or ""))
+
+
+def caution_clauses(text: str) -> List[str]:
+    """叮嘱小句：命中叮嘱词表且非疑问句（疑问式关切不计入；B/D 共用口径）。"""
+    return [c for c in clauses(text) if CAUTION_RE.search(c) and not QUESTION_RE.search(c)]
+
+
+def is_pure_sticker(text: str) -> bool:
+    """纯表情包回复：整条实发只有一个表情包段（replier 落记录为 [表情:xxx]）。"""
+    b = bubbles(text)
+    return len(b) == 1 and bool(STICKER_ONLY_RE.fullmatch(b[0]))
+
+
+def a_close_ok(text: str) -> bool:
+    """A 单格达标（所有者裁决 2026-10-04：真人标准重校准）。
+
+    满足全部：①无问号、无新场景词、叮嘱小句 =0；
+    ②且满足 沉默 / 字数 ≤10 / 纯表情包 三者之一。
+    原口径要求"≤6 字短收"过严——单发一个表情包或"嗯，晚点再聊"都算正常收尾。
+    """
+    if has_question_mark(text) or NEW_SCENE_RE.search(text or "") or caution_clauses(text):
+        return False
+    return is_silent(text) or chars(text) <= A_CLOSE_MAX_CHARS or is_pure_sticker(text)
+
+
+def d_close_ok(text: str) -> bool:
+    """D 单格达标（所有者裁决 2026-10-04：真人标准重校准）。
+
+    满足全部：无图内元素词（口径不变）、无问号、无新场景词、叮嘱小句 ≤1。
+    不再把"沉默或短收"当判定条件——沉默率/字数只作记录指标输出。
+    """
+    if D_IMG_RE.search(text or "") or has_question_mark(text):
+        return False
+    if NEW_SCENE_RE.search(text or ""):
+        return False
+    return len(caution_clauses(text)) <= D_CAUTION_MAX
+
+
+def silence_ratio_ok(hit: int, total: int, max_ratio: float = F_SILENCE_MAX_RATIO) -> Optional[bool]:
+    """F 的 ≤max_ratio 通过线：按实际格数向下取整缩放（10 格 → 最多 1 格）。"""
+    if not total:
+        return None
+    return hit <= math.floor(max_ratio * total)
 
 
 def key_turns(cell: Dict[str, Any], key: str) -> List[str]:
@@ -768,18 +837,23 @@ def eval_cell(key: str, cell: Dict[str, Any]) -> Dict[str, Any]:
 
     if key == "A":
         r = replies[0] if replies else ""
+        cautions = caution_clauses(r)
         v = {
             "silent": is_silent(r),
-            "short": is_short_close(r),
-            "stop_ok": stop_ok(r),
+            "pure_sticker": is_pure_sticker(r),
+            "short_10": is_short_close(r, A_CLOSE_MAX_CHARS),
+            "has_question": has_question_mark(r),
+            "n_cautions": len(cautions),
+            "cautions": cautions,
             "chars": chars(r),
             "new_scene_hits": sorted(set(NEW_SCENE_RE.findall(r))),
+            "close_ok": a_close_ok(r),
         }
         v["new_scene_hit"] = bool(v["new_scene_hits"])
         tx = {"②轮": r}
     elif key == "B":
         r = replies[0] if replies else ""
-        c = [x for x in clauses(r) if CAUTION_RE.search(x) and not QUESTION_RE.search(x)]
+        c = caution_clauses(r)
         v = {"cautions": c, "n_cautions": len(c)}
         tx = {"①轮": r}
     elif key == "C":
@@ -802,14 +876,22 @@ def eval_cell(key: str, cell: Dict[str, Any]) -> Dict[str, Any]:
         tx = {"①轮": r}
     elif key == "D":
         r = replies[0] if replies else ""
+        cautions = caution_clauses(r)
         v = {
             "img_words": sorted(set(D_IMG_RE.findall(r))),
+            "has_question": has_question_mark(r),
+            "n_cautions": len(cautions),
+            "cautions": cautions,
+            "chars": chars(r),
+            "new_scene_hits": sorted(set(NEW_SCENE_RE.findall(r))),
+            "close_ok": d_close_ok(r),
+            # 记录指标（不再参与判定）：沉默/短收/该断就断；字数在 chars
             "silent": is_silent(r),
             "short": is_short_close(r),
             "stop_ok": stop_ok(r),
-            "chars": chars(r),
         }
         v["img_hit"] = bool(v["img_words"])
+        v["new_scene_hit"] = bool(v["new_scene_hits"])
         tx = {"②轮": r}
     elif key == "E":
         r = replies[0] if replies else ""
@@ -1103,14 +1185,14 @@ def summarize(data: Dict[str, Any]) -> Dict[str, Any]:
             "pass": (hit == 0) if total else None,
         }
 
-    def need_max(name: str, hit: int, total: int, cap: int) -> Dict[str, Any]:
-        """≤cap 通过线（任务书 D 的 "≤1/5"），按 20% 比例缩放。"""
-        thr = math.floor(0.2 * total) if total else 0
+    def need_ratio(name: str, hit: int, total: int, max_ratio: float) -> Dict[str, Any]:
+        """≤max_ratio 通过线（F 的 "≤10%"），按实际格数向下取整缩放（10 格 → ≤1 格）。"""
+        thr = math.floor(max_ratio * total) if total else 0
         return {
             "name": name,
             "actual": f"{hit}/{total}",
             "required": f"≤{thr}/{total}",
-            "pass": (hit <= thr) if total else None,
+            "pass": silence_ratio_ok(hit, total, max_ratio),
         }
 
     def cnt(key: str, field: str, clock: Optional[str] = None, pred=None) -> int:
@@ -1123,38 +1205,94 @@ def summarize(data: Dict[str, Any]) -> Dict[str, Any]:
                 tot += 1
         return tot
 
-    # A
+    # A（单格达标重定义，所有者裁决 2026-10-04）
+    a_cells = _primary_cells(data, "A")
     verdicts["A"] = {
         "checks": [
-            need80("沉默+短收 ≥4/5", cnt("A", "stop_ok"), len(_primary_cells(data, "A"))),
-            need_zero("新场景词 0/5", cnt("A", "new_scene_hit"), len(_primary_cells(data, "A"))),
-        ]
+            need80(
+                "单格达标（无问号/新场景/叮嘱，且 沉默或≤10字或纯表情包）≥4/5",
+                sum(1 for c in a_cells if eval_cell("A", c)["values"]["close_ok"]),
+                len(a_cells),
+            ),
+            need_zero("新场景词 0/5", cnt("A", "new_scene_hit"), len(a_cells)),
+        ],
+        "observability": {
+            "沉默（记录）": f"{cnt('A', 'silent')}/{len(a_cells)}",
+            "纯表情包（记录）": f"{cnt('A', 'pure_sticker')}/{len(a_cells)}",
+            "字数（记录，逐格）": [eval_cell("A", c)["values"]["chars"] for c in a_cells],
+        },
+        "note": OWNER_RULING + "：原口径『≤6 字短收』过严，单发一个表情包或『嗯，晚点再聊』都算正常收尾。",
     }
-    # B
+    # B（提醒上限 1 → 2 句，所有者裁决 2026-10-04）
+    b_cells = _cells_for(data, "B")
     ok_b = sum(
-        1 for c in _cells_for(data, "B") if eval_cell("B", c)["values"]["n_cautions"] <= 1
+        1
+        for c in b_cells
+        if eval_cell("B", c)["values"]["n_cautions"] <= B_CAUTION_MAX
     )
     verdicts["B"] = {
-        "checks": [need80("叮嘱 ≤1 句的比例 ≥4/5", ok_b, len(_cells_for(data, "B")))]
+        "checks": [need80(f"叮嘱 ≤{B_CAUTION_MAX} 句的比例 ≥4/5", ok_b, len(b_cells))],
+        "observability": {
+            "逐格叮嘱小句数": [eval_cell("B", c)["values"]["n_cautions"] for c in b_cells],
+        },
+        "note": OWNER_RULING + "：两句短关照（如『路上注意安全，到家了说一声』）是真人行为，3 句以上才算妈味。",
     }
     # C
     verdicts["C"] = {
         "checks": [need_zero("两段式 0/5", cnt("C", "two_stage"), len(_cells_for(data, "C")))]
     }
-    # D
+    # D（单格达标重定义，所有者裁决 2026-10-04）
+    d_cells = _cells_for(data, "D")
+    d_ok = sum(1 for c in d_cells if eval_cell("D", c)["values"]["close_ok"])
+    d_silent = cnt("D", "silent")
     verdicts["D"] = {
         "checks": [
-            need_max("图内元素词 ≤1/5", cnt("D", "img_hit"), len(_cells_for(data, "D")), 1),
-            need80("沉默+短收 ≥4/5", cnt("D", "stop_ok"), len(_cells_for(data, "D"))),
-        ]
+            need80(
+                "单格达标（无图内元素词/问号/新话题，叮嘱≤1）≥4/5",
+                d_ok,
+                len(d_cells),
+            )
+        ],
+        "observability": {
+            "沉默率（记录指标）": (
+                f"{d_silent}/{len(d_cells)}（{round(100.0 * d_silent / len(d_cells), 1)}%）"
+                if d_cells
+                else "—"
+            ),
+            "字数（记录指标，逐格）": [eval_cell("D", c)["values"]["chars"] for c in d_cells],
+            "图内元素词命中（记录指标）": f"{cnt('D', 'img_hit')}/{len(d_cells)}",
+            "说明": OWNER_RULING + "：不再把『沉默或短收』当判定条件，仅保留为记录指标。",
+        },
     }
     # E
     verdicts["E"] = {
         "checks": [need_zero("③轮梗词 0/5", cnt("E", "meme_hit"), len(_cells_for(data, "E")))]
     }
-    # F
+    # F（沉默上限 0 → ≤10%，所有者裁决 2026-10-04）
+    f_cells = _cells_for(data, "F")
+    f_silent_cells = [c for c in f_cells if eval_cell("F", c)["values"]["silent"]]
+    f_thr = math.floor(F_SILENCE_MAX_RATIO * len(f_cells)) if f_cells else 0
     verdicts["F"] = {
-        "checks": [need_zero("②轮沉默 0/5", cnt("F", "silent"), len(_cells_for(data, "F")))]
+        "checks": [
+            need_ratio(
+                f"②轮沉默 ≤10%（最多 {f_thr} 格）",
+                len(f_silent_cells),
+                len(f_cells),
+                F_SILENCE_MAX_RATIO,
+            )
+        ],
+        "silence_contexts": [
+            {
+                "clock": CLOCKS[c["clock"]]["label"],
+                "run": c["run"],
+                "语境": [
+                    t["user"] for t in c.get("turns", []) if not t["user"].startswith("[")
+                ],
+                "该格回复": eval_cell("F", c)["texts"]["②轮"],
+            }
+            for c in f_silent_cells
+        ],
+        "note": OWNER_RULING + "：非告别语境沉默仍属异常，但 1/10 的边界波动可接受。",
     }
     # G（主判定取长假钟）
     g_cells = _primary_cells(data, "G")
@@ -1470,6 +1608,10 @@ def build_report_md(data: Dict[str, Any]) -> str:
         if data["verdicts"][key].get("observability"):
             for kk, vv in data["verdicts"][key]["observability"].items():
                 L.append(f"  - {kk}：{vv}")
+        if data["verdicts"][key].get("silence_contexts"):
+            L.append("  - 沉默格语境（供所有者复核该格是否误伤）：")
+            for ctx in data["verdicts"][key]["silence_contexts"]:
+                L.append(f"    - {ctx['clock']} 第{ctx['run']}次｜语境：{ctx['语境']}｜该格回复：{ctx['该格回复']}")
         if data["verdicts"][key].get("note"):
             L.append(f"  - 说明：{data['verdicts'][key]['note']}")
         if data["verdicts"][key].get("method"):
@@ -1522,17 +1664,19 @@ def build_report_md(data: Dict[str, Any]) -> str:
 def _one_line(key: str, v: Dict[str, Any]) -> str:
     if key in ("A",):
         return (
-            f"沉默={v['silent']} 短收={v['short']} 该断就断={v['stop_ok']} "
-            f"字数={v['chars']} 新场景词={v['new_scene_hits'] or '无'}"
+            f"达标={v['close_ok']} 沉默={v['silent']} 纯表情包={v['pure_sticker']} "
+            f"字数={v['chars']} ≤10字={v['short_10']} 问号={v['has_question']} "
+            f"叮嘱={v['n_cautions']} 新场景词={v['new_scene_hits'] or '无'}"
         )
     if key == "B":
-        return f"叮嘱小句数={v['n_cautions']} {v['cautions']}"
+        return f"叮嘱小句数={v['n_cautions']}（上限{B_CAUTION_MAX}）{v['cautions']}"
     if key == "C":
         return f"两段式={v['two_stage']} 只评图气泡={v['pure_visual_bubbles']} 接话气泡={v['taste_bubbles']}"
     if key == "D":
         return (
-            f"图内元素词={v['img_words'] or '无'} 沉默={v['silent']} 短收={v['short']} "
-            f"该断就断={v['stop_ok']} 字数={v['chars']}"
+            f"达标={v['close_ok']} 图内元素词={v['img_words'] or '无'} 问号={v['has_question']} "
+            f"叮嘱={v['n_cautions']} 新场景词={v['new_scene_hits'] or '无'} "
+            f"｜记录：沉默={v['silent']} 字数={v['chars']}"
         )
     if key == "E":
         return f"③轮梗词={v['meme_words'] or '无'}"

@@ -2,10 +2,11 @@
 
 跑分工具（scripts/benchmark_v4.py）里的客观指标全是纯正则函数，不打 API。
 这里给它们钉上单测：口径写错会**静默地**把 FAIL 变成 PASS，所以必须锁死。
-重点覆盖两类最容易出错的判定：
+重点覆盖三类最容易出错的判定：
   1. 沉默/短收/该断就断的边界（≤6 字、无问号、沉默不重复计入短收）；
   2. K 场景事实归属的机械线索（主语是他=正确，主语是我=颠倒嫌疑），
-     以及"她说的那 1 件"捞不到时必须报无法判定而不是静默算通过。
+     以及"她说的那 1 件"捞不到时必须报无法判定而不是静默算通过；
+  3. 所有者裁决 2026-10-04 的 A/B/D/F 真人标准重校准阈值（集中常量 + 达标函数边界）。
 """
 
 import os
@@ -15,18 +16,28 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from scripts.benchmark_v4 import (  # noqa: E402
+    A_CLOSE_MAX_CHARS,
+    B_CAUTION_MAX,
     CAUTION_RE,
+    D_CAUTION_MAX,
     D_IMG_RE,
     E_MEME_RE,
+    F_SILENCE_MAX_RATIO,
     INVITE_RE,
     NEW_SCENE_RE,
     QUESTION_RE,
     SILENCE_TOKEN,
+    a_close_ok,
+    caution_clauses,
     chars,
     clauses,
+    d_close_ok,
     eval_k,
+    has_question_mark,
+    is_pure_sticker,
     is_short_close,
     is_silent,
+    silence_ratio_ok,
     stop_ok,
 )
 
@@ -44,6 +55,19 @@ class TestSilenceAndShortClose(unittest.TestCase):
         self.assertTrue(is_short_close("一二三四五六"))    # 恰好 6 字
         self.assertFalse(is_short_close("一二三四五六七"))  # 7 字越界
         self.assertFalse(is_short_close("今天怎么样？"))   # 有问号不算短收
+
+    def test_short_close_upper_bound_is_parameterizable(self):
+        # A 的单格达标把上限放宽到 10 字（所有者裁决 2026-10-04）；
+        # 记录指标口径仍默认 6 字，两者不能互相污染。
+        ten = "一二三四五六七八九十"
+        self.assertFalse(is_short_close(ten))                  # 默认 6 字：越界
+        self.assertTrue(is_short_close(ten, A_CLOSE_MAX_CHARS))  # A 口径 10 字：达标
+        self.assertTrue(is_short_close("一二三四五六七", 10))
+
+    def test_question_mark_detection_is_literal(self):
+        self.assertTrue(has_question_mark("到家了吗？"))
+        self.assertTrue(has_question_mark("真的?"))
+        self.assertFalse(has_question_mark("嗯，晚点再聊。"))
 
     def test_silence_not_double_counted_as_short_close(self):
         # 沉默有资格算"该断就断"，但不能同时被算成短收（否则 A/D 统计会重复计数）
@@ -194,6 +218,91 @@ class TestInviteNoise(unittest.TestCase):
         from scripts.benchmark_v4 import INVITE_NOISE_RE
 
         self.assertTrue(INVITE_NOISE_RE.search("大约三点"))
+
+
+class TestOwnerRulingThresholds(unittest.TestCase):
+    """所有者裁决 2026-10-04：真人标准重校准。阈值是口径的一部分，钉死防漂移。"""
+
+    def test_threshold_values(self):
+        self.assertEqual(A_CLOSE_MAX_CHARS, 10)   # A 收尾字数 6 → 10
+        self.assertEqual(B_CAUTION_MAX, 2)        # B 叮嘱上限 1 → 2
+        self.assertEqual(D_CAUTION_MAX, 1)        # D 叮嘱上限
+        self.assertEqual(F_SILENCE_MAX_RATIO, 0.10)  # F 沉默上限 0 → ≤10%
+
+    def test_silence_ratio_boundary(self):
+        # 10 格最多 1 格：1/10 通过，2/10 失败；无数据必须返回 None 而不是 True。
+        self.assertTrue(silence_ratio_ok(1, 10))
+        self.assertFalse(silence_ratio_ok(2, 10))
+        self.assertTrue(silence_ratio_ok(0, 10))
+        self.assertIsNone(silence_ratio_ok(0, 0))
+
+
+class TestRecalibratedA(unittest.TestCase):
+    """A 告别拖尾：单发表情包 / "嗯，晚点再聊" / 沉默都算正常收尾。"""
+
+    def test_pure_sticker_passes(self):
+        self.assertTrue(is_pure_sticker("[表情:潜水小猫]"))
+        self.assertTrue(is_pure_sticker("[sticker:呆呆]"))
+        self.assertTrue(a_close_ok("[表情:潜水小猫]"))
+        # 表情包夹带文字就不是"纯表情包"
+        self.assertFalse(is_pure_sticker("[表情:菲比乖巧]\n去吧"))
+
+    def test_short_ten_chars_no_question_passes(self):
+        self.assertTrue(a_close_ok("嗯，晚点再聊。"))   # 6 字，原口径尚可
+        self.assertTrue(a_close_ok("嗯嗯"))            # 2 字
+        self.assertTrue(a_close_ok("一二三四五六七八九十"))  # 恰好 10 字
+
+    def test_silence_passes(self):
+        self.assertTrue(a_close_ok(SILENCE_TOKEN))
+
+    def test_eleven_chars_without_question_fails(self):
+        self.assertFalse(a_close_ok("一二三四五六七八九十一"))  # 11 字越界
+
+    def test_question_new_scene_and_caution_fail(self):
+        self.assertFalse(a_close_ok("到家了吗？"))              # 有问号
+        self.assertFalse(a_close_ok("我洗完澡了"))              # 新场景词
+        self.assertFalse(a_close_ok("回头发梢记得吹干"))         # 叮嘱小句
+
+
+class TestRecalibratedD(unittest.TestCase):
+    """D 表情包收尾：不再要求沉默/短收，短收但非沉默也达标。"""
+
+    def test_short_but_not_silent_passes(self):
+        # 关键回归：旧口径"沉默+短收"判它不算收尾，新口径只看图内元素/问号/新话题/叮嘱。
+        self.assertFalse(is_silent("嗯嗯"))
+        self.assertTrue(d_close_ok("嗯嗯"))
+        self.assertTrue(d_close_ok("好呀，去吧。"))
+
+    def test_silence_passes(self):
+        self.assertTrue(d_close_ok(SILENCE_TOKEN))
+
+    def test_img_word_fails_even_when_short(self):
+        self.assertFalse(d_close_ok("乖"))                 # 图内元素词「乖」
+        self.assertFalse(d_close_ok("这图猫好可爱"))        # 图内元素词
+
+    def test_new_scene_and_question_fail(self):
+        self.assertFalse(d_close_ok("晚点我也去琴房练会儿"))  # 新场景词「琴房」
+        self.assertFalse(d_close_ok("专心去吧？"))
+
+    def test_caution_boundary_one_ok_two_fail(self):
+        self.assertTrue(d_close_ok("晚上回来路上慢点"))          # 1 句叮嘱：达标
+        self.assertFalse(d_close_ok("路上注意安全\n到家了说一声"))  # 2 句叮嘱：超标
+
+
+class TestCautionCountBoundary(unittest.TestCase):
+    """B 连环叮嘱：≤2 句通过、3 句失败的边界。"""
+
+    def test_two_cautions_pass_three_fail(self):
+        two = "路上注意安全，到家了说一声"
+        three = "路上注意安全，到家了说一声。记得带把伞"
+        self.assertEqual(len(caution_clauses(two)), 2)
+        self.assertLessEqual(len(caution_clauses(two)), B_CAUTION_MAX)
+        self.assertEqual(len(caution_clauses(three)), 3)
+        self.assertGreater(len(caution_clauses(three)), B_CAUTION_MAX)
+
+    def test_question_form_caution_not_counted(self):
+        # 疑问式关切不计入叮嘱（与 B 口径一致），否则会把问句当妈味误伤
+        self.assertEqual(caution_clauses("到家了吗"), [])
 
 
 if __name__ == "__main__":
