@@ -34,7 +34,7 @@ from companion.config import OneBotConfig
 from companion.onebot import OneBotClient
 
 REPORT_FILE = "data/smoke_fixes23_report.json"
-OWNER_QQ = 123456789
+OWNER_QQ = 123456789  # 占位号（隐私：真号不入库，DEEP_AUDIT E-2）
 
 logging.basicConfig(
     level=logging.INFO,

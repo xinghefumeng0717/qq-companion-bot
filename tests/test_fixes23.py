@@ -38,7 +38,7 @@ from companion.aggregator import MessageAggregator
 from companion.config import OneBotConfig
 from companion.onebot import OneBotClient, parse_input_status_event
 
-OWNER_QQ = 123456789
+OWNER_QQ = 123456789  # 占位号（隐私：真号不入库，DEEP_AUDIT E-2）
 
 
 def _typing_event(event_type: Any, user_id: int = OWNER_QQ, **over) -> Dict[str, Any]:
