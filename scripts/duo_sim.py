@@ -825,6 +825,103 @@ def metric_sticker_usage(turns: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def build_sim_batch(user_text: str, turn_idx: int) -> List[Dict[str, Any]]:
+    """把仿真里"他"这一轮的输出拆成生产同构的聚合批次（FIXES21）
+
+    仿真器给"他"的提示词写着"可多行，每行一条"，而现实里他的连发习惯更极端
+    （`data/duo_sim/user_persona_brief.md` 1.8：82.1% 的消息处在 ≥2 条的连发串里）。
+    生产里这些是**多条 OneBot 入站消息**被聚合器收成一批；仿真只有一条字符串，
+    所以这里按行拆开模拟那个批次。
+
+    message_id 取负数 `-(turn_idx*10 + 行号)`：明确标记"这是伪造 id"，
+    任何时候看到负 id 都该知道它不是 QQ 服务端给的。
+    """
+    lines = [ln.strip() for ln in (user_text or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    batch: List[Dict[str, Any]] = []
+    for i, line in enumerate(lines, start=1):
+        batch.append({
+            "index": i,
+            "text": line,
+            "message_id": -(turn_idx * 10 + i),
+            "has_image": False,
+        })
+    return batch
+
+
+def metric_quote_usage(turns: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """引用回复：使用次数、**命中率**、编号用得对不对（FIXES21）
+
+    验收口径（任务书任务4 B 段）：**引用率低（多数轮次不引用）但命中场景不缺位**。
+    所以这里除了数次数，还要给"命中"下定义：
+      · 多条消息的轮次 = 本来就存在"指代不明"的机会（可引用场景）
+      · 越界/无效编号 = 引用了不存在的东西（那是错，不是命中）
+    语境对不对（该引第2条却引了第3条）**脚本判不了**，只留原文交所有者抽读。
+
+    零使用报 N/A 不报 PASS：0 次 == 0 违规是自动成立的空断言，
+    报 PASS 会让报告读起来像"引用纪律验过了"（那是假的）。
+    """
+    used = 0
+    quoteable_turns = 0          # 本轮有 ≥2 条消息（有引用机会）
+    quoted_in_quoteable = 0      # 在有引用机会的轮次里真的用了
+    over_cap_turns: List[int] = []
+    invalid: List[Dict[str, Any]] = []
+    detail: List[Dict[str, Any]] = []
+
+    for t in turns:
+        if t.get("speaker") != "her":
+            continue
+        his_batch = t.get("his_batch") or []
+        quotes = t.get("quotes") or []
+        if len(his_batch) >= 2:
+            quoteable_turns += 1
+        if not quotes:
+            continue
+        used += 1
+        if len(quotes) > 1:
+            over_cap_turns.append(t["idx"])
+        for q in quotes:
+            idx = q.get("index")
+            ok = any(b.get("index") == idx for b in his_batch)
+            if not ok:
+                invalid.append({"turn": t["idx"], "index": idx, "why": "编号不在本轮批次里"})
+        if len(his_batch) >= 2:
+            quoted_in_quoteable += 1
+        detail.append({
+            "turn": t["idx"],
+            "his_batch": [b.get("text") for b in his_batch],
+            "quotes": quotes,
+            "her_bubbles": t.get("bubbles") or [],
+        })
+
+    if not used:
+        verdict = "N/A"
+    elif invalid or over_cap_turns:
+        verdict = "FAIL"          # 引用了不存在的东西 / 超上限：机制层破了
+    else:
+        verdict = "PASS"
+    return {
+        "count": used,
+        "quoteable_turns": quoteable_turns,
+        "quoted_in_quoteable": quoted_in_quoteable,
+        "hit_rate": round(quoted_in_quoteable / quoteable_turns, 4) if quoteable_turns else None,
+        "turn_rate": round(used / len([t for t in turns if t.get("speaker") == "her"]), 4)
+        if any(t.get("speaker") == "her" for t in turns) else 0.0,
+        "invalid": invalid,
+        "over_cap_turns": over_cap_turns,
+        "verdict": verdict,
+        "not_run_reason": None if used else (
+            "全程她没有引用过（可能本局没有连发场景）" if not quoteable_turns
+            else "本局有连发场景但她一次都没引用"
+        ),
+        "detail": detail[:15],
+        "note": "语境对不对（该引第2条却引第3条）留原文交所有者抽读，脚本不判",
+        "synthetic_ids": True,
+        "synthetic_ids_note": "仿真里 message_id 是伪造的负数（不发真消息），出站报文由冒烟 A 段验",
+        "threshold_note": THRESHOLD_NOTE,
+    }
+
+
 def metric_face_usage(turns: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """QQ 表情：使用次数、三种发法分布、气泡占比、重复率。
 
@@ -936,6 +1033,7 @@ def compute_metrics(
         "[沉默]合规": metric_silence_compliance(turns),
         "表情包": metric_sticker_usage(turns),
         "QQ表情": metric_face_usage(turns),
+        "引用回复": metric_quote_usage(turns),
     }
     single = metric_bubble_stats(turns)
     verdicts = {k: v["verdict"] for k, v in multi.items()}
@@ -1045,6 +1143,9 @@ class TurnRecord:
     # 少了它 compute_metrics 拿到的投影里没有这个字段，指标会把"她发了 3 个脸"
     # 报成"全程没发过"的 N/A（有数据被报成无样本，报告读起来像验过了）。
     faces: List[str] = field(default_factory=list)
+    # FIXES21：引用（发给他的 message_id）+ 本轮他那条批次（给"引用得对不对"做对账）
+    quotes: List[Dict[str, Any]] = field(default_factory=list)
+    his_batch: List[Dict[str, Any]] = field(default_factory=list)
     silenced: bool = False
     note: str = ""
     snapshot: Dict[str, Any] = field(default_factory=dict)
@@ -1300,7 +1401,13 @@ class DuoSimulator:
         self.sent_chunks = []
         llm_before = self._llm_row_cursor
 
-        await self.turn_handler.handle_turn(user_text, None)
+        # FIXES21：仿真里"他"一轮输出可多行（提示词就写着"可多行，每行一条"），
+        # 这正对应生产里**他连发多条被聚合器收成一批**。这里按行拆成批次，
+        # 编号与 message_id 一一对应，她才能真的用上引用功能。
+        # message_id 用负数：一眼可辨是仿真伪造的，NapCat 永远不会见到它
+        # （仿真不发真消息，出站报文由 A 段负责验）。
+        batch = build_sim_batch(user_text, idx)
+        await self.turn_handler.handle_turn(user_text, None, batch)
         # observer 在生产是 create_task 异步结算；仿真要拿到评分写进 raw.json，
         # 这里有界等待它落地（不改动生产代码）
         observer_data = await self._drain_observer()
@@ -1310,6 +1417,12 @@ class DuoSimulator:
         bubbles = collected["bubbles"]
         stickers = collected["stickers"]
         faces = collected["faces"]
+        # FIXES21：把引用摘出来（编号 + 他那条 message_id），指标要拿它对账
+        quotes = [
+            {"index": c.get("_quote", {}).get("index"),
+             "message_id": c.get("_quote", {}).get("message_id")}
+            for c in self.sent_chunks if c.get("_quote")
+        ]
         silenced = not self.sent_chunks
         text = "\n".join([b for b in bubbles if b])
 
@@ -1320,12 +1433,16 @@ class DuoSimulator:
             time=self.clock.now().strftime("%Y-%m-%d %H:%M"),
             bubbles=bubbles,
             faces=faces,
+            quotes=quotes,
+            his_batch=batch,
             silenced=silenced,
             snapshot={
                 "user_text": user_text,
                 "bubbles": bubbles,
                 "stickers": stickers,
                 "faces": faces,
+                "quotes": quotes,
+                "his_batch": batch,
                 "silenced": silenced,
                 "observer": observer_data,
                 "state_before": before,
@@ -1593,6 +1710,7 @@ def _rec_to_dict(r: TurnRecord) -> Dict[str, Any]:
     return {
         "idx": r.idx, "speaker": r.speaker, "text": r.text, "time": r.time,
         "bubbles": r.bubbles, "faces": r.faces,
+        "quotes": r.quotes, "his_batch": r.his_batch,
         "silenced": r.silenced, "note": r.note,
     }
 

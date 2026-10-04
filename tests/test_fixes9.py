@@ -257,7 +257,8 @@ def _mk_client(responses=None, drop=False):
     cfg = OneBotConfig(ws_url="ws://127.0.0.1:3001", access_token="")
     got = []
 
-    async def cb(text, img):
+    # FIXES21：OneBotClient 回调多第三个参数 message_id（引用回复要靠它）
+    async def cb(text, img, message_id=None):
         got.append((text, img))
 
     c = OneBotClient(
@@ -615,8 +616,10 @@ class TestAggregatorBuffering(unittest.IsolatedAsyncioTestCase):
 
         self.turns = []
 
-        async def handler(text, img):
-            self.turns.append((text, img))
+        # FIXES21：聚合器多送第三个参数（本轮批次的编号+message_id）。
+        # 这里收下来但只断言前两个，批次内容由 tests/test_fixes21.py 专门验。
+        async def handler(text, img, batch=None):
+            self.turns.append((text, img, batch))
 
         self.agg = MessageAggregator(turn_handler=handler)
         self.agg.start()
@@ -663,9 +666,12 @@ class TestAggregatorBuffering(unittest.IsolatedAsyncioTestCase):
         await self.agg.push_message("", "data/x.jpg")
         await self._settle()
         self.assertEqual(len(self.turns), 1)
-        text, img = self.turns[0]
+        # FIXES21：多第三个参数（本轮批次），前两个语义一个字没变
+        text, img, batch = self.turns[0]
         self.assertEqual(text, "你看这个")
         self.assertEqual(img, "data/x.jpg")
+        self.assertEqual([b["index"] for b in batch], [1, 2])
+        self.assertTrue(batch[1]["has_image"])
 
     async def test_image_only_still_submits(self):
         await self.agg.push_message("", "data/only.jpg")
@@ -706,13 +712,22 @@ class TestAggregatorBuffering(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.agg._image_buffer)
         self.assertEqual(self.agg._first_msg_time, 0.0)
 
-    async def test_turn_handler_receives_two_args(self):
-        """turn_handler 签名保持 (text, image_path) 不变，接口零变更"""
+    async def test_turn_handler_receives_batch(self):
+        """turn_handler 签名：**FIXES21 起有意从 (text, image_path) 变成三元组**。
+
+        第三个参数是本轮聚合批次（编号 + message_id + 文本），发侧引用回复
+        靠它把 `[quote:N]` 翻译成真实 message_id。前两个参数的语义一字未变。
+        批次内容本身由 tests/test_fixes21.py 专门验，这里只钉住"接口形状"。
+        """
         await self.agg.push_message("带图", "z.jpg")
         await self._settle()
         self.assertEqual(len(self.turns), 1)
         self.assertIsInstance(self.turns[0], tuple)
-        self.assertEqual(len(self.turns[0]), 2)
+        self.assertEqual(len(self.turns[0]), 3)
+        _text, _img, batch = self.turns[0]
+        self.assertIsInstance(batch, list)
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(batch[0]["index"], 1)
 
     async def test_last_image_wins(self):
         await self.agg.push_message("看", "a.jpg")

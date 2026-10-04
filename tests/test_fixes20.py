@@ -173,7 +173,8 @@ class _ConnectedCase(unittest.IsolatedAsyncioTestCase):
         cfg = OneBotConfig(ws_url="ws://127.0.0.1:3001", access_token="")
         got: List[Any] = []
 
-        async def cb(text, img):
+        # FIXES21：回调多第三个参数 message_id
+        async def cb(text, img, message_id=None):
             got.append((text, img))
 
         c = OneBotClient(
@@ -352,7 +353,7 @@ class TestReceiveSideDownstream(_ConnectedCase):
         """过去纯脸消息文本为空 → 聚合器 `if text:` 直接丢弃、整轮对话不发生。"""
         turn_texts: List[str] = []
 
-        async def handle_turn(user_text, image_path):
+        async def handle_turn(user_text, image_path, batch=None):
             turn_texts.append(user_text)
 
         agg = MessageAggregator(turn_handler=handle_turn)

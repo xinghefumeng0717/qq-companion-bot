@@ -63,6 +63,16 @@ def build_face_segment(face_id: int) -> Dict[str, Any]:
     return {"type": "face", "data": {"id": int(face_id)}}
 
 
+def build_reply_segment(message_id: Any) -> Dict[str, Any]:
+    """构造 OneBot v11 引用回复段
+
+    FIXES21 发侧：她要引用他某条消息时，把 `reply` 段拼在同一条消息的**头部**。
+    必须与正文同一条消息出去（OneBot 允许一条消息混 reply + text + face 段），
+    单独发一条空引用是刷屏。
+    """
+    return {"type": "reply", "data": {"id": int(message_id)}}
+
+
 def build_image_segment(file_path: str) -> Dict[str, Any]:
     """构造 OneBot v11 本地图片消息段 (优先转为 base64:// 格式，天然穿透 Docker 隔离)"""
     if os.path.exists(file_path):
@@ -81,7 +91,7 @@ class OneBotClient:
         self,
         config: OneBotConfig,
         allowed_user_id: int,
-        on_message_callback: Optional[Callable[[str, Optional[str]], Coroutine[Any, Any, None]]] = None,
+        on_message_callback: Optional[Callable[..., Coroutine[Any, Any, None]]] = None,
         image_save_dir: str = "data/images",
         voice_processor: Optional[Any] = None,
     ):
@@ -196,10 +206,15 @@ class OneBotClient:
 
             # 只响应机主大号 QQ 号，其余一律忽略
             if msg_type == "private" and user_id == self.allowed_user_id:
-                self._dispatch_message_event(data.get("message"))
+                # FIXES21：message_id 随消息一起穿链（发侧引用要靠它指回具体哪一条）
+                self._dispatch_message_event(data.get("message"), data.get("message_id"))
 
-    def _dispatch_message_event(self, raw_msg: Any) -> None:
+    def _dispatch_message_event(self, raw_msg: Any, message_id: Any = None) -> None:
         """把消息事件投进内部队列，立即返回，读循环不被消息处理拖住。
+
+        FIXES21：队列元素从 `raw_msg` 变成 `(raw_msg, message_id)`。
+        队列是本类内部实现（`_consume_message_queue` 同一个文件里消费），
+        改形状不影响任何外部调用方。
 
         stop() 之后仍可能收到在途帧：此时必须直接丢弃，
         否则 _ensure_dispatcher 会把已经收尾的消费协程重新拉起来。
@@ -207,7 +222,7 @@ class OneBotClient:
         if not self._running:
             return
         self._ensure_dispatcher()
-        self._message_queue.put_nowait(raw_msg)
+        self._message_queue.put_nowait((raw_msg, message_id))
 
     def _ensure_dispatcher(self) -> None:
         """惰性启动（并在异常退出后重启）消息消费协程；强引用常驻 client 实例"""
@@ -217,9 +232,9 @@ class OneBotClient:
     async def _consume_message_queue(self) -> None:
         """串行消费消息事件：同一用户连发的消息仍按到达顺序处理，不插队、不丢弃"""
         while True:
-            raw_msg = await self._message_queue.get()
+            raw_msg, message_id = await self._message_queue.get()
             try:
-                await self._process_incoming_message(raw_msg)
+                await self._process_incoming_message(raw_msg, message_id)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -227,13 +242,19 @@ class OneBotClient:
             finally:
                 self._message_queue.task_done()
 
-    async def _process_incoming_message(self, raw_msg: Any) -> None:
+    async def _process_incoming_message(
+        self, raw_msg: Any, message_id: Any = None
+    ) -> None:
         """解析机主发来的消息段，下载图片，取引用上下文，交给聚合器回调
 
         FIXES20 收侧：face 段（QQ 小黄脸）翻译成方括号文字标签按**原始顺序**并入文本流。
         病灶是这里原本只取 text 段、face 段被静默丢弃——机主发"你真棒[旺柴]"，
         她只收到"你真棒"，语气全断（他 22.5% 的消息带表情标签，盲区天天生效）。
         标签形态（`[旺柴]` 而非 `（狗头）`）与他聊天语料一致，模型读起来零障碍。
+
+        FIXES21：入站事件里本来就带着 message_id，这里把它一起交出去（**原样透传，
+        不做类型转换**——id 是 QQ 服务端给的 int，转成字符串再转回来只会多一个出错点；
+        取不到就是 None，下游据此判"这条不可被引用"）。
         """
         text_parts = []
         image_local_path: Optional[str] = None
@@ -283,7 +304,7 @@ class OneBotClient:
             full_text = f"{reply_prefix}\n{full_text}" if full_text else reply_prefix
 
         if self.on_message_callback:
-            await self.on_message_callback(full_text, image_local_path)
+            await self.on_message_callback(full_text, image_local_path, message_id)
 
     async def _download_image(self, url: str) -> Optional[str]:
         """下载 QQ 图片到本地 data/images/（智能判断图片扩展名）"""

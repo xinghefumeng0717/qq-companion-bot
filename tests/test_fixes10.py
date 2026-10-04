@@ -382,7 +382,8 @@ class TestOneBotDispatcherStopGuard(unittest.IsolatedAsyncioTestCase):
     def _client(self):
         got = []
 
-        async def cb(text, img):
+        # FIXES21：回调多第三个参数 message_id
+        async def cb(text, img, message_id=None):
             got.append((text, img))
 
         client = OneBotClient(

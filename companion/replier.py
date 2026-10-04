@@ -46,10 +46,16 @@ STICKER_PATTERN = re.compile(r"\[(?:sticker|表情)[:：]([^\]]+)\]", re.IGNOREC
 FACE_PATTERN = re.compile(r"\[face[:：]([^\]]+)\]", re.IGNORECASE)
 
 # 两类标记合并成一条正则，一次扫描切出全部段：
-# group(1) 命中 = sticker，group(2) 命中 = face。用一条而不是两条，
-# 是为了保证"文字/表情包/表情"在原句里的相对顺序一次扫清（分两次扫会打乱顺序）。
+# group(1) 命中 = sticker，group(2) 命中 = face，group(3) 命中 = quote。
+# 用一条而不是多条，是为了保证"文字/表情包/表情/引用"在原句里的相对顺序
+# 一次扫清（分多次扫会打乱顺序）。
+# quote 带 ^ 与 MULTILINE：**只在行首匹配**——引用是"我回哪句"的指代，
+# 位置固定在回复头部；写在一句话中间的 [quote:2] 一律当普通文字（降级不炸）。
 MIXED_SEGMENT_PATTERN = re.compile(
-    r"\[(?:sticker|表情)[:：]([^\]]+)\]|\[face[:：]([^\]]+)\]", re.IGNORECASE
+    r"\[(?:sticker|表情)[:：]([^\]]+)\]"
+    r"|\[face[:：]([^\]]+)\]"
+    r"|^[ \t]*\[quote[:：](\d+)\]",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # 整轮 QQ 表情硬上限（机制层，按机主真实使用数据定的刻度）：
@@ -64,6 +70,29 @@ NON_TEXT_CHUNK_CHARS = 5
 # 沉默标记（FIXES13）：模型完整输出恰好是这一行时，表示她本轮选择不回。
 # 只有"整条输出就是它"才算数；行内含 [沉默] 但还夹着别的文字的，一律按正常文本走，防滥用。
 SILENCE_TOKEN = "[沉默]"
+
+# 引用标记（FIXES21）：行首的 [quote:N]
+QUOTE_PATTERN = re.compile(r"^[ \t]*\[quote[:：](\d+)\]", re.IGNORECASE | re.MULTILINE)
+
+
+def strip_leading_quote(text: str) -> Tuple[str, Optional[int]]:
+    """剥掉回复开头的引用标记行，返回 (剩下的文本, 编号)。
+
+    **沉默权优先（FIXES21 备注要求定义的交互）**：模型偶尔同时输出
+    `[quote:2]` 和 `[沉默]`。这两件事是矛盾的（引用=我回你第2句，沉默=我不回），
+    让沉默赢：剩下的文本若恰好是 [沉默]，整轮按沉默处理。
+    所以这里把引用标记先剥掉，再交给既有的 `is_silence_output` 判定——
+    `is_silence_output` 本身的契约（"整条输出就是它"）一个字没动。
+    """
+    if not text:
+        return text, None
+    m = QUOTE_PATTERN.match(text)
+    if not m:
+        return text, None
+    rest = text[m.end():]
+    # 只吃紧跟着的空白/换行："[quote:2]你真棒" 里的正文不许被吃掉
+    rest = re.sub(r"^[ \t]*\n?", "", rest)
+    return rest, int(m.group(1))
 
 
 def is_silence_output(text: str) -> bool:
@@ -433,7 +462,10 @@ def merge_face_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     "你真棒[face:doge]\\n[face:吃瓜]" 仍是两条——第 2 条是独立气泡的纯脸消息，
     机主语料里"文字气泡后 60 秒内紧跟纯表情气泡"245 次就是这个形态。
 
-    前面没有可合并的段（行首纯脸）→ 保持独立 face 段。
+    前面没有可合并的段（行首纯脸、或前面是引用段）→ 保持独立 face 段。
+    引用段不参与 face 合并：它还没并进任何消息，等下一步 merge_quote_into_next
+    把它贴到紧随的那条消息头部（这样 "[quote:3][face:吃瓜]" 是一条 reply+face 消息，
+    而不是 face 被吸进一个还没有正文的壳子里、把引用弄丢）。
     """
     out: List[Dict[str, Any]] = []
     for c in chunks:
@@ -444,7 +476,7 @@ def merge_face_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         prev = out[-1]
         prev_type = prev.get("type")
         # sticker 永不合并；跨行也不合并（行号不相等即视为不同气泡）
-        if prev_type == "sticker" or prev.get("_end_line") != c.get("_line"):
+        if prev_type in ("sticker", "quote") or prev.get("_end_line") != c.get("_line"):
             out.append(c)
             continue
         if prev_type == "face":
@@ -500,6 +532,120 @@ def strip_face_markers(text: str) -> str:
     return FACE_PATTERN.sub("", text or "")
 
 
+# ── 引用回复发侧（FIXES21）─────────────────────────────────
+
+
+def quote_chunk(index: int, quote_targets: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    """把 `[quote:N]` 变成 quote 段；不可引用时返回 None（调用方按普通文字处理）。
+
+    四道关，任何一道不过都降级（**不炸、不丢内容**）：
+      1. 编号得是本轮批次里真实存在的（越界 → 降级，防她引用不存在的东西）；
+      2. 那条得带 message_id（没有 id 就没法在 QQ 上真的引用 → 降级）；
+      3. message_id 必须是整数型（入站原样透传，出现脏值宁可降级也别发一个坏 id）；
+      4. 主动消息（source="proactive"）调用方直接不传 quote_targets，
+         那里根本没有可引用的对方消息。
+    """
+    if not quote_targets:
+        return None
+    target = None
+    for item in quote_targets:
+        if item.get("index") == index:
+            target = item
+            break
+    if target is None:
+        logger.info(f"[Replier] 引用编号越界（本轮没有第 {index} 条），按普通文字降级")
+        return None
+    message_id = target.get("message_id")
+    if message_id is None:
+        logger.info(
+            f"[Replier] 第 {index} 条没有 message_id（历史/异常消息），本次不可引用，按文字降级"
+        )
+        return None
+    try:
+        message_id = int(message_id)
+    except (TypeError, ValueError):
+        logger.warning(f"[Replier] 第 {index} 条的 message_id 不是整数（{message_id!r}），按文字降级")
+        return None
+    return {"type": "quote", "index": index, "message_id": message_id}
+
+
+def keep_first_quote(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """整轮只保留第一个引用段，多余的**按普通文字降级**（FIXES21 任务2 第3条）。
+
+    引用是低频高精度动作：一轮里连着引两条既没意义（她只回一条消息），
+    也会把 5 段预算吃光。降级而不是丢弃，与 face 超限同一口径。
+    """
+    used = False
+    downgraded: List[int] = []
+    out: List[Dict[str, Any]] = []
+    for c in chunks:
+        if c.get("type") != "quote":
+            out.append(c)
+            continue
+        if not used:
+            used = True
+            out.append(c)
+            continue
+        marker = f"[quote:{c.get('index', '')}]"
+        downgraded.append(c.get("index"))
+        out.append({"type": "text", "content": marker})
+    if downgraded:
+        logger.info(
+            f"[Replier] 引用硬上限：整轮只保留 1 条，多余 {len(downgraded)} 条按文字降级: "
+            f"{downgraded}"
+        )
+    return out
+
+
+def merge_quote_into_next(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把 quote 段并进**紧随其后的第一条消息**，作为它的 `_quote` 头（任务3 第1条）。
+
+    为什么不单独发：OneBot 一条消息可以混 `reply` + `text` + `face` 段，
+    "引用他第2条 + 回复内容"是同一条消息出去；单独发一条空引用就是刷屏。
+
+    合并后的段可以是 text / face / combo（combo 里已有文字与脸），
+    这样 quote × face 同轮共存不需要新的段型——`_quote` 是一个可选头，
+    发送端（main._send_chunk_to_onebot）负责把它拼到段数组最前面。
+
+    quote 后面没有任何正文（模型只输出了 `[quote:N]`）→ **直接丢弃**
+    （任务3 第2条：不空发）。丢弃记 INFO，事后能看出模型想干吗。
+    """
+    out: List[Dict[str, Any]] = []
+    pending: Optional[Dict[str, Any]] = None
+    dropped: List[int] = []
+
+    for c in chunks:
+        ctype = c.get("type")
+        if ctype == "quote":
+            if pending is not None:
+                # 上一条引用还没等到正文，又来一条：前一个直接丢（上限已保证只有 1 条，
+                # 这里是防御：万一上游改了上限，也不会连着发两条空引用）
+                dropped.append(pending.get("index"))
+            pending = c
+            continue
+        if pending is not None:
+            if ctype in ("text", "face", "combo"):
+                merged = dict(c)
+                merged["_quote"] = {
+                    "index": pending.get("index"),
+                    "message_id": pending.get("message_id"),
+                }
+                out.append(merged)
+                pending = None
+                continue
+            # 表情包段：引用不与表情包合并（表情包语义一个字不改），
+            # 此时引用只能丢掉——不能让一条表情包消息凭空顶着一个引用
+            dropped.append(pending.get("index"))
+            pending = None
+        out.append(c)
+
+    if pending is not None:
+        dropped.append(pending.get("index"))
+    if dropped:
+        logger.info(f"[Replier] 引用后面没有正文，丢弃引用（不空发）: {dropped}")
+    return out
+
+
 def combo_to_display(chunk: Dict[str, Any]) -> str:
     """combo 段的可读形态：文字后面直接挂上 [标签]（人看的形态）。
 
@@ -547,34 +693,88 @@ class Replier:
         self.config = config
         self.stickers = stickers
 
-    def parse_reply(self, raw_text: str, source: str = "reply") -> Tuple[List[Dict[str, Any]], str]:
+    @staticmethod
+    def _append_marker_as_text(
+        segments: List[Dict[str, Any]], marker: str, line: int
+    ) -> bool:
+        """把"发不出去"的标记（清单外 face / 不可引用的 quote）留在原地当普通文字。
+
+        同一行时**粘回前一段文字**而不是新起一段：否则"你真棒[face:微笑]"会被拆成
+        "你真棒" + "[face:微笑]"两个气泡，看起来像她突然开始说标记语法。
+
+        返回 True = 已粘进前一段；False = 前面没有可粘的文字（标记在行首），
+        调用方负责把它吸进**后面**那句（行首标记只能往前走，不能凭空成一条气泡）。
+        """
+        if (
+            segments
+            and segments[-1]["type"] == "text"
+            and segments[-1].get("_end_line") == line
+        ):
+            segments[-1]["content"] += marker
+            return True
+        return False
+
+    def parse_reply(
+        self,
+        raw_text: str,
+        source: str = "reply",
+        quote_targets: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], str]:
         """处理回复全文：
         0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 返回 ([], "")
+        0.5 剥掉回复开头的 [quote:N] 标记（FIXES21）：沉默权优先于引用
         1. 字面量换行还原
         2. 行首触发方向标签剥离
         3. 旁白剥离
-        4. sticker / face 标记与文字混排拆分（一次扫描，保原句顺序）
+        4. sticker / face / quote 标记与文字混排拆分（一次扫描，保原句顺序）
         5. 整行兜底滤网：图片占位符（[图片] 这类，FIXES12 / E8）→ 内心旁白（FIXES19）
         6. 句子切段
-        7. 表情包硬上限（整轮只留第一个）→ QQ 表情硬上限（整轮 ≤2，超出按文字降级）
-        8. 压到 max_chunks 以内（优先保表情包/表情段）
-        9. QQ 表情并进紧邻文字段（混排合并成同一个气泡）
+        7. 硬上限：表情包整轮 1 个 → QQ 表情整轮 2 个 → 引用整轮 1 条
+        8. QQ 表情并进紧邻文字段（混排合并成同一个气泡）
+        9. 引用并进紧随其后的第一条消息（_quote 头）
+        10. 压到 max_chunks 以内（优先保表情包/表情/混排段）
         返回: (发送消息段列表, 纯文本记录)
 
         source 只用于占位符兜底的 INFO 日志标注（"reply" 主聊 / "proactive" 主动消息），
         默认主聊，既有调用方无需改动。
 
+        `quote_targets`（FIXES21）：本轮聚合批次的每条消息
+        （`{"index": 1, "text": "...", "message_id": 123}`）。它是**编号 → 真实
+        message_id 的唯一翻译表**：不在表里的编号一律降级成文字。
+        主动消息不传（那里没有可引用的对方消息），所以 proactive 通路天然不支持引用。
+
         落库记录由最终发出的段反推，实发多少就记多少：
         被截断丢弃的文字段不会留在记录里，不丢表情包段、不丢 QQ 表情段。
+        引用**不进落库记录**：编号只对当轮有效，写进历史就成了无效指代
+        （她以后读到 `[quote:2]` 会以为 2 还指着今天第二条）。
 
         **与滤网的先后关系（FIXES20 任务3 第7条，DEEP_AUDIT 面对账用）**：
-        face 标记的识别在第 4 步，和 sticker 同一位置——即**整行滤网之前**。
-        滤网（第5步）只作用于**文字部分**，face 段与 sticker 段原样穿过。
+        face / quote 标记的识别都在第 4 步，和 sticker 同一位置——即**整行滤网之前**。
+        滤网（第5步）只作用于**文字部分**，face/sticker/quote 段原样穿过。
         推论与已知代价：模型若把一句话用 [face:] 从中间劈开（"他走了[face:流泪]我难受"），
         整行滤网看到的是劈开后的两个片段而不是整行，判断依据变窄——这与既有的
         sticker 行为**完全同构**（表情包标记同样会劈行），本次不引入新差异，
         也不为它扩大改动范围（宁漏勿错是这两道滤网的设计取舍）。
+        quote 只在行首匹配（第 4 步的 ^ + MULTILINE），所以它**劈不出**行内片段，
+        不给滤网制造新的判断歧义。
         """
+        # 0.5 FIXES21：先剥引用标记，让沉默权有优先权（"引用+沉默"矛盾时沉默赢）
+        #     剥之前先验一遍能不能用：能用的剥掉并单独存成 quote 段（在第 4 步前插到
+        #     最前面，后面的合并阶段自然把它并进第一条消息）；不能用的**不剥**，
+        #     让它按普通文字原样留在原位——降级口径与行中/越界的引用完全一致。
+        stripped_text, leading_index = strip_leading_quote(raw_text)
+        leading_quote = (
+            quote_chunk(leading_index, quote_targets)
+            if leading_index is not None
+            else None
+        )
+        if leading_index is not None and leading_quote is None:
+            logger.info(
+                f"[Replier] 回复开头的引用（编号 {leading_index}）不可用，标记按普通文字原样保留"
+            )
+        else:
+            raw_text = stripped_text
+
         # 0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 不发送、记录为空（其余情况不触发）
         if is_silence_output(raw_text):
             logger.info("[Replier] 命中沉默：模型完整输出为 [沉默]，本轮不发送、记录为空")
@@ -600,11 +800,26 @@ class Replier:
         segments: List[Dict[str, Any]] = []
         last_idx = 0
 
+        # 0.5 段剥出来的合法引用插到最前面：它本来就该是整条回复的头
+        if leading_quote is not None:
+            leading_quote["_line"] = 0
+            leading_quote["_end_line"] = 0
+            segments.append(leading_quote)
+
+        # 降级标记的"吸进后面文字"暂存位（FIXES21）：
+        # 降级后的标记必须留在**同一行那句话**里，不能自己占一条气泡。
+        # face 不用暂存位——它总在文字后面，粘回前一段即可；
+        # quote 可以在行首（那时前面没有任何文字可粘），只能吸向后面。
+        pending_leading_marker: Optional[str] = None
+
         for m in MIXED_SEGMENT_PATTERN.finditer(clean_text):
             start, end = m.span()
-            # 前置文字
+            # 前置文字（先把暂存的降级标记吸进它，同一行必须是一条气泡）
             if start > last_idx:
                 txt = clean_text[last_idx:start]
+                if pending_leading_marker:
+                    txt = pending_leading_marker + txt
+                    pending_leading_marker = None
                 if txt.strip():
                     segments.append(
                         {
@@ -615,6 +830,10 @@ class Replier:
                     )
 
             sticker_desc = m.group(1)
+            face_tag_in_match = m.group(2)
+            quote_index = m.group(3)
+            line = _line_no(clean_text, start)
+
             if sticker_desc is not None:
                 # 表情包
                 desc = sticker_desc.strip()
@@ -626,34 +845,40 @@ class Replier:
                     )
                 else:
                     logger.info(f"[Replier] 表情包未匹配，丢弃标记: [sticker:{desc}]")
+            elif quote_index is not None:
+                # FIXES21 引用段。行首才认（正则里带了 ^）；编号能不能翻译由 quote_chunk 判
+                qc = quote_chunk(int(quote_index), quote_targets)
+                if qc is not None:
+                    qc["_line"] = line
+                    qc["_end_line"] = line
+                    segments.append(qc)
+                else:
+                    # 越界/无 id/主动消息 → 按普通文字原样留在原位。
+                    # 同一行粘回前一段文字；行首（前面没文字可粘）就暂存起来吸进后面。
+                    if not self._append_marker_as_text(segments, m.group(0), line):
+                        pending_leading_marker = m.group(0)
             else:
                 # QQ 系统表情。3.5 步已把不合法的降级成文字了，这里拿到 None
                 # 只可能是防御性分支（正则与 normalize 不一致），照样按文字处理。
-                fc = face_chunk(m.group(2) or "")
-                line = _line_no(clean_text, start)
+                fc = face_chunk(face_tag_in_match or "")
                 if fc is not None:
                     # 脸在原文里只占一个点：它的 "_end_line" 就是它自己那行
                     # （不给的话，后一个脸与它"同段"的比较会落空，二连合并不上）
                     fc["_line"] = line
                     fc["_end_line"] = line
                     segments.append(fc)
-                elif (
-                    segments
-                    and segments[-1]["type"] == "text"
-                    and segments[-1].get("_end_line") == line
-                ):
-                    # 防御性处理也不能把一句话拆成两个气泡：粘回同一行的前一段文字
-                    segments[-1]["content"] += m.group(0)
                 else:
-                    segments.append(
-                        {"type": "text", "content": m.group(0), "_end_line": line}
-                    )
+                    if not self._append_marker_as_text(segments, m.group(0), line):
+                        pending_leading_marker = m.group(0)
 
             last_idx = end
 
-        # 尾部文字
+        # 尾部文字（同样先吸暂存的降级标记）
         if last_idx < len(clean_text):
             txt = clean_text[last_idx:]
+            if pending_leading_marker:
+                txt = pending_leading_marker + txt
+                pending_leading_marker = None
             if txt.strip():
                 segments.append(
                     {
@@ -662,15 +887,19 @@ class Replier:
                         "_end_line": _line_no(clean_text, len(clean_text)),
                     }
                 )
+        elif pending_leading_marker:
+            # 整条输出只剩一个降级标记（"[quote:9]"）：它自己就是正文，不丢
+            segments.append({"type": "text", "content": pending_leading_marker,
+                             "_end_line": _line_no(clean_text, len(clean_text))})
 
         # 5. 整行兜底滤网（都在标记拆分之后、切句之前：此时文字段还是模型原样的
         #    多行文本，切句会把它拆散，滤网就再也认不出"整行"了。整段被滤空则整段丢弃）
         #    5a. 整行图片占位符（FIXES12 任务1 / E8）
         #    5b. 整行内心旁白（FIXES19）
-        #    非文字段（sticker / face）原样穿过，滤网只管文字
+        #    非文字段（sticker / face / quote）原样穿过，滤网只管文字
         filtered_segments: List[Dict[str, Any]] = []
         for seg in segments:
-            if seg["type"] in ("sticker", "face"):
+            if seg["type"] in ("sticker", "face", "quote"):
                 filtered_segments.append(seg)
                 continue
             kept_text = drop_image_placeholder_lines(seg["content"], source)
@@ -686,7 +915,7 @@ class Replier:
         #    "第一句[face:x]\n第二句" 这种会被误判成同一行）。
         final_chunks: List[Dict[str, Any]] = []
         for seg in segments:
-            if seg["type"] in ("sticker", "face"):
+            if seg["type"] in ("sticker", "face", "quote"):
                 final_chunks.append(seg)
                 continue
             sub_chunks = chunk_text_sentences(seg["content"], max_chunks=self.config.max_chunks)
@@ -697,17 +926,22 @@ class Replier:
                     chunk["_end_line"] = seg.get("_end_line")
                 final_chunks.append(chunk)
 
-        # 7. 硬上限：表情包整轮 1 个、QQ 表情整轮 2 个（提示词软约束之外的代码防线）
-        #    必须在**合并之前**：合并后的 face 段长在 combo.parts 里，
-        #    到那时再数就数不到、2 个的闸门会形同虚设。
+        # 7. 硬上限：表情包整轮 1 个、QQ 表情整轮 2 个、引用整轮 1 条
+        #    （都必须在**合并之前**：合并后的 face 段长在 combo.parts 里，
+        #    到那时再数就数不到、闸门会形同虚设）
         final_chunks = keep_first_sticker(final_chunks)
         final_chunks = keep_face_cap(final_chunks)
+        final_chunks = keep_first_quote(final_chunks)
 
         # 8. 混排合并（FIXES20 任务3 第3条）：同一行的文字+脸并成同一条 QQ 消息。
         #    必须在 fit_chunks **之前**：max_chunks 限的是"几条气泡"，
         #    "你真棒[doge]"合并后是 1 条气泡、合并前却是 2 段——
         #    先 fit 会把并进去的那条文字当成超编挤掉（实战里被挤掉的是"在呢"这种收尾句）。
         final_chunks = merge_face_chunks(final_chunks)
+
+        # 8.5 FIXES21：引用并进紧随其后的第一条消息（_quote 头）。
+        #     也在 fit_chunks **之前**：引用不是一条独立气泡，不该占 max_chunks 的名额。
+        final_chunks = merge_quote_into_next(final_chunks)
 
         # 9. 总量控制：超限先丢普通文本段，表情包/表情/混排气泡优先保留
         final_chunks = fit_chunks(final_chunks, self.config.max_chunks)

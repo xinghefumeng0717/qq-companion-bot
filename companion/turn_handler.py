@@ -8,7 +8,7 @@ import asyncio
 import logging
 import random
 from datetime import datetime
-from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from companion.assembler import PromptAssembler
 from companion.config import Config, TimingConfig
@@ -22,6 +22,27 @@ from companion.replier import Replier, is_silence_output, strip_face_markers
 from companion.stickers import image_to_base64_data_url
 
 logger = logging.getLogger("companion")
+
+
+def _sync_image_desc_to_batch(batch: List[Dict[str, Any]], user_text: str) -> None:
+    """把这一轮补上的图片描述写回批次里**带图的那一条**（FIXES21）
+
+    只在确实带了图时调用。找不到带图条目（老数据/异常）就什么都不做：
+    编号块里那条空着也只是少一个可引用目标，不该把整轮带崩。
+    """
+    if not batch:
+        return
+    marker = "[发来一张照片：" if "发来一张照片" in user_text else (
+        "[发来一张图片" if "发来一张图片" in user_text else None
+    )
+    desc = user_text[user_text.rfind(marker) :] if marker else ""
+    for item in batch:
+        if item.get("has_image"):
+            if desc and not item.get("text"):
+                item["text"] = desc
+            elif desc and item.get("text"):
+                item["text"] = f"{item['text']} {desc}".strip()
+            return
 
 # 对话进行中（她 5 分钟内回过话）typing 展示的上限：这时候她的打字是快的，
 # 真按字数算会出现"回了 5 条后突然卡 20 秒"的假人感。任务书 §三.4 规定收紧到 8 秒。
@@ -185,9 +206,25 @@ class TurnHandler:
         finally:
             await self.close_typing()
 
-    async def handle_turn(self, user_text: str, image_path: Optional[str]) -> None:
-        """聚合完毕后，处理完整的一轮对话"""
-        logger.info(f"[Bot] 处理新一轮输入: '{user_text}', image={image_path}")
+    async def handle_turn(
+        self,
+        user_text: str,
+        image_path: Optional[str],
+        quote_targets: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """聚合完毕后，处理完整的一轮对话
+
+        FIXES21：`quote_targets` 是本轮聚合批次的每条消息
+        （`{"index": 1, "text": "...", "message_id": 123, "has_image": False}`）。
+        它干两件事：①提示词里把这一批编号呈现（`[1] ... / [2] ...`），
+        ②她输出 `[quote:N]` 时把编号翻译回真实 message_id。
+        取不到/为 None 一律照旧（单条消息的老路径一个字不变），不影响主流程。
+        """
+        logger.info(
+            f"[Bot] 处理新一轮输入: '{user_text}', image={image_path}, "
+            f"批次={len(quote_targets) if quote_targets else 0} 条"
+        )
+        batch = list(quote_targets or [])
 
         # 1. 重置主动消息未回计数
         await self.proactive.reset_unanswered_count()
@@ -239,8 +276,15 @@ class TurnHandler:
             else:
                 user_text = (user_text + " [对方发来一张图片，你看不到内容]").strip()
 
-        # 3. 提示词组装
-        messages, sys_prompt = await self.assembler.assemble_messages(user_text, image_data_url)
+            # FIXES21：视觉描述也要写回**对应那一条**的编号条目。
+            # 不写回的话编号块里那条是空的（她只看到"他发了张图"却不知道是哪一条），
+            # 引用一条空条目没有意义。
+            _sync_image_desc_to_batch(batch, user_text)
+
+        # 3. 提示词组装（编号块由 quote_targets 生成）
+        messages, sys_prompt = await self.assembler.assemble_messages(
+            user_text, image_data_url, numbered_batch=batch
+        )
 
         # 4. LLM 流式调用
         # 注意：typing 在这一步之前一定没开过——"生成失败/走神兜底前必须先收掉 typing"
@@ -262,8 +306,10 @@ class TurnHandler:
         full_reply = "".join(reply_parts).strip()
         logger.info(f"[Bot] LLM 回复全文: {full_reply}")
 
-        # 5. 回复管道切段与打字延迟发送
-        chunks, clean_record_text = self.replier.parse_reply(full_reply)
+        # 5. 回复管道切段与打字延迟发送（FIXES21：把批次传下去，编号才能翻译成 message_id）
+        chunks, clean_record_text = self.replier.parse_reply(
+            full_reply, quote_targets=batch
+        )
         if is_silence_output(full_reply):
             # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，
             # 但用户消息照常落库（他确实说了这句），并照常做回忆加固。

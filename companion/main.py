@@ -28,6 +28,7 @@ from companion.onebot import (
     OneBotClient,
     build_face_segment,
     build_image_segment,
+    build_reply_segment,
     build_text_segment,
 )
 from companion.observer import Observer
@@ -242,26 +243,51 @@ class CompanionBot:
         FIXES20：新增 face（纯表情气泡）与 combo（文字+表情同一条消息）两种段。
         combo 是主形态——机主 65% 的表情是"文字+表情同气泡"（其中 97% 挂句尾），
         拆成两条消息就毁掉了这个语气。OneBot 一条消息本来就支持混合段数组。
+
+        FIXES21：段上有 `_quote` 头时，把它拼成 OneBot `reply` 段放在**最前面**，
+        与正文同一条消息出去（"回他第2条 + 内容"是一条气泡，不是两条）。
+        reply 段是 NapCat/QQ 侧最可能出岔子的一段（id 过期、部分实现不支持），
+        整条发送失败时**去掉 reply 段重发正文**——引用没了顶多指代弱一点，
+        她说的话丢了才是事故。
         """
+        quote = chunk.get("_quote")
         if chunk["type"] == "text":
-            segs = [build_text_segment(chunk["content"])]
+            body: List[Dict[str, Any]] = [build_text_segment(chunk["content"])]
         elif chunk["type"] == "sticker":
-            segs = [build_image_segment(chunk["file"])]
+            body = [build_image_segment(chunk["file"])]
         elif chunk["type"] == "face":
-            segs = [build_face_segment(chunk["id"])]
+            body = [build_face_segment(chunk["id"])]
         elif chunk["type"] == "combo":
-            segs: List[Dict[str, Any]] = []
+            body = []
             for part in chunk.get("parts", []):
                 if part.get("type") == "text":
                     if part.get("content", "").strip():
-                        segs.append(build_text_segment(part["content"]))
+                        body.append(build_text_segment(part["content"]))
                 elif part.get("type") == "face":
-                    segs.append(build_face_segment(part["id"]))
-            if not segs:
+                    body.append(build_face_segment(part["id"]))
+            if not body:
                 return
         else:
             return
-        await self.onebot.send_private_msg(self.config.account.allowed_user_id, segs)
+
+        segs: List[Dict[str, Any]] = []
+        if quote and quote.get("message_id") is not None:
+            try:
+                segs.append(build_reply_segment(quote["message_id"]))
+            except (TypeError, ValueError) as e:
+                logger.warning(f"[Bot] 引用 id 非法（{quote.get('message_id')!r}），本条不带引用发出: {e}")
+                segs = []
+        segs.extend(body)
+
+        ok = await self.onebot.send_private_msg(
+            self.config.account.allowed_user_id, segs
+        )
+        if not ok and segs and segs[0].get("type") == "reply":
+            logger.warning(
+                f"[Bot] 带引用的消息发送失败（reply 段 id={quote.get('message_id')}），"
+                "去掉引用重发正文"
+            )
+            await self.onebot.send_private_msg(self.config.account.allowed_user_id, body)
 
     async def _set_typing_to_onebot(self, typing: bool) -> bool:
         """FIXES15 "正在输入"状态。user_id 在这里绑定，处理器/调度器只管开/关。
@@ -273,13 +299,20 @@ class CompanionBot:
             self.config.account.allowed_user_id, typing
         )
 
-    async def _on_raw_message(self, text: str, image_path: Optional[str]) -> None:
-        """OneBot 收到机主私聊时交由聚合器"""
-        await self.aggregator.push_message(text, image_path)
+    async def _on_raw_message(
+        self, text: str, image_path: Optional[str], message_id: Any = None
+    ) -> None:
+        """OneBot 收到机主私聊时交由聚合器（FIXES21：message_id 一起带走）"""
+        await self.aggregator.push_message(text, image_path, message_id)
 
-    async def _handle_turn(self, user_text: str, image_path: Optional[str]) -> None:
-        """兼容保留：委托给 TurnHandler 处理单轮对话"""
-        await self.turn_handler.handle_turn(user_text, image_path)
+    async def _handle_turn(
+        self,
+        user_text: str,
+        image_path: Optional[str],
+        quote_targets: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """兼容保留：委托给 TurnHandler 处理单轮对话（FIXES21：批次透传）"""
+        await self.turn_handler.handle_turn(user_text, image_path, quote_targets)
 
     async def run(self) -> None:
         """主运行循环"""

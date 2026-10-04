@@ -16,7 +16,10 @@ from companion.mood import MoodEngine
 from companion.persona import Persona, holiday_span
 from companion.prompts import (
     FACE_PROMPT_BLOCK,
+    QUOTE_USAGE_EXAMPLES,
+    QUOTE_USAGE_RULES,
     SYSTEM_PROMPT_TEMPLATE,
+    format_numbered_batch,
     get_frustration_description,
     get_mood_description,
     get_neglect_description,
@@ -246,6 +249,7 @@ class PromptAssembler:
             chat_rules=chat_rules,
             stickers_list=stickers_list,
             face_block=FACE_PROMPT_BLOCK,
+            quote_block=QUOTE_USAGE_RULES + "\n" + QUOTE_USAGE_EXAMPLES,
             stage_block=stage_block,
             routine_activity=routine_activity,
             mood_desc=mood_desc,
@@ -269,8 +273,14 @@ class PromptAssembler:
         self,
         user_message: str,
         image_data_url: Optional[str] = None,
+        numbered_batch: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[List[Dict[str, Any]], str]:
-        """组装发送给 LLM 的全套 messages：system + 工作记忆 + 当前用户输入"""
+        """组装发送给 LLM 的全套 messages：system + 工作记忆 + 当前用户输入
+
+        FIXES21 `numbered_batch`：本轮聚合批次（每条带 index/text/message_id）。
+        **≥2 条才渲染编号块**——他只发一条时根本没有"指哪句"的问题，
+        硬塞一个 `[1]` 只会诱使她无意义地引用。单条路径的提示词与改动前逐字一致。
+        """
         system_prompt = await self.assemble_system_prompt(user_message)
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
@@ -280,14 +290,23 @@ class PromptAssembler:
             messages.append({"role": turn["role"], "content": turn["content"]})
 
         # 本轮用户输入
-        if image_data_url:
+        block = format_numbered_batch(numbered_batch)
+        if block:
+            # 有编号块就用它当本轮输入（它已经包含这一批的全部文本）
+            user_text = block
+        elif image_data_url:
             user_text = user_message.strip() or "（发来一张图片）"
+        else:
+            # 单条消息的老路径：与 FIXES21 之前逐字一致
+            user_text = user_message
+
+        if image_data_url:
             user_content = [
                 {"type": "text", "text": user_text},
                 {"type": "image_url", "image_url": {"url": image_data_url}},
             ]
             messages.append({"role": "user", "content": user_content})
         else:
-            messages.append({"role": "user", "content": user_message})
+            messages.append({"role": "user", "content": user_text})
 
         return messages, system_prompt
