@@ -60,7 +60,7 @@ from companion.observer import Observer
 from companion.persona import Persona, is_holiday_date
 from companion.proactive import ProactiveScheduler, format_recent_chat
 from companion.prompts import PROACTIVE_GENERATE_PROMPT
-from companion.replier import SILENCE_TOKEN, Replier, is_silence_output
+from companion.replier import SILENCE_TOKEN, Replier, chunk_record_text, is_silence_output
 from companion.stickers import StickerManager
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -512,9 +512,14 @@ async def run_diary_scenario(session, key: str) -> Dict[str, Any]:
 
 
 def _sent_text(chunks) -> str:
-    return "\n".join(
-        c["content"] if c["type"] == "text" else f"[表情:{c.get('desc', '')}]" for c in chunks
-    )
+    """段列表 -> 实发文本。
+
+    FIXES20：委托给 replier 的 chunk_record_text，不要在这里重写一遍"每种段长什么样"。
+    新增了 combo（文字+QQ表情同一条消息）与 face 段之后，这里原来的
+    `c["content"] if c["type"]=="text" else ...` 会在 combo 上直接 KeyError，
+    face 也会被误标成 `[表情:]`（它没有 desc）——**测量工具崩掉 = 整轮基准白跑**。
+    """
+    return "\n".join(chunk_record_text(c) for c in chunks)
 
 
 def _find_placeholders(text: str) -> List[str]:

@@ -15,6 +15,7 @@ from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.persona import Persona, holiday_span
 from companion.prompts import (
+    FACE_PROMPT_BLOCK,
     SYSTEM_PROMPT_TEMPLATE,
     get_frustration_description,
     get_mood_description,
@@ -244,6 +245,7 @@ class PromptAssembler:
             plain_examples_block=plain_examples_block,
             chat_rules=chat_rules,
             stickers_list=stickers_list,
+            face_block=FACE_PROMPT_BLOCK,
             stage_block=stage_block,
             routine_activity=routine_activity,
             mood_desc=mood_desc,

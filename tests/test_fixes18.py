@@ -385,9 +385,11 @@ class TestMetrics(unittest.TestCase):
         for i, h in enumerate(["在呀", "练琴去了", "睡吧晚安", "嗯嗯"], 1):
             turns += _pair(i, "嗯", h)
         m = D.compute_metrics(turns, stage=1, cost=0.01)
-        self.assertEqual(set(m["not_run"]), {"[沉默]合规", "表情包"})
+        # FIXES20：QQ 表情项也走同一条纪律（全程没用过就报 N/A，不报 PASS），
+        # 这批数据里她既没用表情包也没用 QQ 表情，所以 N/A 是三项。
+        self.assertEqual(set(m["not_run"]), {"[沉默]合规", "表情包", "QQ表情"})
         self.assertEqual(m["overall"], "PASS")
-        self.assertEqual(m["judged_metrics"], 4, "N/A 的两项不该计入已判定项数")
+        self.assertEqual(m["judged_metrics"], 4, "N/A 的三项不该计入已判定项数")
         self.assertIn("没跑到", m["not_run_note"])
 
     def test_单发基线_复用benchmark口径(self):

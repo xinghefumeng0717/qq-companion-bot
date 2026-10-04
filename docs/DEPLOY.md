@@ -159,6 +159,43 @@ docker run -d --name napcat --restart always \
 docker ps    # 确认 napcat 在运行
 ```
 
+### 6.1 核对 QQ 系统表情能否发出（FIXES20 发侧版本闸，必做）
+
+> **为什么必须做**：NapCat 发送一条 `face` 段时，如果这个 id 不在**它自己那份**
+> `face_config.json` 里，会**静默丢弃整段**——不报错、不重试、消息照样发出去，
+> 症状是"她明明要发表情，屏幕上什么都没有"，事后极难查（NapCat issue #1987）。
+> 本地清单是照 NapCat **2026-10-04 的 main 分支**核过的；服务器上是
+> `mlikiowa/napcat-docker:latest`，版本可能更旧或更新，**以服务器那份为准**。
+
+```bash
+# 服务器：
+cd /opt/qq-companion
+docker exec napcat sh -c "ls /app/napcat/core/external/face_config.json 2>/dev/null \
+  || find / -name face_config.json -path '*napcat*' 2>/dev/null | head -1"
+```
+
+拿到路径后，把 `companion/faces.py` 里的 `PROMPT_FACE_LIST` 26 个标签逐个对一遍：
+用服务器上那份 `face_config.json` 的 `sysface` 数组查标签名 → id，查不到的从清单剔除。
+
+```bash
+# 服务器：把服务器那份表与本地清单对账（输出"本地清单里这台机器发不出的标签"）
+docker exec napcat cat <上面查到的face_config.json路径> > /tmp/server_face_config.json
+./venv/bin/python - <<'PY'
+import json, sys
+sys.path.insert(0, ".")
+from companion.faces import QQ_FACE_ID_BY_NAME, QQ_FACE_TAGS
+from companion.prompts import PROMPT_FACE_LIST
+srv = {x["QDes"].lstrip("/") for x in json.load(open("/tmp/server_face_config.json", encoding="utf-8"))["sysface"]}
+bad = [n for n, _ in PROMPT_FACE_LIST if n not in srv or QQ_FACE_ID_BY_NAME.get(n) not in QQ_FACE_TAGS]
+print("这台机器发不出的标签：", bad or "无（全部可发）")
+PY
+```
+
+- 输出「无」→ 直接进第 7 步；
+- 输出里有标签 → 把它们从 `companion/prompts.py` 的 `PROMPT_FACE_LIST` 里剔除，
+  改完**必须**重跑一次 `./venv/bin/python -m unittest discover -s tests`（版本闸有单测守着），
+  再重新 scp 上传那两个文件。
+
 ## 第 7 步：扫码登录小号 + 配置 OneBot 接口（本地浏览器操作）
 
 ```bash

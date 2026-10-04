@@ -380,18 +380,51 @@ class TestReplyPerception(_ConnectedCase):
             self.assertEqual(got[0][0], "（他之前说的「我明天要去补考」）\n那你还来吗")
 
     async def test_reply_to_image_or_sticker(self):
-        """被引是图片/表情包 -> 写「一张图」，不编造内容（任务 1 规格）"""
-        for seg_type in ("image", "face", "mface"):
-            with self.subTest(seg_type=seg_type):
+        """被引是图片/表情 -> 描述它是什么，不编造内容（任务 1 规格）
+
+        FIXES20 行为变更（原先 face/mface 也归「一张图」，现在给出真标签）：
+        收侧把 face/mface 翻成方括号标签进了文本流（FIXES20 任务2），
+        纯表情消息从此**不再是"没有任何文本"**，于是 `_describe_quoted_message`
+        走文本分支、写标签而不是「一张图」。
+        `_quoted_media_desc` 的归类逻辑一个字没动（任务书任务2 第3条），
+        变的是"哪一边非空"：真照片仍然没有文本，照旧写「一张图」。
+
+        为什么这是变好而不是把守卫改松：他说"这是啥"、被引的其实是一张狗头，
+        告诉他「一张图」是**报错内容**（小黄脸 15KB，不是照片）；
+        现在告诉他「[doge]」才是真的。仍然不编造被引内容里的任何细节。
+        """
+        # 真照片：没有任何文本 -> 仍旧「一张图」（这一条行为一个字没变）
+        async with self._connected({
+            "get_msg": _getmsg(20002, [{"type": "image", "data": {"file": "abc.jpg"}}])
+        }) as (c, got, ws):
+            ws.feed(_msg_event([
+                {"type": "reply", "data": {"id": 9003}},
+                {"type": "text", "data": {"text": "这是啥"}},
+            ]))
+            self.assertTrue(await _wait_for(lambda: len(got) == 1))
+            self.assertEqual(got[0][0], "（他引用了你之前说的「一张图」）\n这是啥")
+
+        # face / mface：翻译成标签后有文本了 -> 写标签，且都取自 NapCat 映射表
+        cases = [
+            ({"type": "face", "data": {"id": 179}}, "[doge]"),          # 狗头
+            ({"type": "face", "data": {"id": 34}}, "[晕]"),             # 无语
+            ({"type": "face", "data": {"file": "abc.jpg"}}, "[表情]"),   # 畸形 face：无 id 降级
+            ({"type": "mface", "data": {"summary": "比心"}}, "[比心]"),  # 商城表情
+            ({"type": "mface", "data": {"file": "abc.jpg"}}, "[大表情]"),  # 取不到名降级
+        ]
+        for quoted, expected in cases:
+            with self.subTest(quoted=quoted):
                 async with self._connected({
-                    "get_msg": _getmsg(20002, [{"type": seg_type, "data": {"file": "abc.jpg"}}])
+                    "get_msg": _getmsg(20002, [quoted])
                 }) as (c, got, ws):
                     ws.feed(_msg_event([
                         {"type": "reply", "data": {"id": 9003}},
                         {"type": "text", "data": {"text": "这是啥"}},
                     ]))
                     self.assertTrue(await _wait_for(lambda: len(got) == 1))
-                    self.assertEqual(got[0][0], "（他引用了你之前说的「一张图」）\n这是啥")
+                    self.assertEqual(
+                        got[0][0], f"（他引用了你之前说的「{expected}」）\n这是啥"
+                    )
 
     async def test_reply_mixed_text_and_image_keeps_text(self):
         """被引是"文本+图片"混排 -> 保留文本部分，只有真的没有文本才写「一张图」"""

@@ -13,6 +13,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 import aiohttp
 
 from companion.config import OneBotConfig
+from companion.faces import segment_face_tag
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,16 @@ def detect_image_ext_and_mime(data: bytes, filename_or_url: str = "") -> Tuple[s
 def build_text_segment(text: str) -> Dict[str, Any]:
     """构造 OneBot v11 纯文本消息段"""
     return {"type": "text", "data": {"text": text}}
+
+
+def build_face_segment(face_id: int) -> Dict[str, Any]:
+    """构造 OneBot v11 QQ 系统表情段（小黄脸）
+
+    FIXES20 发侧：NapCat 发送不在 face_config 里的 id 会**静默丢弃整段**
+    （issue #1987），所以 face_id 必须先过 companion.faces 的清单与版本闸，
+    不合格的一律在 replier 层降级成文字，不走到这里。
+    """
+    return {"type": "face", "data": {"id": int(face_id)}}
 
 
 def build_image_segment(file_path: str) -> Dict[str, Any]:
@@ -217,7 +228,13 @@ class OneBotClient:
                 self._message_queue.task_done()
 
     async def _process_incoming_message(self, raw_msg: Any) -> None:
-        """解析机主发来的消息段，下载图片，取引用上下文，交给聚合器回调"""
+        """解析机主发来的消息段，下载图片，取引用上下文，交给聚合器回调
+
+        FIXES20 收侧：face 段（QQ 小黄脸）翻译成方括号文字标签按**原始顺序**并入文本流。
+        病灶是这里原本只取 text 段、face 段被静默丢弃——机主发"你真棒[旺柴]"，
+        她只收到"你真棒"，语气全断（他 22.5% 的消息带表情标签，盲区天天生效）。
+        标签形态（`[旺柴]` 而非 `（狗头）`）与他聊天语料一致，模型读起来零障碍。
+        """
         text_parts = []
         image_local_path: Optional[str] = None
         reply_prefix: Optional[str] = None
@@ -230,6 +247,14 @@ class OneBotClient:
                     continue
                 stype = seg.get("type")
                 sdata = seg.get("data", {})
+
+                # 表情段先判：face / mface / 被 NapCat 转成 image 段的大表情。
+                # 命中即整段消费完：只并入文字标签，不再走下载/识图那条路
+                # （商城大表情虽然长得像图片，但它是一张脸，不该被当成"他发来一张照片"）。
+                face_tag = segment_face_tag(seg)
+                if face_tag is not None:
+                    text_parts.append(face_tag)
+                    continue
 
                 if stype == "text":
                     text_parts.append(sdata.get("text", ""))
@@ -327,6 +352,10 @@ class OneBotClient:
     def _extract_message_text(msg_data: Dict[str, Any]) -> str:
         """从 get_msg 返回的 data 中提取文本段。
         文本+图片混排时保留文本部分，只有真的没有任何文本才返回空串。
+
+        FIXES20：face 段（以及被转成 image 段的商城大表情）同样翻成方括号标签并入，
+        与实时来消息那条路（`_process_incoming_message`）走同一个 `segment_face_tag`，
+        免得"他实时发狗头她看得见、引用一条狗头消息却看不见"这种半盲区。
         """
         segments = msg_data.get("message")
         texts: List[str] = []
@@ -336,6 +365,10 @@ class OneBotClient:
         elif isinstance(segments, list):
             for seg in segments:
                 if not isinstance(seg, dict):
+                    continue
+                face_tag = segment_face_tag(seg)
+                if face_tag is not None:
+                    texts.append(face_tag)
                     continue
                 if seg.get("type") == "text":
                     sdata = seg.get("data", {}) or {}

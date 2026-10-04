@@ -24,7 +24,12 @@ from companion.db import Database
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
-from companion.onebot import OneBotClient, build_image_segment, build_text_segment
+from companion.onebot import (
+    OneBotClient,
+    build_face_segment,
+    build_image_segment,
+    build_text_segment,
+)
 from companion.observer import Observer
 from companion.persona import Persona
 from companion.prompts import get_mood_description, get_mood_label, get_trust_description
@@ -232,11 +237,28 @@ class CompanionBot:
             logger.warning(f"[Bot] 凌晨补充生活主线失败: {e}")
 
     async def _send_chunk_to_onebot(self, chunk: Dict[str, Any]) -> None:
-        """分段发送底层调用"""
+        """分段发送底层调用
+
+        FIXES20：新增 face（纯表情气泡）与 combo（文字+表情同一条消息）两种段。
+        combo 是主形态——机主 65% 的表情是"文字+表情同气泡"（其中 97% 挂句尾），
+        拆成两条消息就毁掉了这个语气。OneBot 一条消息本来就支持混合段数组。
+        """
         if chunk["type"] == "text":
             segs = [build_text_segment(chunk["content"])]
         elif chunk["type"] == "sticker":
             segs = [build_image_segment(chunk["file"])]
+        elif chunk["type"] == "face":
+            segs = [build_face_segment(chunk["id"])]
+        elif chunk["type"] == "combo":
+            segs: List[Dict[str, Any]] = []
+            for part in chunk.get("parts", []):
+                if part.get("type") == "text":
+                    if part.get("content", "").strip():
+                        segs.append(build_text_segment(part["content"]))
+                elif part.get("type") == "face":
+                    segs.append(build_face_segment(part["id"]))
+            if not segs:
+                return
         else:
             return
         await self.onebot.send_private_msg(self.config.account.allowed_user_id, segs)

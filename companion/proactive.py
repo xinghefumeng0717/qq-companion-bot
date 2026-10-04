@@ -29,6 +29,7 @@ from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.persona import LONG_HOLIDAY_MIN_SPAN, Persona, holiday_span
 from companion.prompts import (
+    FACE_PROMPT_BLOCK,
     PROACTIVE_DECISION_PROMPT,
     PROACTIVE_GENERATE_PROMPT,
     STAGE_GATING_RESTRICTED,
@@ -37,7 +38,7 @@ from companion.prompts import (
     get_trust_description,
     holiday_prompt_note,
 )
-from companion.replier import Replier
+from companion.replier import Replier, strip_face_markers
 from companion.stickers import StickerManager
 
 logger = logging.getLogger(__name__)
@@ -313,10 +314,14 @@ class ProactiveScheduler:
             )
 
     async def _play_typing_indicator(self, text: str) -> None:
-        """发送前演"正在输入"：开 → 等 T_typing → 关。异常降级为"不演了，照发"。"""
+        """发送前演"正在输入"：开 → 等 T_typing → 关。异常降级为"不演了，照发"。
+
+        FIXES20：与 turn_handler 同款——记录里的 [face:标签] 标记不计入打字时长，
+        打字时长只按她真正打出来的字算（一个 3 字短句挂个脸不该把 T_typing 拉长一倍）。
+        """
         if not self._typing_on:
             return
-        duration = self._calc_typing_duration(text)
+        duration = self._calc_typing_duration(strip_face_markers(text))
         if duration <= 0:
             return
         try:
@@ -377,6 +382,7 @@ class ProactiveScheduler:
             topic_material=material,
             recent_chat=recent_chat_block,
             stickers_list=stickers_list,
+            face_block=FACE_PROMPT_BLOCK,
         )
 
         # 完整人格 system prompt 注入

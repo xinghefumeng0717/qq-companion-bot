@@ -54,7 +54,7 @@ from companion.mood import MoodEngine
 from companion.observer import Observer
 from companion.persona import Persona
 from companion.proactive import ProactiveScheduler
-from companion.replier import Replier, is_silence_output
+from companion.replier import FACE_MAX_PER_TURN, Replier, is_silence_output
 from companion.stickers import StickerManager
 from companion.turn_handler import TurnHandler
 
@@ -108,6 +108,12 @@ SILENCE_FAIL = 1          # 出现 1 次不合规即 FAIL
 # 6) 表情包：全程使用与重复
 STICKER_WARN_N = 8        # 使用次数上限（超了判 WARN，只留原文人工看）
 STICKER_REPEAT_WARN_RATE = 0.5  # 同一表情重复率
+
+# 6b) QQ 系统表情（FIXES20）：使用次数、气泡占比、三种发法分布
+# 阈值是"像人"的刻度，不是硬上限——硬上限（每轮 ≤2）在 replier 里由代码保证，
+# 这里越界即 FAIL（机制被绕过属于代码 bug），偏刷屏只判 WARN 交所有者抽读。
+FACE_WARN_N = 6                     # 一局里带脸的气泡数上限
+FACE_BUBBLE_WARN_RATIO = 0.5        # 带脸气泡 / 她的全部气泡，超过即判"刷屏"
 
 # 单发复用口径（与 benchmark_v4 一致）
 NAME_RE = re.compile(r"阿俊|小W同学")
@@ -752,6 +758,42 @@ def metric_silence_compliance(turns: Sequence[Dict[str, Any]]) -> Dict[str, Any]
     }
 
 
+def collect_sent_chunks(chunks: Sequence[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """把 replier 的段列表摊平成"给人看"的三组：气泡文字 / 表情包文件 / QQ 表情标签。
+
+    FIXES20：新增了 combo 段（文字+QQ 表情在**同一条** QQ 消息里）与纯 face 段，
+    老代码只认 `type=="text"`，会把 combo 里的文字整段漏掉——她说了话，
+    transcript 里却查无此话，指标全部偏空。**测量工具漏采比不测更坏**，
+    所以这里统一收口，主聊与主动消息两条路都走这一个函数。
+
+    气泡文字用"人看的形态"：combo 摊成 `你真棒[doge]`，纯脸摊成 `[流泪][流泪]`
+    （裸方括号，与机主真实发法一致，transcript 一眼能读）。
+    表情标签同时另计一份，供 face 使用统计用。
+    """
+    bubbles: List[str] = []
+    stickers: List[str] = []
+    faces: List[str] = []
+    for c in chunks:
+        ctype = c.get("type")
+        if ctype == "text":
+            if c.get("content", "").strip():
+                bubbles.append(c["content"])
+        elif ctype == "sticker":
+            stickers.append(c.get("file", ""))
+        elif ctype == "face":
+            faces.append(c.get("tag", ""))
+            bubbles.append(f"[{c.get('tag', '')}]")
+        elif ctype == "combo":
+            parts = c.get("parts", []) or []
+            text = "".join(p.get("content", "") for p in parts if p.get("type") == "text")
+            tags = [p.get("tag", "") for p in parts if p.get("type") == "face"]
+            faces.extend(tags)
+            shown = f"{text}{''.join(f'[{t}]' for t in tags)}"
+            if shown.strip():
+                bubbles.append(shown)
+    return {"bubbles": bubbles, "stickers": stickers, "faces": faces}
+
+
 def metric_sticker_usage(turns: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """表情包：全程使用次数、重复率；语境匹配**只留原文不做自动判**（BENCHMARK_V4 纪律）。"""
     uses = []
@@ -783,6 +825,93 @@ def metric_sticker_usage(turns: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def metric_face_usage(turns: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """QQ 表情：使用次数、三种发法分布、气泡占比、重复率。
+
+    **零使用时报 N/A 而不是 PASS**：整局一次都没发过脸，"没超上限/没刷屏"是自动成立
+    的空断言，报 PASS 会让报告读起来像"刷屏问题验过了"（零数据 == 零违规）。
+    同 [沉默]/表情包 两项的纪律。
+
+    语境匹配**只留原文不做自动判**（BENCHMARK_V4 纪律）："被损时回 [doge] 而不是
+    [流泪]" 这件事要看上下文才知道，脚本判不了也不该假装能判。
+    """
+    uses: List[Dict[str, Any]] = []
+    mixed_tail = 0        # 混排句尾（文字+脸同一条）
+    face_only = 0         # 纯表情气泡
+    same_double = 0       # 同款二连（同一条消息里两个一样的脸）
+    her_bubbles = 0
+    face_bubbles = 0
+    over_cap_turns: List[int] = []
+
+    for t in turns:
+        if t.get("speaker") != "her":
+            continue
+        bubbles = list(t.get("bubbles") or [])
+        faces = list(t.get("faces") or [])
+        faceset = set(faces)
+        her_bubbles += len(bubbles)
+        if len(faces) > FACE_MAX_PER_TURN:
+            over_cap_turns.append(t["idx"])
+        for b in bubbles:
+            tags = _bubble_tags(b)
+            # 降级成字面量 "[face:x]" 的那个气泡不算"发了脸"——它真的没发出去
+            if not tags or not set(tags) <= faceset:
+                continue
+            face_bubbles += 1
+            if before_face_text(b):
+                mixed_tail += 1
+            else:
+                face_only += 1
+            if len(tags) >= 2 and len(set(tags)) == 1:
+                same_double += 1
+            uses.append({"turn": t["idx"], "bubble": b, "tags": tags})
+
+    names = [tag for u in uses for tag in u["tags"]]
+    uniq = len(set(names))
+    repeat_rate = round(1 - uniq / len(names), 4) if names else 0.0
+    bubble_ratio = round(face_bubbles / her_bubbles, 4) if her_bubbles else 0.0
+    if not uses:
+        verdict = "N/A"
+    elif over_cap_turns:
+        verdict = "FAIL"          # 机制层硬上限被绕过：这是代码 bug，不是风格问题
+    elif len(uses) > FACE_WARN_N or bubble_ratio > FACE_BUBBLE_WARN_RATIO:
+        verdict = "WARN"
+    else:
+        verdict = "PASS"
+    return {
+        "count": len(names),
+        "unique": uniq,
+        "repeat_rate": repeat_rate,
+        "bubble_ratio": bubble_ratio,
+        "forms": {
+            "混排句尾": mixed_tail,
+            "纯表情气泡": face_only,
+            "同款二连": same_double,
+        },
+        "over_cap_turns": over_cap_turns,
+        "verdict": verdict,
+        "not_run_reason": None if uses else "全程她没有发过 [face:]，本项无观测样本",
+        "detail": uses[:15],
+        "note": "语境匹配留原文交所有者抽读，不做自动判",
+        "threshold_note": THRESHOLD_NOTE,
+    }
+
+
+def before_face_text(bubble: str) -> str:
+    """气泡里第一个 [标签] 之前的那截文字（空串 = 纯表情气泡）。"""
+    i = bubble.find("[")
+    return bubble[:i] if i > 0 else ""
+
+
+def _bubble_tags(bubble: str) -> List[str]:
+    """气泡里所有方括号标签（`[doge]` / `[流泪][流泪]`）。
+
+    刻意连降级出来的字面量 `[face:x]` 一起抓（x 会被当成标签）——
+    调用方再用"是否都在本轮实发 faces 里"把它剔掉，避免"说了标记就算发了脸"。
+    """
+    return re.findall(r"\[([^\[\]]+)\]", bubble)
+
+
 def find_her_closing_turn(turns: Sequence[Dict[str, Any]]) -> Optional[int]:
     """找出她第一次收场的轮次（带温度短气泡收尾 / 道别），供拖尾指标用。"""
     for t in turns:
@@ -806,6 +935,7 @@ def compute_metrics(
         "称呼漂移": metric_address_drift(turns, stage),
         "[沉默]合规": metric_silence_compliance(turns),
         "表情包": metric_sticker_usage(turns),
+        "QQ表情": metric_face_usage(turns),
     }
     single = metric_bubble_stats(turns)
     verdicts = {k: v["verdict"] for k, v in multi.items()}
@@ -911,6 +1041,10 @@ class TurnRecord:
     text: str
     time: str
     bubbles: List[str] = field(default_factory=list)
+    # FIXES20：QQ 表情实发清单。必须留在 TurnRecord 上并被 _rec_to_dict 带走——
+    # 少了它 compute_metrics 拿到的投影里没有这个字段，指标会把"她发了 3 个脸"
+    # 报成"全程没发过"的 N/A（有数据被报成无样本，报告读起来像验过了）。
+    faces: List[str] = field(default_factory=list)
     silenced: bool = False
     note: str = ""
     snapshot: Dict[str, Any] = field(default_factory=dict)
@@ -1171,8 +1305,11 @@ class DuoSimulator:
         # 这里有界等待它落地（不改动生产代码）
         observer_data = await self._drain_observer()
 
-        bubbles = [c.get("content", "") for c in self.sent_chunks if c.get("type") == "text"]
-        stickers = [c.get("file", "") for c in self.sent_chunks if c.get("type") == "sticker"]
+        # FIXES20：combo/face 段要摊平（老代码只认 text，会把她说的话整段漏掉）
+        collected = collect_sent_chunks(self.sent_chunks)
+        bubbles = collected["bubbles"]
+        stickers = collected["stickers"]
+        faces = collected["faces"]
         silenced = not self.sent_chunks
         text = "\n".join([b for b in bubbles if b])
 
@@ -1182,11 +1319,13 @@ class DuoSimulator:
             text=text or (SILENCE_TOKEN if silenced else ""),
             time=self.clock.now().strftime("%Y-%m-%d %H:%M"),
             bubbles=bubbles,
+            faces=faces,
             silenced=silenced,
             snapshot={
                 "user_text": user_text,
                 "bubbles": bubbles,
                 "stickers": stickers,
+                "faces": faces,
                 "silenced": silenced,
                 "observer": observer_data,
                 "state_before": before,
@@ -1280,10 +1419,13 @@ class DuoSimulator:
         self.sent_chunks = []
         llm_before = self._llm_row_cursor
         await self.proactive.trigger_cycle()
-        bubbles = [c.get("content", "") for c in self.sent_chunks if c.get("type") == "text"]
-        stickers = [c.get("file", "") for c in self.sent_chunks if c.get("type") == "sticker"]
+        # FIXES20：同上，主动消息这条路也走统一的摊平函数
+        collected = collect_sent_chunks(self.sent_chunks)
+        bubbles = collected["bubbles"]
+        stickers = collected["stickers"]
+        faces = collected["faces"]
         calls = await self._llm_rows_since_cursor()
-        sent = bool(bubbles or stickers)
+        sent = bool(bubbles or stickers or faces)
         self.proactive_log.append({
             "idx": idx,
             "time": self.clock.now().strftime("%Y-%m-%d %H:%M"),
@@ -1305,11 +1447,13 @@ class DuoSimulator:
             text=text,
             time=self.clock.now().strftime("%Y-%m-%d %H:%M"),
             bubbles=bubbles,
+            faces=faces,
             note="主动消息（trigger_cycle）",
             snapshot={
                 "proactive": True,
                 "bubbles": bubbles,
                 "stickers": stickers,
+                "faces": faces,
                 "llm_calls": calls,
                 "state_after": await self._state_snapshot(),
             },
@@ -1448,7 +1592,8 @@ class DuoSimulator:
 def _rec_to_dict(r: TurnRecord) -> Dict[str, Any]:
     return {
         "idx": r.idx, "speaker": r.speaker, "text": r.text, "time": r.time,
-        "bubbles": r.bubbles, "silenced": r.silenced, "note": r.note,
+        "bubbles": r.bubbles, "faces": r.faces,
+        "silenced": r.silenced, "note": r.note,
     }
 
 

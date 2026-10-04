@@ -18,7 +18,7 @@ from companion.observer import Observer
 from companion.persona import holiday_span
 from companion.proactive import ProactiveScheduler
 from companion.prompts import VISION_PERCEPTION_PROMPT
-from companion.replier import Replier, is_silence_output
+from companion.replier import Replier, is_silence_output, strip_face_markers
 from companion.stickers import image_to_base64_data_url
 
 logger = logging.getLogger("companion")
@@ -164,10 +164,13 @@ class TurnHandler:
         只在确认要发送之后调用（沉默分支不进来）。typing 期间又有新消息进来**不打断**：
         聚合器只作用在接收侧，发送侧的表演会自己演完。
         任一环节异常都降级为"不演了，照发"，绝不因打字状态丢掉一条消息。
+
+        FIXES20：打字时长只按"她真正打出来的字"算——记录里的 [face:标签] 标记先抹掉。
+        一个 3 字短句挂个脸，不该因为标记字符把 T_typing 拉长近一倍。
         """
         if not self._typing_on:
             return
-        duration = self.calc_typing_duration(text, is_first_reply)
+        duration = self.calc_typing_duration(strip_face_markers(text), is_first_reply)
         if duration <= 0:
             return
         try:
