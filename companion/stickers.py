@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
@@ -22,6 +23,61 @@ logger = logging.getLogger(__name__)
 MAX_STICKERS_COUNT = 200
 MAX_LONG_EDGE = 1568
 MAX_BASE64_SIZE = 10 * 1024 * 1024  # 10MB
+
+# 新表情包自动打标的字段长度上限（desc 不进提示词，只是给看板/人看的说明）
+DESC_MAX_CHARS = 40
+MEANING_MAX_CHARS = 60
+USAGE_MAX_CHARS = 60
+
+_JSON_TAIL = re.compile(r"```(?:json)?\s*|\s*```", re.I)
+# 中文模型偶尔吐全角冒号 {"画面"："a"}，这不是合法 JSON，json.loads 会直接挂。
+# 只替换**键位置**的冒号（带引号包住），值里的全角冒号原样保留，不污染标注文本。
+_FW_COLON_KEY = re.compile(r'"([^"]+)"\s*：\s*')
+
+
+def parse_sticker_desc_json(text: str) -> Optional[Dict[str, str]]:
+    """解析 STICKER_DESC_PROMPT 的三栏 JSON。失败返回 None —— 调用方据此降级，**不猜**。
+
+    容忍模型把 JSON 包在 ```json 代码块里、键位置用全角冒号、键名尾部带冒号。
+    """
+    if not text:
+        return None
+    s = _JSON_TAIL.sub("", text.strip()).strip()
+    s = _FW_COLON_KEY.sub(r'"\1": ', s)
+    candidates = [s]
+    i, j = s.find("{"), s.rfind("}")
+    if i != -1 and j > i:
+        candidates.append(s[i : j + 1])
+
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        # 三栏里"含义"是这次升级的核心，缺它就当解析失败
+        meaning = _pick(obj, "含义", "意思", "meaning")
+        if not meaning:
+            continue
+        return {
+            "画面": _pick(obj, "画面", "描述", "image")[:DESC_MAX_CHARS],
+            "含义": meaning[:MEANING_MAX_CHARS],
+            "适用场景": _pick(obj, "适用场景", "使用场景", "场景", "usage")[:USAGE_MAX_CHARS],
+        }
+    return None
+
+
+def _pick(obj: Dict[str, Any], *keys: str) -> str:
+    """按键名取值，容忍全角/半角冒号与空格差异；只接受字符串值。"""
+    norm = {}
+    for k, v in obj.items():
+        if isinstance(v, str):
+            norm[str(k).strip().strip("：:").strip()] = v.strip()
+    for k in keys:
+        if norm.get(k):
+            return norm[k]
+    return ""
 
 
 def compute_file_md5(filepath: str) -> str:
@@ -121,8 +177,10 @@ class StickerManager:
         except Exception as e:
             logger.error(f"[Stickers] 保存表情包索引失败: {e}")
 
-    # 提示词可用表情包列表的硬上限：当前 42 键远未到顶，超出才截断（确定性：按键名排序取前 N）
+    # 提示词可用表情包列表的硬上限：当前 43 键远未到顶，超出才截断（确定性：按键名排序取前 N）
     PROMPT_STICKER_LIST_MAX = 60
+    # 列表里括号内含义的显示上限（FIXES17 任务3）：太长会把提示词撑爆且模型抓不住重点
+    MEANING_DISPLAY_CHARS = 15
 
     def get_prompt_sticker_list(self) -> List[str]:
         """获取提示词可用的表情包描述词列表（确定性：按键名排序全量返回）。
@@ -132,12 +190,24 @@ class StickerManager:
         保证同一份 index.json 每次给出完全相同的列表；超过
         PROMPT_STICKER_LIST_MAX 时按同一排序取前 N 个（仍然确定性）。
         index.json 本身不含 created_at，故截断按键名序而非入库时间序——
-        42 键的现状下该分支不可达，取哪种稳定序对模型手感没有区别。
+        43 键的现状下该分支不可达，取哪种稳定序对模型手感没有区别。
+
+        FIXES17 任务3：返回项从纯键名改为「名称（含义）」。旧标注只是画面描述
+        （"白色卡通小动物、紫底、带腮红"），她只能按画面贴话题，而表情包真正的
+        货币是语用功能（这张图是"干饭/撒娇/无语"）。含义太长截断 15 字；
+        没有 meaning 的老数据回退纯键名（兼容，不让格式突然变样）。
         """
         keys = sorted(self._index.keys())
-        if len(keys) <= self.PROMPT_STICKER_LIST_MAX:
-            return keys
-        return keys[: self.PROMPT_STICKER_LIST_MAX]
+        if len(keys) > self.PROMPT_STICKER_LIST_MAX:
+            keys = keys[: self.PROMPT_STICKER_LIST_MAX]
+        out: List[str] = []
+        for k in keys:
+            meaning = (self._index[k].get("meaning") or "").strip()
+            if meaning:
+                out.append(f"{k}（{meaning[: self.MEANING_DISPLAY_CHARS]}）")
+            else:
+                out.append(k)
+        return out
 
     def match_sticker(self, word: str) -> Optional[str]:
         """按描述词匹配表情包文件路径（优先精确，失败则模糊子串匹配）
@@ -174,8 +244,12 @@ class StickerManager:
         1. 检查上限 (200 张，查 SQLite)
         2. MD5 去重 (查 SQLite)
         3. 复制到 stickers/ 并处理重名
-        4. 调用视觉模型生成 <=15 字描述
+        4. 调用视觉模型生成三栏标注（画面/含义/适用场景）
         5. 写入 index.json 与 SQLite
+
+        FIXES17 任务4：旧的只产 15 字画面描述，等于把"语用功能"丢掉。这里改成
+        三栏 JSON。但**降级链必须活着**：模型返回旧格式 / 解析失败 / 调 API 报错，
+        都退回"名称 + 画面 desc"的旧两栏行为——不炸、不丢收藏。
         """
         count_row = await self.db.fetchone("SELECT COUNT(*) as cnt FROM stickers")
         current_cnt = count_row["cnt"] if count_row else 0
@@ -208,8 +282,10 @@ class StickerManager:
 
         shutil.copy2(image_path, target_path)
 
-        # 调用视觉模型生成简短描述
+        # 调用视觉模型生成三栏标注（失败一律降级，绝不因为标注失败丢掉这次收藏）
         desc = clean_name
+        meaning = ""
+        usage = ""
         try:
             data_url, _ = image_to_base64_data_url(target_path)
             if data_url and gateway and gateway.config.vision_model:
@@ -228,12 +304,23 @@ class StickerManager:
                     temperature=0.5,
                     purpose="sticker_desc",
                 )
-                desc = desc_reply.strip()[:15]
+                parsed = parse_sticker_desc_json(desc_reply)
+                if parsed:
+                    desc, meaning, usage = parsed["画面"], parsed["含义"], parsed["适用场景"]
+                else:
+                    # 降级 1：模型还在按旧规则回一句话 → 当成画面描述裁 15 字
+                    desc = (desc_reply or "").strip()[:15] or clean_name
+                    logger.info(f"[Stickers] 表情包 {clean_name} 三栏 JSON 解析失败，降级为旧格式画面描述")
         except Exception as e:
+            # 降级 2：API 报错 → 连 desc 都没有，用名称兜底
             logger.warning(f"[Stickers] 视觉模型描述表情包失败，使用默认名称: {e}")
 
-        # 写入 index.json
-        self._index[clean_name] = {"file": target_filename, "desc": desc}
+        # 写入 index.json：有含义才带 meaning/usage，字段形状向后兼容
+        entry: Dict[str, str] = {"file": target_filename, "desc": desc}
+        if meaning:
+            entry["meaning"] = meaning
+            entry["usage"] = usage
+        self._index[clean_name] = entry
         self.save_index()
 
         # 写入 SQLite
