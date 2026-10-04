@@ -38,7 +38,7 @@ from companion.prompts import (
     get_trust_description,
     holiday_prompt_note,
 )
-from companion.replier import Replier, strip_face_markers
+from companion.replier import Replier, strip_face_markers, typing_text_from_chunks
 from companion.stickers import StickerManager
 
 logger = logging.getLogger(__name__)
@@ -413,13 +413,21 @@ class ProactiveScheduler:
         # 切段与发送（source=proactive：占位符兜底的 INFO 日志据此标注来源）
         # FIXES22：用上面问过闸门的那份结论（不重复查库），语音与主聊共用额度
         chunks, clean_text = self.replier.parse_reply(
-            reply_text, source="proactive", voice_allowed=voice_ok
+            reply_text,
+            source="proactive",
+            voice_allowed=voice_ok,
+            voice_max_chars=getattr(
+                getattr(self.tts, "config", None), "max_chars", 60
+            ),
         )
         if not chunks:
             return False
 
         logger.info(f"[Proactive] 正在分段发送主动消息: {clean_text}")
-        await self._play_typing_indicator(clean_text)
+        # FIXES22：打字时长按"她真打出来的字"算（语音段不算，它走自己的发送停顿）
+        await self._play_typing_indicator(
+            typing_text_from_chunks(chunks) or clean_text
+        )
         await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
 
         # 发送后落库并累加未回复计数

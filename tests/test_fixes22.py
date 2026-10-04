@@ -89,7 +89,24 @@ class TestDefaultOff(unittest.TestCase):
         """旧调用方不传这个参数 = 语音一律降级，不改一个字符也安全。"""
         chunks, record = _replier().parse_reply("在呢[voice:睡啦[/voice]")
         self.assertEqual(_types(chunks), ["text"])
-        self.assertIn("[voice:睡啦[/voice]", record)
+        self.assertEqual(record, "在呢睡啦", "默认关时剥掉标记只发正文")
+
+    def test_提示词教的写法必须解析得出来(self):
+        """**这条是终审逼出来的真 bug**：提示词教模型写 `[voice:]…[/voice]`
+        （冒号后带右括号），而解析器只认 `[voice:…[/voice]` —— 模型照着提示词写
+        的东西根本解析不出来，功能 100% 静默失效，而且单测全绿（用例都写对了）。
+        两种写法都必须收，提示词与解析器不许各说各话。"""
+        for raw in (
+            "在呢[voice:]睡啦[/voice]",      # 提示词里教的写法
+            "在呢[voice:睡啦[/voice]",        # 无右括号写法
+            "在呢[voice：睡啦[/voice]",        # 全角冒号
+            "在呢[voice: 睡啦 [/voice]",      # 带空格
+        ):
+            with self.subTest(raw=raw):
+                chunks, record = _replier().parse_reply(raw, voice_allowed=True)
+                self.assertEqual(_types(chunks), ["text", "voice"],
+                                 f"这��写法没被认出来：{raw}")
+                self.assertEqual(chunks[1]["content"], "睡啦")
 
 
 # ==========================================
@@ -186,8 +203,33 @@ class TestVoiceSyntax(unittest.TestCase):
         self.assertEqual(strip_voice_markers("[voice:睡了[/voice]"), "（语音消息）睡了")
 
     def test_语音不拉长typing时长(self):
-        """没人一边打字一边发语音：语音段不该计入打字表演的字数。"""
-        self.assertEqual(strip_voice_markers("在呢[voice:睡了[/voice]"), "在呢（语音消息）睡了")
+        """语音是"说"出来的，她没在打那行字 → 不参与打字时长。
+
+        **口径必须在实现里真的生效**：落库记录里 voice 段早已被
+        `chunk_record_text` 变成「（语音消息）…」形态，标记没了，
+        所以不能靠"抹标记"了事——得从**段**里取文字部分（见 typing_text_from_chunks）。
+        """
+        from companion.replier import typing_text_from_chunks
+
+        raw = "在呢[voice:刚练完 手指都快断了[/voice]你说啥"
+        chunks, record = _replier().parse_reply(raw, voice_allowed=True)
+        self.assertEqual(_types(chunks), ["text", "voice", "text"])
+        typing_text = typing_text_from_chunks(chunks)
+        self.assertEqual(typing_text, "在呢\n你说啥", "语音正文混进打字时长了")
+        self.assertNotIn("手指都快断了", typing_text)
+        # 落库仍然保留语音内容（那是给 observer/日记看的，与打字时长两回事）
+        self.assertIn("（语音消息）刚练完 手指都快断了", record)
+
+    def test_纯语音回复的typing文本为空(self):
+        from companion.replier import typing_text_from_chunks
+
+        chunks, _rec = _replier().parse_reply("[voice:睡了[/voice]", voice_allowed=True)
+        self.assertEqual(typing_text_from_chunks(chunks), "")
+
+    def test_段为空时调用方回退到记录(self):
+        from companion.replier import typing_text_from_chunks
+
+        self.assertEqual(typing_text_from_chunks([]), "")
 
     def test_voice_chunk与上限函数(self):
         self.assertEqual(
@@ -276,7 +318,101 @@ class TestDegradation(unittest.TestCase):
         raw = "在呢[voice:刚练完琴 手指有点僵[/voice]你说啥"
         chunks, record = _replier().parse_reply(raw, voice_allowed=False)
         self.assertEqual(_types(chunks), ["text"])
-        self.assertEqual(record, raw, "降级必须原样照发，不能改写她的话")
+        self.assertEqual(record, "在呢刚练完琴 手指有点僵你说啥")
+
+    def test_降级时剥掉标记只发正文(self):
+        """标记语法不能漏到 QQ 上（终审打回的第4条）。
+
+        原实现把 `[voice:…[/voice]` 原样发给机主——那是一串没人看得懂的方括号，
+        而里面的内容本身完全能当话说。降级要"保内容、去语法噪声"。
+        """
+        for raw, expect in (
+            ("在呢[voice:刚练完 手指都快断了[/voice]你说啥", "在呢刚练完 手指都快断了你说啥"),
+            ("[voice:睡啦 明天聊[/voice]", "睡啦 明天聊"),
+            ("我在[voice:练琴呢[/voice]门口", "我在练琴呢门口"),
+        ):
+            with self.subTest(raw=raw):
+                chunks, record = _replier().parse_reply(raw, voice_allowed=False)
+                self.assertEqual(record, expect)
+                self.assertNotIn("[voice", record, "标记语法漏给了机主")
+                self.assertNotIn("[/voice]", record)
+                self.assertTrue(chunks, "降级后也得把话发出去")
+
+    def test_降级时剥标记记INFO日志(self):
+        import logging
+
+        from companion.replier import normalize_voice_markers
+
+        records = []
+
+        class _C(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        log = logging.getLogger("companion.replier")
+        handler = _C()
+        old_level, old_prop = log.level, log.propagate
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        log.propagate = False
+        try:
+            normalize_voice_markers("在呢[voice:睡了[/voice]")
+        finally:
+            log.removeHandler(handler)
+            log.setLevel(old_level)
+            log.propagate = old_prop
+        self.assertTrue(
+            any("剥掉" in m for m in records), f"降级要留痕，实际日志：{records}"
+        )
+
+    def test_超长语音被截断到句读并留痕(self):
+        """截断必须真的接在生产链路上（终审打回的第1条：max_chars 曾是死配置）。"""
+        import logging
+
+        from companion.replier import truncate_for_voice
+
+        long_text = "我今天真的特别特别累，从早到晚没停过。现在只想瘫着。明天还要早起。" * 2
+        records = []
+
+        class _C(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        log = logging.getLogger("companion.replier")
+        handler = _C()
+        old_level, old_prop = log.level, log.propagate
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        log.propagate = False
+        try:
+            chunks, record = _replier().parse_reply(
+                f"[voice:]{long_text}[/voice]", voice_allowed=True, voice_max_chars=60
+            )
+        finally:
+            log.removeHandler(handler)
+            log.setLevel(old_level)
+            log.propagate = old_prop
+
+        self.assertEqual(_types(chunks), ["voice"])
+        spoken = chunks[0]["content"]
+        self.assertLessEqual(len(spoken), 60, "截断没生效：max_chars 是死配置")
+        self.assertLess(len(spoken), len(long_text))
+        self.assertTrue(
+            spoken.endswith(("，", "。", "！", "？", "…")), f"没切在句读上：{spoken!r}"
+        )
+        self.assertTrue(
+            any("截到最近句读" in m for m in records), f"截断要留痕，实际日志：{records}"
+        )
+        # 落库记录与实发一致（不能记一段她没说的话）
+        self.assertEqual(record, f"（语音消息）{spoken}")
+        self.assertEqual(truncate_for_voice(spoken, 60), spoken, "截断应幂等")
+
+    def test_上限可配(self):
+        _chunks, record = _replier().parse_reply(
+            "[voice:]我今天真的很累，今天真的很累[/voice]", voice_allowed=True,
+            voice_max_chars=10,
+        )
+        self.assertLessEqual(len(record.replace("（语音消息）", "")), 10)
 
     def test_降级时不开成两个气泡(self):
         """不可用时用不带 voice 分支的正则：原句一行就是一条消息。"""
@@ -328,6 +464,53 @@ class TestActivityGate(unittest.TestCase):
         ok, why = activity_allows_voice("晚自习时间，手机在手边较为空闲")
         self.assertTrue(ok)
         self.assertIn("例外", why)
+
+    def test_白名单不得放行午睡(self):
+        """终审打回的第一个误伤：白名单里的"回寝室"太宽，"回寝室午睡"被放行了。
+
+        她明明在午睡，那是最不该被语音吵到的时候。修法：白名单只取**卡里
+        明说空闲的具体措辞**（手机在手边/很适合闲聊/看手机聊天…），
+        不再收"回寝室"这种描述地点而非状态的宽泛词。
+        """
+        ok, why = activity_allows_voice("回寝室午睡")
+        self.assertFalse(ok, f"午睡被放行了：{why}")
+        # 同一句里的"回寝室"不影响"洗漱看手机"那条正常放行
+        ok2, _ = activity_allows_voice("回寝室洗漱，吃点水果，看手机聊天")
+        self.assertTrue(ok2)
+
+    def test_卡里明说适合闲聊的条目不得被误拦(self):
+        """终审打回的第二个误伤："…此时精力充沛很适合闲聊"被"背单词/写小论文"拦了。
+
+        卡自己说了适合闲聊，那就是能说话的时候；屏蔽词不该盖过卡里的明确表态。
+        """
+        for act in (
+            "晚上在寝室背单词、写小论文，此时精力充沛很适合闲聊",
+            "周末夜晚在宿舍泡杯花果茶看文学书、写手账，最适合深度聊天",
+        ):
+            with self.subTest(act=act):
+                ok, why = activity_allows_voice(act)
+                self.assertTrue(ok, f"被误伤了：{act}（{why}）")
+
+    def test_本卡真实作息文案逐条判定(self):
+        """拿卡里 57 条作息里最典型的几条钉死（词表跟着卡改就会红）。"""
+        cases = [
+            ("回寝室午睡", False),
+            ("晚上在寝室背单词、写小论文，此时精力充沛很适合闲聊", True),
+            ("晚自习时间，手机在手边较为空闲", True),
+            ("回寝室洗漱，吃点水果，看手机聊天", True),
+            ("基础馆三楼靠窗自习，整理本周读书报告", False),
+            ("早上在基础馆借还书，在二楼选几本下周参考书", False),
+            ("风味食堂吃快餐，买杯咖啡提神，回自习室看书", False),
+            ("蒙民伟楼大排练厅进行文琴交响乐团全团合练，手机静音", False),
+            ("教学区西教连上专业必修（古代汉语与文学经典精读），课间看一眼手机", False),
+            ("已经睡下了，在示例大学宿舍安静的梦乡中", False),
+            ("在临湖餐厅二楼靠窗边吃饭边看湖景，回寝室看闲书", True),
+            ("周末夜晚在宿舍泡杯花果茶看文学书、写手账，最适合深度聊天", True),
+        ]
+        for act, expect in cases:
+            with self.subTest(act=act):
+                ok, why = activity_allows_voice(act)
+                self.assertEqual(ok, expect, f"{act} → {why}")
 
     def test_拿不到活动文案按放行(self):
         ok, _ = activity_allows_voice("")
@@ -550,7 +733,7 @@ class TestVoicePrompt(unittest.TestCase):
                 await close_db(db)
 
         prompt = asyncio.run(run())
-        self.assertIn("[voice:]", prompt)
+        self.assertIn("[voice:", prompt)
         self.assertIn("一天最多", prompt)
 
     def test_她此刻仍独立成行(self):
@@ -571,6 +754,79 @@ class TestVoicePrompt(unittest.TestCase):
             any(ln.startswith("【她此刻】") for ln in prompt.splitlines()),
             "【她此刻】必须仍在行首（开语音时也别被挤掉）",
         )
+
+
+# ==========================================
+# 8. 主动消息通路（任务书任务4 明列：与主聊共用日上限账目）
+# ==========================================
+
+
+class TestProactiveVoicePath(unittest.TestCase):
+    """proactive 那条路的语音闸门 + 额度账目"""
+
+    def _scheduler(self, tts, activity: str = ""):
+        """造一个只够调 _voice_gate_ok 的 ProactiveScheduler 壳"""
+        from companion.config import ProactiveConfig
+        from companion.proactive import ProactiveScheduler
+
+        class _P:
+            name = "青梓"
+
+            def get_current_activity(self, hour, weekday=None, holiday_span=0):
+                return activity
+
+        sched = ProactiveScheduler(
+            config=ProactiveConfig(enabled=True, quiet_hours=[]),
+            persona=_P(), affection=None, mood=None, memory=None, stickers=None,
+            replier=None, gateway=None, db=None, send_msg_fn=None,
+            holidays_provider=lambda: [],
+        )
+        sched.tts = tts
+        return sched
+
+    def test_主动消息与主聊共用同一份额度(self):
+        """主聊发掉两条后，主动消息那条路看到的必须是 2/3（不是各发各的 0/3）。"""
+        from helpers import close_db, make_db
+
+        async def run():
+            db = await make_db()
+            try:
+                tts = TTSManager(TTSConfig(enabled=True, daily_limit=3), db)
+                await tts.bump_daily()          # 主聊那条路发的
+                await tts.bump_daily()
+                sched = self._scheduler(tts, activity="回寝室洗漱，吃点水果，看手机聊天")
+                ok_before = await sched._voice_gate_ok()
+                await tts.bump_daily()          # 额度用满
+                ok_after = await sched._voice_gate_ok()
+                return ok_before, ok_after
+            finally:
+                await close_db(db)
+
+        before, after = asyncio.run(run())
+        self.assertTrue(before, "还剩额度时主动消息应该能发语音")
+        self.assertFalse(after, "额度用满后主动消息必须被拦（共用账目）")
+
+    def test_主动消息同样受作息闸门约束(self):
+        tts = TTSManager(TTSConfig(enabled=True))
+        sched = self._scheduler(
+            tts, activity="蒙民伟楼大排练厅进行文琴交响乐团全团合练，手机静音"
+        )
+        self.assertFalse(asyncio.run(sched._voice_gate_ok()))
+
+    def test_主动消息没装配TTS时一律不放行(self):
+        sched = self._scheduler(None)
+        self.assertFalse(asyncio.run(sched._voice_gate_ok()))
+
+    def test_闸门查询炸了按不放行处理(self):
+        class _Boom:
+            config = TTSConfig(enabled=True)
+
+            async def check_gate(self, activity=""):
+                raise RuntimeError("查库炸了")
+
+        sched = self._scheduler(_Boom(), activity="在临湖吃饭")
+        self.assertFalse(asyncio.run(sched._voice_gate_ok()),
+                         "闸门查询异常不能当成放行（宁可不发语音）")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from companion.replier import (
     Replier,
     is_silence_output,
     strip_face_markers,
-    strip_voice_markers,
+    typing_text_from_chunks,
 )
 from companion.stickers import image_to_base64_data_url
 
@@ -218,14 +218,15 @@ class TurnHandler:
 
         FIXES20：打字时长只按"她真正打出来的字"算——记录里的 [face:标签] 标记先抹掉。
         一个 3 字短句挂个脸，不该因为标记字符把 T_typing 拉长近一倍。
-        FIXES22：语音同理——没人一边打字一边发语音，语音段不参与打字表演的时长计算
-        （它会走自己的"按住说话"停顿）。
+        FIXES22：语音整段不算（语音是"说"出来的，她没在打那行字）。这条的口径在
+        **调用方**就已经落实了（turn_handler 传进来的是 `typing_text_from_chunks`
+        的结果，voice 段压根不在里面），所以这里不必再抹一遍——
+        早先这里写的是"抹 [voice:] 标记"，而记录里标记早被 chunk_record_text
+        换成了「（语音消息）」前缀，那句抹除是**空转**的（注释与实现不符的经典例子）。
         """
         if not self._typing_on:
             return
-        duration = self.calc_typing_duration(
-            strip_voice_markers(strip_face_markers(text)), is_first_reply
-        )
+        duration = self.calc_typing_duration(strip_face_markers(text), is_first_reply)
         if duration <= 0:
             return
         try:
@@ -239,6 +240,20 @@ class TurnHandler:
             logger.warning(f"[Timing] 正在输入展示异常，降级为直接发送: {e}")
         finally:
             await self.close_typing()
+
+    def _voice_max_chars(self) -> int:
+        """单条语音字数上限（从 TTSManager 的配置取，取不到用默认 60）
+
+        截断必须在解析期做（记录与实发一致），所以上限得在 parse_reply 之前问出来。
+        没有 TTSManager（老调用方/测试）时用默认值——反正语音也不可用。
+        """
+        tts = getattr(self, "tts", None)
+        cfg = getattr(tts, "config", None)
+        value = getattr(cfg, "max_chars", 60)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 60
 
     async def _check_voice_gate(self) -> Tuple[bool, str]:
         """语音能不能用：开关 → 日上限 → 作息场景（FIXES22 任务3 第1条）
@@ -378,7 +393,10 @@ class TurnHandler:
         #    FIXES22：voice_allowed 是第 3 步问出来的同一份结论（两次问会各读一次
         #    日计数；同一轮内不会变，用缓存的那份）。
         chunks, clean_record_text = self.replier.parse_reply(
-            full_reply, quote_targets=batch, voice_allowed=voice_allowed
+            full_reply,
+            quote_targets=batch,
+            voice_allowed=voice_allowed,
+            voice_max_chars=self._voice_max_chars(),
         )
         if self.replier.is_silence_decision(full_reply, batch):
             # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，
@@ -400,7 +418,10 @@ class TurnHandler:
             clean_record_text = "刚刚走神了……你再说一次？"
 
         # 5.5 FIXES15：发送前演"正在输入"，演完再逐段发
-        await self.play_typing_indicator(clean_record_text, is_first_reply)
+        # 打字时长的口径是"她真打出来的字"：从**段**里取，不是从落库记录里抹标记
+        # （记录里 voice 已经是「（语音消息）…」形态，标记早没了，抹不掉）。
+        typing_text = typing_text_from_chunks(chunks) or clean_record_text
+        await self.play_typing_indicator(typing_text, is_first_reply)
         await self.replier.send_reply_chunks(chunks, self.send_chunk_fn)
 
         # 6. 本轮对话落库

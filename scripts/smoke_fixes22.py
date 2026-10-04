@@ -251,26 +251,52 @@ async def section_c() -> Dict[str, Any]:
         add("日上限到", False, ok_cap, why_cap)
         print(f"  · 日上限到 → {'放行' if ok_cap else '拦截'}（期望拦截）| {why_cap}")
 
-        # C4 机制层兜底：闸门关着时 [voice:] 原样降级成文字
+        # C4 机制层兜底：闸门关着时 [voice:] **剥掉标记只发正文**
         replier = Replier(ReplyConfig(), _StubStickers())
         raw = "在呢[voice:刚练完 手指都快断了[/voice]你说啥"
+        expect_degraded = "在呢刚练完 手指都快断了你说啥"
         chunks, record = replier.parse_reply(raw, voice_allowed=False)
-        degraded_ok = [c["type"] for c in chunks] == ["text"] and record == raw
-        add("降级为文字（内容一字不少）", True, degraded_ok, record)
-        print(f"  · 闸门关时降级为文字 → {'是' if degraded_ok else '否'}（期望原样）"
-              f"| {[c['type'] for c in chunks]} / {record!r}")
+        degraded_ok = (
+            [c["type"] for c in chunks] == ["text"] and record == expect_degraded
+        )
+        add("降级为文字（剥标记、内容一字不少）", True, degraded_ok, record)
+        print(f"  · 闸门关时降级为文字 → {'是' if degraded_ok else '否'}（期望剥掉标记只发正文）"
+              f"| {record!r}")
+        if not degraded_ok:
+            print(f"      实际: {[c['type'] for c in chunks]} / {record!r}")
 
-        # C5 提示词双保险：关着时模型不该认识 [voice:]/开着才认识
+        # C5 超长语音必须在发送前被截断（max_chars 不是死配置）
+        long_text = "我今天真的特别特别累，从早到晚没停过。现在只想瘫着。明天还要早起。" * 2
+        l_chunks, l_record = replier.parse_reply(
+            f"[voice:]{long_text}[/voice]", voice_allowed=True, voice_max_chars=60
+        )
+        clipped = l_chunks[0]["content"] if l_chunks else ""
+        clip_ok = (
+            l_chunks and l_chunks[0]["type"] == "voice"
+            and len(clipped) <= 60 and clipped != long_text
+            and l_record == f"（语音消息）{clipped}"
+        )
+        add("超长语音被截断且记录与实发一致", True, clip_ok,
+            f"原 {len(long_text)} 字 → 合成 {len(clipped)} 字 / 记录={l_record!r}")
+        print(f"  · 超长截断 → {'OK' if clip_ok else 'NG'}"
+              f"（原 {len(long_text)} → {len(clipped)} 字，期望 ≤60 且记录=实发）")
+
+        # C5 提示词双保险：关着时模型不该认识 [voice:/开着才认识
+        # 找的是前缀 "[voice:" 而不是 "[voice:]"：纪律句里的示范是
+        # [voice:刚练完…[/voice]（冒号后不带右括号），拿后者去 find 会永远落空，
+        # 又是一次"判据找错字符串"的自伤。
         from helpers import make_engine_stack
 
         stack = make_engine_stack(db, persona_path=os.path.join("characters", "qingzi"))
         _m, prompt_off = await stack.assembler.assemble_messages("在吗", None, [], False)
         _m2, prompt_on = await stack.assembler.assemble_messages("在吗", None, [], True)
-        prompt_ok = ("[voice:]" not in prompt_off) and ("[voice:]" in prompt_on)
+        off_has = "[voice:" in prompt_off
+        on_has = "[voice:" in prompt_on
+        prompt_ok = (not off_has) and on_has
         add("提示词双保险（关着不注入/开着才注入）", True, prompt_ok,
-            f"off_has_voice={'[voice:]' in prompt_off}, on_has_voice={'[voice:]' in prompt_on}")
-        print(f"  · 提示词双保险 → 关着有 [voice:]: {'[voice:]' in prompt_off} / "
-              f"开着有 [voice:]: {'[voice:]' in prompt_on}（期望 False/True）")
+            f"off_has_voice={off_has}, on_has_voice={on_has}")
+        print(f"  · 提示词双保险 → 关着有 [voice:: {off_has} / "
+              f"开着有 [voice:: {on_has}（期望 False/True）")
     finally:
         await close_db(db)
 

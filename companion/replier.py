@@ -14,6 +14,7 @@ from companion.config import ReplyConfig
 from companion.faces import face_id_by_name
 from companion.prompts import PROMPT_FACE_TAGS
 from companion.stickers import StickerManager
+from companion.tts import truncate_for_voice
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ _MIXED_BASE = (
     r"|^[ \t]*\[quote[:：](\d+)\]"
 )
 MIXED_SEGMENT_PATTERN = re.compile(
-    _MIXED_BASE + r"|\[voice[:：]([^\[\]]*?)\[/voice\]",
+    _MIXED_BASE + r"|\[voice[:：]\]?\s*([^\[\]]*?)\s*\[/voice\]",
     re.IGNORECASE | re.MULTILINE,
 )
 # 语音不可用（开关关/日上限/作息闸门）时用这份：group(4) 恒为 None
@@ -91,8 +92,12 @@ QUOTE_PATTERN = re.compile(r"^[ \t]*\[quote[:：](\d+)\]", re.IGNORECASE | re.MU
 # 成对出现才算（未闭合/只有开标记 → 当普通文字，不猜她想干嘛）。
 # 刻意用成对标签而不是裸标记：语音是"一段"，开口与闭口要能对上；
 # 裸标记一旦落进正文就会把她正常说话的一部分吃成语音。
+#
+# ⚠ 冒号后**允许**一个右括号：提示词里教的是 `[voice:]…[/voice]`，
+# 而模型极可能照着写成 `[voice:…[/voice]`。只认后者 = 提示词教的写法解析不出来、
+# 功能 100% 静默失效（单测写对了才没照到）。两种都收。
 VOICE_PATTERN = re.compile(
-    r"\[voice[:：]([^\[\]]*?)\[/voice\]", re.IGNORECASE
+    r"\[voice[:：]\]?\s*([^\[\]]*?)\s*\[/voice\]", re.IGNORECASE
 )
 
 # 落库形态：与收侧他的语音转写同格式（observer/日记只认这一种形态）
@@ -624,20 +629,34 @@ def keep_first_quote(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ── 语音回复发侧（FIXES22 阶段 A）─────────────────────────────────
 
 
-def voice_chunk(content: str, allowed: bool) -> Optional[Dict[str, Any]]:
+def voice_chunk(
+    content: str, allowed: bool, max_chars: int = 60
+) -> Optional[Dict[str, Any]]:
     """把 `[voice:]口语[/voice]` 的内容变成 voice 段；不可用时返回 None（按文字降级）。
 
     `allowed` 是**机制层兜底**（开关/日上限/作息闸门的合并结论，由 turn_handler
     问过 TTSManager 得出）：提示词层已经保证"闸门关时模型看不到 [voice:]"，
     这里再挡一次——**双保险**。任何一关不过都降级成文字，不丢内容。
+
+    `max_chars` 在**这里**截断而不是等到合成：落库记录由段反推，
+    在解析期截断才能保证"她说的"与"记下来的"与"合成出去的"是同一段话
+    （截在合成期的话，机主听到 20 秒、数据库里却是 60 字，observer/日记读到的
+    是一句她没说过的话）。tts.synthesize 里还会再截一次作兜底（幂等）。
     """
     text = (content or "").strip()
     if not text:
         return None
     if not allowed:
-        logger.info("[Replier] 语音不可用（开关/上限/作息闸门），按普通文字降级")
+        logger.info("[Replier] 语音不可用（开关/上限/作息闸门），剥掉标记按文字发出")
         return None
-    return {"type": "voice", "content": text}
+    clipped = truncate_for_voice(text, max_chars)
+    if clipped != text:
+        logger.info(
+            f"[Replier] 语音超长（{len(text)} 字 > {max_chars}），截到最近句读：{clipped}"
+        )
+    if not clipped:
+        return None
+    return {"type": "voice", "content": clipped}
 
 
 def keep_first_voice(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -671,11 +690,60 @@ def strip_voice_markers(text: str) -> str:
     """把记录文本里的 `[voice:]…[/voice]` 抹成 `（语音消息）…`（与收侧对称）。
 
     记录形态与收侧他的语音转写统一：`（语音消息）文本`。
-    给 typing 算时长也用它——没人一边打字一边发语音，语音段不该拉长打字表演。
     """
     if not text:
         return text or ""
     return VOICE_PATTERN.sub(lambda m: f"{VOICE_RECORD_PREFIX}{m.group(1).strip()}", text)
+
+
+def typing_text_from_chunks(chunks: List[Dict[str, Any]]) -> str:
+    """从段列表算出"她真打出来的字"——**打字表演的时长口径**（FIXES22）
+
+    为什么不能拿落库记录去算（这是本条踩过的坑）：记录里 voice 段已经被
+    `chunk_record_text` 变成 `（语音消息）内容` 了，**标记早没了**，
+    再拿正则去抹 `[voice:]` 什么也抹不掉，于是语音正文照样被算进打字时长——
+    等于替她把那段话又打了一遍。voice/sticker 是"发出去的一张图/一段声音"，
+    不是打字，所以只有 text/combo 的文字部分参与时长计算。
+
+    段为空时返回空串（调用方此时应回退到记录文本，见 turn_handler）。
+    """
+    parts: List[str] = []
+    for c in chunks:
+        ctype = c.get("type")
+        if ctype == "text":
+            parts.append(c.get("content", ""))
+        elif ctype == "combo":
+            parts.append(
+                "".join(p.get("content", "") for p in c.get("parts", [])
+                        if p.get("type") == "text")
+            )
+    return "\n".join(p for p in parts if p.strip())
+def strip_voice_segments(text: str) -> str:
+    """把 `[voice:]…[/voice]` **整段抹掉**（只留她真打出来的字）。
+
+    给 typing 时长用（FIXES22 任务2 第5条）：语音是"说"出来的不是"打"出来的，
+    拿她的语音正文去算打字时长会平白拉长"正在输入"的表演。
+    注意与 `strip_voice_markers` 的区别：那个是**落库形态**（要留内容），
+    这个是**打字表演**（连内容都不算）。
+    """
+    if not text:
+        return text or ""
+    return VOICE_PATTERN.sub("", text)
+
+
+def normalize_voice_markers(text: str) -> str:
+    """语音不可用时：把 `[voice:]口语[/voice]` 换成**正文**（标记剥掉）。
+
+    降级必须保内容、去掉语法噪声：她写"在呢[voice:刚练完[/voice]你说啥"，
+    语音发不出去时应该变成"在呢刚练完你说啥"，而不是把
+    `[voice:刚练完[/voice]` 原样糊到机主脸上（那是标记，不是话）。
+    """
+    if not text or ("[voice" not in text and "[VOICE" not in text):
+        return text or ""
+    stripped = VOICE_PATTERN.sub(lambda m: m.group(1), text)
+    if stripped != text:
+        logger.info("[Replier] 语音降级为文字：已剥掉 [voice:] 标记，只发正文")
+    return stripped
 
 
 def merge_quote_into_next(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -835,6 +903,7 @@ class Replier:
         source: str = "reply",
         quote_targets: Optional[List[Dict[str, Any]]] = None,
         voice_allowed: bool = False,
+        voice_max_chars: int = 60,
     ) -> Tuple[List[Dict[str, Any]], str]:
         """处理回复全文：
         0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 返回 ([], "")
@@ -862,6 +931,8 @@ class Replier:
         `voice_allowed`（FIXES22）：机制层能不能现在发语音的结论，由 turn_handler
         问过 TTSManager（开关/日上限/作息闸门）得出。默认 False = 语音一律降级成文字，
         也就是**关着的时候旧调用方一行不改就是安全的**。
+        `voice_max_chars`：单条语音字数上限（默认 60 ≈ 20 秒），在**解析期**就截断，
+        保证"落库记录 = 实际合成出去的那段"是同一句（见 voice_chunk 的说明）。
 
         落库记录由最终发出的段反推，实发多少就记多少：
         被截断丢弃的文字段不会留在记录里，不丢表情包段、不丢 QQ 表情段。
@@ -917,6 +988,13 @@ class Replier:
         #     放在标记扫描之前——降级后它就是普通文字，自然落进同一个文字段、
         #     留在同一个气泡里，不会被拆成"你真棒" + "[face:微笑]"两条。
         clean_text = normalize_face_markers(clean_text)
+
+        # 3.6 FIXES22：语音不可用时，**剥掉标记只留正文**。
+        #     走 no-voice 正则意味着标记压根不被识别，所以必须先在这里把标记
+        #     换成正文（而不是像 face 那样"原样保留"）：标记语法漏到 QQ 上，
+        #     机主看到的是一串没人看得懂的方括号，而内容本身完全能当话说。
+        if not voice_allowed:
+            clean_text = normalize_voice_markers(clean_text)
 
         # 4. 表情包 / QQ 表情 / 引用 / 语音标记匹配与切分（一条正则一次扫，原句顺序原样保留）
         #    每段带一个 "_end_line"：它结束在第几行。合并阶段靠它判断
@@ -989,15 +1067,21 @@ class Replier:
                     if not self._append_marker_as_text(segments, m.group(0), line):
                         pending_leading_marker = m.group(0)
             elif voice_text is not None:
-                # FIXES22 语音段。可用就成段，不可用（开关/上限/闸门）就**保留原标记**：
-                # 她写的是什么就发什么，一个字都不改（降级不丢内容、不改写她的话）。
-                vc = voice_chunk(voice_text, voice_allowed)
+                # FIXES22 语音段。可用就成段（并按 max_chars 截断，宁可短不可长）；
+                # 不可用（开关/上限/闸门）→ **剥掉标记只发正文**：
+                # "[voice:刚练完 手指都快断了[/voice]" 这种标记语法漏到 QQ 上，
+                # 机主看到的是一串没人看得懂的方括号，而里面的内容本身完全能当话说。
+                vc = voice_chunk(voice_text, voice_allowed, voice_max_chars)
                 if vc is not None:
                     vc["_line"] = line
                     vc["_end_line"] = line
                     segments.append(vc)
                 else:
-                    if not self._append_marker_as_text(segments, m.group(0), line):
+                    body = voice_text.strip()
+                    if body:
+                        if not self._append_marker_as_text(segments, body, line):
+                            pending_leading_marker = body
+                    elif not self._append_marker_as_text(segments, m.group(0), line):
                         pending_leading_marker = m.group(0)
             else:
                 # QQ 系统表情。3.5 步已把不合法的降级成文字了，这里拿到 None
