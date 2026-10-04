@@ -28,6 +28,7 @@ from companion.onebot import (
     OneBotClient,
     build_face_segment,
     build_image_segment,
+    build_record_segment,
     build_reply_segment,
     build_text_segment,
 )
@@ -38,6 +39,7 @@ from companion.proactive import ProactiveScheduler
 from companion.replier import Replier
 from companion.stickers import StickerManager
 from companion.turn_handler import TurnHandler
+from companion.tts import TTSManager
 from companion.voice import VoiceProcessor
 
 # 日志配置
@@ -161,6 +163,9 @@ class CompanionBot:
         )
 
         self.voice_processor = VoiceProcessor(config.voice)
+        # FIXES22：语音回复（阶段 A，默认关）。与语音输入并列成一个独立开关，
+        # 语音输入关了不影响她说话，语音输出关了也不影响她听。
+        self.tts = TTSManager(config.tts, self.db)
 
         self.proactive = ProactiveScheduler(
             config=config.proactive,
@@ -178,6 +183,7 @@ class CompanionBot:
             set_typing_fn=self._set_typing_to_onebot,
             timing_config=config.timing,
             arcs=self.arcs,
+            tts=self.tts,   # FIXES22：与主聊共用同一份语音账目
         )
 
         self.turn_handler = TurnHandler(
@@ -191,6 +197,7 @@ class CompanionBot:
             send_chunk_fn=self._send_chunk_to_onebot,
             set_typing_fn=self._set_typing_to_onebot,
             timing_config=config.timing,
+            tts=self.tts,   # FIXES22：语音闸门
         )
         self.aggregator = MessageAggregator(turn_handler=self.turn_handler.handle_turn)
 
@@ -267,6 +274,10 @@ class CompanionBot:
                     body.append(build_face_segment(part["id"]))
             if not body:
                 return
+        elif chunk["type"] == "voice":
+            # FIXES22：语音走独立通道（要合成、要删临时文件、要计日额度）
+            await self._send_voice_chunk(chunk)
+            return
         else:
             return
 
@@ -288,6 +299,50 @@ class CompanionBot:
                 "去掉引用重发正文"
             )
             await self.onebot.send_private_msg(self.config.account.allowed_user_id, body)
+
+    async def _send_voice_chunk(self, chunk: Dict[str, Any]) -> None:
+        """语音段：合成 → 发送 → 删临时文件（FIXES22 任务2 第3条）
+
+        合成失败（超时/异常/空文件）时**按普通文字发出去**——语音是锦上添花，
+        绝不能因为合成器抽风把她这句话弄丢。删临时文件放 finally，异常也删。
+        """
+        text = (chunk.get("content") or "").strip()
+        if not text:
+            return
+        tts = getattr(self, "tts", None)
+        if tts is None:
+            await self.onebot.send_private_msg(
+                self.config.account.allowed_user_id,
+                [build_text_segment(text)],
+            )
+            return
+
+        audio_path = None
+        try:
+            audio_path = await tts.synthesize(text)
+            if not audio_path:
+                logger.info("[Bot] 语音合成未成功，本条按文字发出")
+                await self.onebot.send_private_msg(
+                    self.config.account.allowed_user_id,
+                    [build_text_segment(text)],
+                )
+                return
+            # "按住说话"的节拍：先短暂停顿再发（≤3s），别让语音和上一条文字粘在一起
+            try:
+                await asyncio.sleep(min(3.0, 0.6 + 0.04 * len(text)))
+            except asyncio.CancelledError:
+                raise
+            ok = await self.onebot.send_private_msg(
+                self.config.account.allowed_user_id,
+                [build_record_segment(audio_path)],
+            )
+            if ok:
+                used = await tts.bump_daily()
+                logger.info(
+                    f"[Bot] 语音已发出（{len(text)} 字，今日第 {used} 条）"
+                )
+        finally:
+            tts.cleanup(audio_path)
 
     async def _set_typing_to_onebot(self, typing: bool) -> bool:
         """FIXES15 "正在输入"状态。user_id 在这里绑定，处理器/调度器只管开/关。

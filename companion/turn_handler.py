@@ -18,7 +18,12 @@ from companion.observer import Observer
 from companion.persona import holiday_span
 from companion.proactive import ProactiveScheduler
 from companion.prompts import VISION_PERCEPTION_PROMPT
-from companion.replier import Replier, is_silence_output, strip_face_markers
+from companion.replier import (
+    Replier,
+    is_silence_output,
+    strip_face_markers,
+    strip_voice_markers,
+)
 from companion.stickers import image_to_base64_data_url
 
 logger = logging.getLogger("companion")
@@ -85,6 +90,7 @@ class TurnHandler:
         send_chunk_fn: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
         set_typing_fn: Optional[Callable[[bool], Coroutine[Any, Any, bool]]] = None,
         timing_config: Optional[TimingConfig] = None,
+        tts: Optional[Any] = None,
     ):
         self.config = config
         self.gateway = gateway
@@ -99,6 +105,8 @@ class TurnHandler:
         # 冒烟脚本零改动即得旧行为）；生产由 main.py 显式注入 config.timing。
         self.set_typing_fn = set_typing_fn
         self.timing = timing_config
+        # FIXES22：语音闸门问的是它；默认 None = 语音整体关着（既有测试与旧调用方零改动）
+        self.tts = tts
         self._typing_on = (
             timing_config is not None
             and timing_config.typing_indicator_enabled
@@ -210,10 +218,14 @@ class TurnHandler:
 
         FIXES20：打字时长只按"她真正打出来的字"算——记录里的 [face:标签] 标记先抹掉。
         一个 3 字短句挂个脸，不该因为标记字符把 T_typing 拉长近一倍。
+        FIXES22：语音同理——没人一边打字一边发语音，语音段不参与打字表演的时长计算
+        （它会走自己的"按住说话"停顿）。
         """
         if not self._typing_on:
             return
-        duration = self.calc_typing_duration(strip_face_markers(text), is_first_reply)
+        duration = self.calc_typing_duration(
+            strip_voice_markers(strip_face_markers(text)), is_first_reply
+        )
         if duration <= 0:
             return
         try:
@@ -227,6 +239,34 @@ class TurnHandler:
             logger.warning(f"[Timing] 正在输入展示异常，降级为直接发送: {e}")
         finally:
             await self.close_typing()
+
+    async def _check_voice_gate(self) -> Tuple[bool, str]:
+        """语音能不能用：开关 → 日上限 → 作息场景（FIXES22 任务3 第1条）
+
+        作息文案取**这一轮提示词里已经算好的那一份**（`last_assembled_prompt` 里的
+        【她此刻】行）还是重新算？重新算：assembler 算它时带了 holiday_span 等参数，
+        这里再算一遍要复现那些参数才对得上。取不到就按"允许"处理（宁可多试一次，
+        合成失败也会降级）。
+        拿不到 TTSManager（老调用方/测试）时一律 False：默认关 = 安全。
+        """
+        tts = getattr(self, "tts", None)
+        if tts is None:
+            return False, "没有装配 TTSManager"
+        activity = ""
+        try:
+            activity = await self._current_activity_text()
+        except Exception as e:  # 作息查不到不该挡住主流程
+            logger.debug(f"[Timing] 取作息文案失败（语音闸门按允许处理）: {e}")
+        return await tts.check_gate(activity)
+
+    async def _current_activity_text(self) -> str:
+        """当前活动文案（与 assembler 同一份口径：节假日段长也算进去）"""
+        now_dt = datetime.now()
+        today = now_dt.strftime("%Y-%m-%d")
+        span = holiday_span(today, self.config.get_holidays())
+        return self.assembler.persona.get_current_activity(
+            now_dt.hour, now_dt.weekday(), holiday_span=span
+        )
 
     async def handle_turn(
         self,
@@ -304,9 +344,14 @@ class TurnHandler:
             _sync_image_desc_to_batch(batch, user_text)
 
         # 3. 提示词组装（编号块由 quote_targets 生成）
+        #    FIXES22：**先问语音闸门再组装**——提示词层要不要写语音能力说明，
+        #    取决于这一轮闸门开不开（关着时模型连 [voice:] 都不该认识）。
+        #    所以闸门结论同时喂给 assemble_messages 与后面的 parse_reply。
+        voice_allowed, voice_why = await self._check_voice_gate()
         messages, sys_prompt = await self.assembler.assemble_messages(
-            user_text, image_data_url, numbered_batch=batch
+            user_text, image_data_url, numbered_batch=batch, voice_allowed=voice_allowed
         )
+        logger.info(f"[Bot] 语音闸门: {'可用' if voice_allowed else '不可用'}（{voice_why}）")
 
         # 4. LLM 流式调用
         # 注意：typing 在这一步之前一定没开过——"生成失败/走神兜底前必须先收掉 typing"
@@ -328,9 +373,12 @@ class TurnHandler:
         full_reply = "".join(reply_parts).strip()
         logger.info(f"[Bot] LLM 回复全文: {full_reply}")
 
-        # 5. 回复管道切段与打字延迟发送（FIXES21：把批次传下去，编号才能翻译成 message_id）
+        # 5. 回复管道切段与打字延迟发送
+        #    FIXES21：把批次传下去，编号才能翻译成 message_id
+        #    FIXES22：voice_allowed 是第 3 步问出来的同一份结论（两次问会各读一次
+        #    日计数；同一轮内不会变，用缓存的那份）。
         chunks, clean_record_text = self.replier.parse_reply(
-            full_reply, quote_targets=batch
+            full_reply, quote_targets=batch, voice_allowed=voice_allowed
         )
         if self.replier.is_silence_decision(full_reply, batch):
             # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，

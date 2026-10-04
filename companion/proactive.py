@@ -106,6 +106,7 @@ class ProactiveScheduler:
         set_typing_fn: Optional[Callable[[bool], Coroutine[Any, Any, bool]]] = None,
         timing_config: Optional[TimingConfig] = None,
         arcs: Optional[Any] = None,
+        tts: Optional[Any] = None,
     ):
         self.config = config
         self.persona = persona
@@ -126,6 +127,8 @@ class ProactiveScheduler:
         self.timing = timing_config
         # FIXES16 生活主线：可选注入（None = 无生活剧本，行为与改动前逐字节一致）
         self.arcs = arcs
+        # FIXES22：语音闸门（与主聊共用同一份 TTSManager 账目：开关/日上限/作息）
+        self.tts = tts
         self._typing_on = (
             timing_config is not None
             and timing_config.typing_indicator_enabled
@@ -385,8 +388,12 @@ class ProactiveScheduler:
             face_block=FACE_PROMPT_BLOCK,
         )
 
+        # FIXES22：主动消息同样走语音闸门（"睡前收到她一条语音"是这张卡的高光场景），
+        # 与主聊共用同一份 TTSManager 账目（开关/日上限/作息）。**先问闸门再组装**：
+        # 关着时提示词里就不该出现 [voice:] 这个写法。
+        voice_ok = await self._voice_gate_ok()
         # 完整人格 system prompt 注入
-        system_prompt = await self.assembler.assemble_system_prompt("")
+        system_prompt = await self.assembler.assemble_system_prompt("", voice_ok)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": gen_user_prompt},
@@ -404,7 +411,10 @@ class ProactiveScheduler:
             return False
 
         # 切段与发送（source=proactive：占位符兜底的 INFO 日志据此标注来源）
-        chunks, clean_text = self.replier.parse_reply(reply_text, source="proactive")
+        # FIXES22：用上面问过闸门的那份结论（不重复查库），语音与主聊共用额度
+        chunks, clean_text = self.replier.parse_reply(
+            reply_text, source="proactive", voice_allowed=voice_ok
+        )
         if not chunks:
             return False
 
@@ -416,6 +426,32 @@ class ProactiveScheduler:
         await self.memory.save_proactive_turn(clean_text)
         await self.increment_unanswered_count()
         return True
+
+    async def _voice_gate_ok(self) -> bool:
+        """主动消息的语音闸门（FIXES22 任务3 第3条）
+
+        与 TurnHandler 问的是同一份状态：同一个 TTSManager 实例，
+        所以"主聊发了一条语音"会**占掉**主动消息的每日额度（共用账目，别两处各发各的）。
+        拿不到 TTSManager / 问出错 → False（默认关）。
+        """
+        tts = getattr(self, "tts", None)
+        if tts is None:
+            return False
+        try:
+            now_dt = datetime.now()
+            span = holiday_span(
+                now_dt.strftime("%Y-%m-%d"),
+                self._holidays_provider() if self._holidays_provider else [],
+            )
+            activity = self.persona.get_current_activity(
+                now_dt.hour, now_dt.weekday(), holiday_span=span
+            )
+            ok, why = await tts.check_gate(activity)
+            logger.debug(f"[Proactive] 语音闸门: {'可用' if ok else '不可用'}（{why}）")
+            return ok
+        except Exception as e:
+            logger.debug(f"[Proactive] 语音闸门查询异常，按不可用处理: {e}")
+            return False
 
     async def _try_event_channel(self) -> bool:
         """FIXES16 事件通道：生活主线刚出结果 → 抢先于 LLM 决策层发一条"脱口而出"。

@@ -78,6 +78,15 @@ max_unanswered = 2                 # 连续 N 条主动消息未获回复，当�
 enabled = true
 model_dir = "data/models/sensevoice"
 
+# 语音回复（FIXES22 阶段 A）——**默认关**，建议等文字层稳定后再手动开
+# 整个段删掉也能跑：代码默认值兜底，结果一样是"装着但关着"
+[tts]
+enabled = false                    # ← 要开启改这里（默认 false = 新功能先装死）
+voice = "zh-CN-XiaoxiaoNeural"     # 预置音色；想更年轻一点可换 zh-CN-XiaoyiNeural
+rate = "-8%"                       # 语速微调；+10%~+20% 会更活泼（默认略压播音腔）
+daily_limit = 3                    # 每日语音条数上限（低频动作，别当复读机）
+max_chars = 60                     # 单条字数上限（≈20 秒；NapCat 超过 35s 有失败报告）
+
 [admin]
 host = "127.0.0.1"
 port = 8080

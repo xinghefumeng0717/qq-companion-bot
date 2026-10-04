@@ -73,6 +73,23 @@ def build_reply_segment(message_id: Any) -> Dict[str, Any]:
     return {"type": "reply", "data": {"id": int(message_id)}}
 
 
+def build_record_segment(file_path: str) -> Dict[str, Any]:
+    """构造 OneBot v11 语音消息段（FIXES22 发侧）
+
+    与 `build_image_segment` 同款：本地文件优先转 base64://，天然穿透 Docker 隔离；
+    否则退 file://。短语音（≤20s）用 base64 完全够（几十 KB）。
+    """
+    if os.path.exists(file_path):
+        import base64
+        with open(file_path, "rb") as f:
+            b64_data = base64.b64encode(f.read()).decode("utf-8")
+        return {"type": "record", "data": {"file": f"base64://{b64_data}"}}
+    abs_path = os.path.abspath(file_path).replace("\\", "/")
+    if not abs_path.startswith("/"):
+        abs_path = "/" + abs_path
+    return {"type": "record", "data": {"file": f"file://{abs_path}"}}
+
+
 def build_image_segment(file_path: str) -> Dict[str, Any]:
     """构造 OneBot v11 本地图片消息段 (优先转为 base64:// 格式，天然穿透 Docker 隔离)"""
     if os.path.exists(file_path):

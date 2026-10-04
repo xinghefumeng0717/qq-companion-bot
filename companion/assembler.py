@@ -19,6 +19,7 @@ from companion.prompts import (
     QUOTE_USAGE_EXAMPLES,
     QUOTE_USAGE_RULES,
     SYSTEM_PROMPT_TEMPLATE,
+    VOICE_PROMPT_BLOCK,
     format_numbered_batch,
     get_frustration_description,
     get_mood_description,
@@ -172,8 +173,15 @@ class PromptAssembler:
             logger.error(f"[Assembler] 生成生活主线块异常: {e}")
             return ""
 
-    async def assemble_system_prompt(self, user_message: str) -> str:
-        """按 §6.2 组装完整的 System Prompt"""
+    async def assemble_system_prompt(
+        self, user_message: str, voice_allowed: bool = False
+    ) -> str:
+        """按 §6.2 组装完整的 System Prompt
+
+        `voice_allowed`（FIXES22）：这一轮能不能发语音。**默认 False = 不注入
+        语音能力说明**——所以既有调用方（测试/脚本/benchmark）零改动即得"语音关着"
+        的行为，提示词里一个字都不会多。
+        """
         now_dt = datetime.now()
         weekday_str = WEEKDAYS[now_dt.weekday()]
         current_time_str = f"{now_dt.strftime(TIME_FORMAT)} 星期{weekday_str}"
@@ -250,6 +258,11 @@ class PromptAssembler:
             stickers_list=stickers_list,
             face_block=FACE_PROMPT_BLOCK,
             quote_block=QUOTE_USAGE_RULES + "\n" + QUOTE_USAGE_EXAMPLES,
+            # FIXES22：空串 = 不注入能力说明。语音默认关，模型就不该认识 [voice:]。
+            # voice_allowed 由调用方（TurnHandler / ProactiveScheduler）问过
+            # TTSManager 的闸门结论传进来——**显式参数而不是共享属性**：
+            # 主动消息与主聊共用一个 assembler，共享可变开关会互相串味。
+            voice_block=VOICE_PROMPT_BLOCK if voice_allowed else "",
             stage_block=stage_block,
             routine_activity=routine_activity,
             mood_desc=mood_desc,
@@ -274,6 +287,7 @@ class PromptAssembler:
         user_message: str,
         image_data_url: Optional[str] = None,
         numbered_batch: Optional[List[Dict[str, Any]]] = None,
+        voice_allowed: bool = False,
     ) -> Tuple[List[Dict[str, Any]], str]:
         """组装发送给 LLM 的全套 messages：system + 工作记忆 + 当前用户输入
 
@@ -281,7 +295,7 @@ class PromptAssembler:
         **≥2 条才渲染编号块**——他只发一条时根本没有"指哪句"的问题，
         硬塞一个 `[1]` 只会诱使她无意义地引用。单条路径的提示词与改动前逐字一致。
         """
-        system_prompt = await self.assemble_system_prompt(user_message)
+        system_prompt = await self.assemble_system_prompt(user_message, voice_allowed)
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
         # 工作记忆（最近 10 轮）

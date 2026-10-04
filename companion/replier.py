@@ -45,20 +45,33 @@ STICKER_PATTERN = re.compile(r"\[(?:sticker|表情)[:：]([^\]]+)\]", re.IGNOREC
 # 裸标签在发侧分不清"这句是她要写给他看的字"还是"她要发的脸"，会撞车。
 FACE_PATTERN = re.compile(r"\[face[:：]([^\]]+)\]", re.IGNORECASE)
 
-# 两类标记合并成一条正则，一次扫描切出全部段：
-# group(1) 命中 = sticker，group(2) 命中 = face，group(3) 命中 = quote。
-# 用一条而不是多条，是为了保证"文字/表情包/表情/引用"在原句里的相对顺序
+# 四类标记合并成一条正则，一次扫描切出全部段：
+# group(1) = sticker，group(2) = face，group(3) = quote，group(4) = voice。
+# 用一条而不是多条，是为了保证"文字/表情包/表情/引用/语音"在原句里的相对顺序
 # 一次扫清（分多次扫会打乱顺序）。
 # quote 带 ^ 与 MULTILINE：**只在行首匹配**——引用是"我回哪句"的指代，
 # 位置固定在回复头部；写在一句话中间的 [quote:2] 一律当普通文字（降级不炸）。
-MIXED_SEGMENT_PATTERN = re.compile(
+# voice 是**成对块**（可以出现在句中：她想把其中一句说出口），所以不带 ^。
+#
+# FIXES22：**语音不可用时改用不带 voice 分支的那份正则**。
+# 否则会把她的原文从标记处切开——"[voice:刚练完琴[/voice]你说啥" 会变成
+# 两条气泡，而模型写的是一行、不可用时它本该一个字都不改地照发。
+_MIXED_BASE = (
     r"\[(?:sticker|表情)[:：]([^\]]+)\]"
     r"|\[face[:：]([^\]]+)\]"
-    r"|^[ \t]*\[quote[:：](\d+)\]",
+    r"|^[ \t]*\[quote[:：](\d+)\]"
+)
+MIXED_SEGMENT_PATTERN = re.compile(
+    _MIXED_BASE + r"|\[voice[:：]([^\[\]]*?)\[/voice\]",
     re.IGNORECASE | re.MULTILINE,
+)
+# 语音不可用（开关关/日上限/作息闸门）时用这份：group(4) 恒为 None
+MIXED_SEGMENT_PATTERN_NO_VOICE = re.compile(
+    _MIXED_BASE, re.IGNORECASE | re.MULTILINE
 )
 
 # 整轮 QQ 表情硬上限（机制层，按机主真实使用数据定的刻度）：
+
 # 他的纯表情气泡 92% 是 1~2 个，同款二连合法（他的语料里有 107 条二连），
 # 三连罕见（21 条）。发侧取"每轮 ≤2"，同时也天然满足"同一气泡 ≤2"。
 FACE_MAX_PER_TURN = 2
@@ -73,6 +86,17 @@ SILENCE_TOKEN = "[沉默]"
 
 # 引用标记（FIXES21）：行首的 [quote:N]
 QUOTE_PATTERN = re.compile(r"^[ \t]*\[quote[:：](\d+)\]", re.IGNORECASE | re.MULTILINE)
+
+# 语音标记（FIXES22）：`[voice:]一小段口语[/voice]`
+# 成对出现才算（未闭合/只有开标记 → 当普通文字，不猜她想干嘛）。
+# 刻意用成对标签而不是裸标记：语音是"一段"，开口与闭口要能对上；
+# 裸标记一旦落进正文就会把她正常说话的一部分吃成语音。
+VOICE_PATTERN = re.compile(
+    r"\[voice[:：]([^\[\]]*?)\[/voice\]", re.IGNORECASE
+)
+
+# 落库形态：与收侧他的语音转写同格式（observer/日记只认这一种形态）
+VOICE_RECORD_PREFIX = "（语音消息）"
 
 
 def strip_leading_quote(text: str) -> Tuple[str, Optional[int]]:
@@ -597,6 +621,63 @@ def keep_first_quote(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+# ── 语音回复发侧（FIXES22 阶段 A）─────────────────────────────────
+
+
+def voice_chunk(content: str, allowed: bool) -> Optional[Dict[str, Any]]:
+    """把 `[voice:]口语[/voice]` 的内容变成 voice 段；不可用时返回 None（按文字降级）。
+
+    `allowed` 是**机制层兜底**（开关/日上限/作息闸门的合并结论，由 turn_handler
+    问过 TTSManager 得出）：提示词层已经保证"闸门关时模型看不到 [voice:]"，
+    这里再挡一次——**双保险**。任何一关不过都降级成文字，不丢内容。
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+    if not allowed:
+        logger.info("[Replier] 语音不可用（开关/上限/作息闸门），按普通文字降级")
+        return None
+    return {"type": "voice", "content": text}
+
+
+def keep_first_voice(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """整轮只保留第一条语音段，多余的按普通文字降级（与 face/quote 同一口径）。
+
+    语音是低频动作：一轮里两条语音既不像真人，也把每日额度烧得太快。
+    """
+    used = False
+    downgraded: List[str] = []
+    out: List[Dict[str, Any]] = []
+    for c in chunks:
+        if c.get("type") != "voice":
+            out.append(c)
+            continue
+        if not used:
+            used = True
+            out.append(c)
+            continue
+        text = c.get("content", "")
+        downgraded.append(text[:20])
+        out.append({"type": "text", "content": text})
+    if downgraded:
+        logger.info(
+            f"[Replier] 语音硬上限：整轮只保留 1 条，多余 {len(downgraded)} 条按文字降级: "
+            f"{downgraded}"
+        )
+    return out
+
+
+def strip_voice_markers(text: str) -> str:
+    """把记录文本里的 `[voice:]…[/voice]` 抹成 `（语音消息）…`（与收侧对称）。
+
+    记录形态与收侧他的语音转写统一：`（语音消息）文本`。
+    给 typing 算时长也用它——没人一边打字一边发语音，语音段不该拉长打字表演。
+    """
+    if not text:
+        return text or ""
+    return VOICE_PATTERN.sub(lambda m: f"{VOICE_RECORD_PREFIX}{m.group(1).strip()}", text)
+
+
 def merge_quote_into_next(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把 quote 段并进**紧随其后的第一条消息**，作为它的 `_quote` 头（任务3 第1条）。
 
@@ -676,6 +757,8 @@ def chunk_record_text(chunk: Dict[str, Any]) -> str:
         return f"[表情:{chunk.get('desc', '')}]"
     if ctype == "face":
         return f"[face:{chunk.get('tag', '')}]"
+    if ctype == "voice":
+        return f"{VOICE_RECORD_PREFIX}{chunk.get('content', '')}"
     if ctype == "combo":
         parts = chunk.get("parts", [])
         text = "".join(p.get("content", "") for p in parts if p.get("type") == "text")
@@ -751,6 +834,7 @@ class Replier:
         raw_text: str,
         source: str = "reply",
         quote_targets: Optional[List[Dict[str, Any]]] = None,
+        voice_allowed: bool = False,
     ) -> Tuple[List[Dict[str, Any]], str]:
         """处理回复全文：
         0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 返回 ([], "")
@@ -774,6 +858,10 @@ class Replier:
         （`{"index": 1, "text": "...", "message_id": 123}`）。它是**编号 → 真实
         message_id 的唯一翻译表**：不在表里的编号一律降级成文字。
         主动消息不传（那里没有可引用的对方消息），所以 proactive 通路天然不支持引用。
+
+        `voice_allowed`（FIXES22）：机制层能不能现在发语音的结论，由 turn_handler
+        问过 TTSManager（开关/日上限/作息闸门）得出。默认 False = 语音一律降级成文字，
+        也就是**关着的时候旧调用方一行不改就是安全的**。
 
         落库记录由最终发出的段反推，实发多少就记多少：
         被截断丢弃的文字段不会留在记录里，不丢表情包段、不丢 QQ 表情段。
@@ -830,9 +918,13 @@ class Replier:
         #     留在同一个气泡里，不会被拆成"你真棒" + "[face:微笑]"两条。
         clean_text = normalize_face_markers(clean_text)
 
-        # 4. 表情包 / QQ 表情标记匹配与切分（一条正则一次扫，原句顺序原样保留）
+        # 4. 表情包 / QQ 表情 / 引用 / 语音标记匹配与切分（一条正则一次扫，原句顺序原样保留）
         #    每段带一个 "_end_line"：它结束在第几行。合并阶段靠它判断
-        #    "这个脸和前面那句是不是同一行"（换行是硬边界，跨行不合并）。
+        #    "这个脸和前面那句是不是同一行"（换行是硬边界，跨行不合并）
+        #    FIXES22：语音不可用时换不带 voice 分支的正则——原样照发，不切开她的句子
+        mixed_pattern = (
+            MIXED_SEGMENT_PATTERN if voice_allowed else MIXED_SEGMENT_PATTERN_NO_VOICE
+        )
         segments: List[Dict[str, Any]] = []
         last_idx = 0
 
@@ -848,7 +940,7 @@ class Replier:
         # quote 可以在行首（那时前面没有任何文字可粘），只能吸向后面。
         pending_leading_marker: Optional[str] = None
 
-        for m in MIXED_SEGMENT_PATTERN.finditer(clean_text):
+        for m in mixed_pattern.finditer(clean_text):
             start, end = m.span()
             # 前置文字（先把暂存的降级标记吸进它，同一行必须是一条气泡）
             if start > last_idx:
@@ -868,6 +960,9 @@ class Replier:
             sticker_desc = m.group(1)
             face_tag_in_match = m.group(2)
             quote_index = m.group(3)
+            # 语音不可用时用的是**不带 voice 分支**的那份正则（只有 3 个组），
+            # 直接 m.group(4) 会 IndexError —— 用组数判断而不是 try。
+            voice_text = m.group(4) if m.re.groups >= 4 else None
             line = _line_no(clean_text, start)
 
             if sticker_desc is not None:
@@ -891,6 +986,17 @@ class Replier:
                 else:
                     # 越界/无 id/主动消息 → 按普通文字原样留在原位。
                     # 同一行粘回前一段文字；行首（前面没文字可粘）就暂存起来吸进后面。
+                    if not self._append_marker_as_text(segments, m.group(0), line):
+                        pending_leading_marker = m.group(0)
+            elif voice_text is not None:
+                # FIXES22 语音段。可用就成段，不可用（开关/上限/闸门）就**保留原标记**：
+                # 她写的是什么就发什么，一个字都不改（降级不丢内容、不改写她的话）。
+                vc = voice_chunk(voice_text, voice_allowed)
+                if vc is not None:
+                    vc["_line"] = line
+                    vc["_end_line"] = line
+                    segments.append(vc)
+                else:
                     if not self._append_marker_as_text(segments, m.group(0), line):
                         pending_leading_marker = m.group(0)
             else:
@@ -935,7 +1041,7 @@ class Replier:
         #    非文字段（sticker / face / quote）原样穿过，滤网只管文字
         filtered_segments: List[Dict[str, Any]] = []
         for seg in segments:
-            if seg["type"] in ("sticker", "face", "quote"):
+            if seg["type"] in ("sticker", "face", "quote", "voice"):
                 filtered_segments.append(seg)
                 continue
             kept_text = drop_image_placeholder_lines(seg["content"], source)
@@ -951,7 +1057,7 @@ class Replier:
         #    "第一句[face:x]\n第二句" 这种会被误判成同一行）。
         final_chunks: List[Dict[str, Any]] = []
         for seg in segments:
-            if seg["type"] in ("sticker", "face", "quote"):
+            if seg["type"] in ("sticker", "face", "quote", "voice"):
                 final_chunks.append(seg)
                 continue
             sub_chunks = chunk_text_sentences(seg["content"], max_chunks=self.config.max_chunks)
@@ -968,6 +1074,7 @@ class Replier:
         final_chunks = keep_first_sticker(final_chunks)
         final_chunks = keep_face_cap(final_chunks)
         final_chunks = keep_first_quote(final_chunks)
+        final_chunks = keep_first_voice(final_chunks)
 
         # 8. 混排合并（FIXES20 任务3 第3条）：同一行的文字+脸并成同一条 QQ 消息。
         #    必须在 fit_chunks **之前**：max_chunks 限的是"几条气泡"，
