@@ -81,6 +81,92 @@ def drop_image_placeholder_lines(text: str, source: str = "reply") -> str:
     return "\n".join(kept)
 
 
+# ── 内心旁白滤网（FIXES19）──────────────────────────────────────────
+# 病灶证据：FIXES18 对聊仿真 S1 局（data/duo_sim/S1-smoke-20261004/transcript.md
+# 第 9 轮）她把第三人称内心旁白当普通气泡发了出去——
+#   「行吧，饿着躺。/ 我刚到楼门口，摸兜里还压着半块黑巧。/ 这人嘴硬，我折回去看看。」
+# 病根：角色卡禁的是**括号旁白**（strip_narration 兜底），堵住了动作描写的传统形式，
+# 却管不住"不加括号、整句内心戏直接上屏"这条漏网之路。剧情走到动作节拍
+# （她决定折回去送巧克力）时动作没有合法出口，模型就从漏洞里挤出来。
+# 本滤网是**机制层兜底**：模型再犯也到不了机主眼前。真正的治疗在卡内（红线流程）。
+#
+# 判定纪律：**三个条件同时命中才丢，缺一不可；宁漏勿错**。
+#   a. 行内有第三人称指代机主：他（人称代词）/这人/这家伙/那家伙/那小子
+#   b. 行内有第一人称动作或心理动词组：我 + 折回/回去/过去/…（见下方词表）
+#   c. 整行**不含"你"**——她对机主说话用"你"，含"你"就是在对他说话，一律放行
+#      （这是防误杀的保险丝，宁可放过一条旁白也不能删掉她正常说的话）
+#
+# 词表来源：S1 真实翻车原句 + 按同一病句式枚举（见 tests/test_fixes19.py）。
+# 以后有新翻车句，照着往词表里加即可，不必改逻辑。
+
+# a. 第三人称指代。
+#    「他」必须排除长在词里的情况：其他（其）、吉他（吉）不是人称代词；
+#    「他们/她们」是复数泛指、不是专指机主，按宁漏勿错也不当作命中信号。
+INNER_NARRATION_THIRD_PERSON = re.compile(
+    r"(?:(?<![其吉])他(?!们)|这人|这家伙|那家伙|那小子)"
+)
+
+# b. 第一人称动作/心理动词组。词表按动作与心理两类枚举。
+INNER_NARRATION_VERBS: Tuple[str, ...] = (
+    # 移动类
+    "折回", "折返", "回去", "过去", "去找", "去看", "回来", "跟过去",
+    # 观看/揣测类
+    "回", "走", "跑", "看", "瞧", "想", "猜", "琢磨", "寻思",
+    # 决断类
+    "决定", "打算",
+    # 情绪/身体类
+    "忍", "憋", "笑", "叹", "摇头", "点头",
+    # 操作类
+    "翻", "摸", "掏", "关", "开", "拿", "放",
+)
+INNER_NARRATION_FIRST_PERSON = re.compile(
+    r"我(?:" + "|".join(INNER_NARRATION_VERBS) + r")"
+)
+
+
+def is_inner_narration_line(line: str) -> bool:
+    """整行判定：这一行是不是"她在心里演一遍、却直接发给了他"的内心旁白。
+
+    三个条件缺一不可，见上方词表处的说明。c 条（含"你"就放行）是防误杀保险丝。
+    """
+    if not line.strip():
+        return False
+    if "你" in line:                     # c：含"你" = 在对他说话，放行
+        return False
+    if not INNER_NARRATION_THIRD_PERSON.search(line):   # a
+        return False
+    if not INNER_NARRATION_FIRST_PERSON.search(line):   # b
+        return False
+    return True
+
+
+def drop_inner_narration_lines(text: str, source: str = "reply") -> str:
+    """丢弃整行都是内心旁白的行，行内夹杂正常对话的一律保留（宁漏勿错）。
+
+    必须在切句之前调用（与 drop_image_placeholder_lines 同理：切句会把行拆散，
+    滤网就再也认不出"整行"了）。丢弃时记 INFO 日志（内容 + 来源）。
+
+    已知盲区（设计取舍，不是 bug）：判定是**整行**级的，所以模型若把一句旁白拆成
+    多行（"这人嘴硬。\\n我折回去看看。"），每行各缺一个条件，会整体漏过去。
+    任务书第 2 条负面清单明确"不追求行内夹杂旁白的检测（超范围，宁漏勿错）"，
+    本滤网只承诺挡住"整行都是旁白"这一种形态。真实翻车原句恰好是整行形态
+    （"这人嘴硬，我折回去看看。"），实测可拦。
+    """
+    kept: List[str] = []
+    dropped: List[str] = []
+    for line in text.split("\n"):
+        if is_inner_narration_line(line):
+            dropped.append(line.strip())
+        else:
+            kept.append(line)
+    if dropped:
+        logger.info(
+            f"[Replier] 内心旁白兜底：丢弃 {len(dropped)} 行整行旁白"
+            f"（来源: {source}）: {dropped}"
+        )
+    return "\n".join(kept)
+
+
 def strip_narration(text: str) -> str:
     """旁白剥离兜底：删除疑似动作描写段，删除时记 WARNING 日志"""
     matches = NARRATION_PATTERN.findall(text)
@@ -224,7 +310,7 @@ class Replier:
         2. 行首触发方向标签剥离
         3. 旁白剥离
         4. sticker 标记与文字混排拆分
-        5. 整行图片占位符丢弃（[图片] 这类，FIXES12 / E8）
+        5. 整行兜底滤网：图片占位符（[图片] 这类，FIXES12 / E8）→ 内心旁白（FIXES19）
         6. 句子切段
         7. 表情包硬上限（整轮只留第一个）
         8. 压到 max_chunks 以内（优先保表情包）
@@ -281,15 +367,17 @@ class Replier:
             if txt.strip():
                 segments.append({"type": "text", "content": txt})
 
-        # 5. 整行图片占位符兜底（FIXES12 任务1 / E8）
-        # 位置在 sticker 拆分之后、切句之前：此时文字段还是模型原样的多行文本，
-        # 切句会把它拆散，滤网就再也认不出"整行"了。整段被滤空则整段丢弃。
+        # 5. 整行兜底滤网（都在 sticker 拆分之后、切句之前：此时文字段还是模型原样的
+        #    多行文本，切句会把它拆散，滤网就再也认不出"整行"了。整段被滤空则整段丢弃）
+        #    5a. 整行图片占位符（FIXES12 任务1 / E8）
+        #    5b. 整行内心旁白（FIXES19）
         filtered_segments: List[Dict[str, Any]] = []
         for seg in segments:
             if seg["type"] == "sticker":
                 filtered_segments.append(seg)
                 continue
             kept_text = drop_image_placeholder_lines(seg["content"], source)
+            kept_text = drop_inner_narration_lines(kept_text, source)
             if kept_text.strip():
                 seg["content"] = kept_text
                 filtered_segments.append(seg)
