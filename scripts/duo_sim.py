@@ -174,6 +174,9 @@ TIME_PATCH_MODULES = (
     "companion.turn_handler",
     "companion.arcs",
     "companion.observer",
+    # DEEP_AUDIT B-2：漏了它计费峰谷就按真实墙钟走——仿真时钟跨日必然错档
+    # （落库 created_at 走仿真钟、cost_estimate 走真钟，成本与熔断全失真）。
+    "companion.config",
 )
 
 # 这三个模块里 asyncio.sleep 是"表演"（首条延迟 / 正在输入 / 段间发送延迟）。

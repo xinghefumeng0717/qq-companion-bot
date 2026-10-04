@@ -38,7 +38,11 @@ from companion.prompts import (
     get_trust_description,
     holiday_prompt_note,
 )
-from companion.replier import Replier, strip_face_markers, typing_text_from_chunks
+from companion.replier import (
+    Replier,
+    strip_face_markers,
+    typing_text_from_chunks_or_record,
+)
 from companion.stickers import StickerManager
 
 logger = logging.getLogger(__name__)
@@ -200,8 +204,15 @@ class ProactiveScheduler:
                 return hour >= start or hour < end
         return hour in qh
 
-    async def _check_rules_gate(self) -> Tuple[bool, str]:
-        """第一层·规则闸门：零成本，任一命中则拦截返回 (True, 原因)"""
+    async def _check_rules_gate(self, skip_unanswered_reply: bool = False) -> Tuple[bool, str]:
+        """第一层·规则闸门：零成本，任一命中则拦截返回 (True, 原因)
+
+        `skip_unanswered_reply`（FIXES24）：**只为事件通道开的口子**——豁免第 4 条
+        "上一条主动消息机主尚未回复"。理由是事件消息讲的是她自己生活的进展、且有
+        24h 时效，"他没回上一条主动消息"不构成掐死它的理由；免打扰、60 分钟闸门、
+        连续未回闸门（第 3 条）、晚安、情绪下限一律照常。默认 False，其余调用方
+        行为逐字节不变。
+        """
         now_dt = datetime.now()
 
         # 1. 当前小时 in quiet_hours
@@ -222,12 +233,13 @@ class ProactiveScheduler:
         if unanswered >= self.config.max_unanswered:
             return True, f"连续 {unanswered} 条主动消息未回复，当天停止主动发消息"
 
-        # 4. 工作记忆最后一轮是机器人发言且未获回复
-        last_turn = await self.db.fetchone("SELECT role FROM turns ORDER BY id DESC LIMIT 1")
-        if last_turn and last_turn["role"] == "assistant":
-            # 如果最后一轮是机器人且 unanswered 已经有记录
-            if unanswered > 0:
-                return True, "上一条主动消息机主尚未回复"
+        # 4. 工作记忆最后一轮是机器人发言且未获回复（事件通道可豁免）
+        if not skip_unanswered_reply:
+            last_turn = await self.db.fetchone("SELECT role FROM turns ORDER BY id DESC LIMIT 1")
+            if last_turn and last_turn["role"] == "assistant":
+                # 如果最后一轮是机器人且 unanswered 已经有记录
+                if unanswered > 0:
+                    return True, "上一条主动消息机主尚未回复"
 
         # 5. 用户最后一条消息含“晚安”且距今 < 6 小时
         last_user_row = await self.db.fetchone(
@@ -425,8 +437,9 @@ class ProactiveScheduler:
 
         logger.info(f"[Proactive] 正在分段发送主动消息: {clean_text}")
         # FIXES22：打字时长按"她真打出来的字"算（语音段不算，它走自己的发送停顿）
+        # DEEP_AUDIT B-6：纯语音轮**不**回退记录文本（语音正文不是她打的字）
         await self._play_typing_indicator(
-            typing_text_from_chunks(chunks) or clean_text
+            typing_text_from_chunks_or_record(chunks, clean_text)
         )
         await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
 
@@ -512,18 +525,28 @@ class ProactiveScheduler:
             except Exception as e:
                 logger.warning(f"[Proactive] 生活主线状态推进异常: {e}")
 
-        # 第一层：规则闸门
+        # 第一层·前置闸门。FIXES24：事件通道豁免第 4 条（"上一条主动消息机主尚未回复"），
+        # 所以这里先用 skip_unanswered_reply=True 过一遍零成本闸门——
+        # 免打扰 / 60 分钟 / 连续未回(第3条) / 晚安 / 情绪下限 仍然照拦，
+        # 这样事件检查就发生在 #4 之前，而 #4 对"常规决策路径"一分不减（见下方完整闸门）。
+        blocked, reason = await self._check_rules_gate(skip_unanswered_reply=True)
+        if blocked:
+            logger.debug(f"[Proactive] 规则闸门拦截: {reason}")
+            return
+
+        # FIXES16 任务5：事件检查在常规 LLM 决策**之前**。
+        # 当天无事件时 claim_event 返回 None，行为与改动前完全一致（回落常规决策层）。
+        if await self._try_event_channel():
+            return
+
+        # 完整闸门（含第 4 条）：常规决策路径的判定与改动前逐条一致。
+        # 无事件时本周期必然走到这里，结果与改动前相同（事件通道那步是无副作用的空查询）。
         blocked, reason = await self._check_rules_gate()
         if blocked:
             logger.debug(f"[Proactive] 规则闸门拦截: {reason}")
             return
 
         logger.info(f"[Proactive] 规则闸门通过，进入 LLM 潜意识决策层")
-
-        # FIXES16 任务5：事件检查在常规 LLM 决策**之前**。
-        # 当天无事件时 claim_event 返回 None，行为与改动前完全一致（回落常规决策层）。
-        if await self._try_event_channel():
-            return
 
         # FIXES16 任务2：活跃主线 < 2 条时即时补（自身带 1 小时节流，连烧不了）
         if self.arcs is not None:
