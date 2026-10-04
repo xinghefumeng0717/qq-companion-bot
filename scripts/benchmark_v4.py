@@ -515,9 +515,9 @@ def _sent_text(chunks) -> str:
     """段列表 -> 实发文本。
 
     FIXES20：委托给 replier 的 chunk_record_text，不要在这里重写一遍"每种段长什么样"。
-    新增了 combo（文字+QQ表情同一条消息）与 face 段之后，这里原来的
-    `c["content"] if c["type"]=="text" else ...` 会在 combo 上直接 KeyError，
-    face 也会被误标成 `[表情:]`（它没有 desc）——**测量工具崩掉 = 整轮基准白跑**。
+    新增了 combo（文字+QQ表情同一条消息）与 face 段之后，旧实现会把 combo/face
+    段误标成 `[表情:]`（它们没有 desc 字段）——文本内容丢失，基准统计失真。
+    修复：统一复用同一份段→文本实现，段类型以后再加也不用回来改这里。
     """
     return "\n".join(chunk_record_text(c) for c in chunks)
 
