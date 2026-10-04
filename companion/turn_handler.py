@@ -15,7 +15,7 @@ from companion.memory import MemoryManager
 from companion.observer import Observer
 from companion.proactive import ProactiveScheduler
 from companion.prompts import VISION_PERCEPTION_PROMPT
-from companion.replier import Replier
+from companion.replier import Replier, is_silence_output
 from companion.stickers import image_to_base64_data_url
 
 logger = logging.getLogger("companion")
@@ -109,6 +109,15 @@ class TurnHandler:
 
         # 5. 回复管道切段与打字延迟发送
         chunks, clean_record_text = self.replier.parse_reply(full_reply)
+        if is_silence_output(full_reply):
+            # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，
+            # 但用户消息照常落库（他确实说了这句），并照常做回忆加固。
+            logger.info("[Bot] 本轮她选择沉默（[沉默]）：不发送、不落 assistant 记录、跳过 observer 结算")
+            await self.memory.save_turn_pair(
+                user_msg=user_text, bot_msg=None, has_image=bool(image_path)
+            )
+            await self.memory.reinforce_memories(user_text)
+            return
         if not chunks:
             chunks = [{"type": "text", "content": "刚刚走神了……你再说一次？"}]
             clean_record_text = "刚刚走神了……你再说一次？"

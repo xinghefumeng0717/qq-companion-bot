@@ -38,6 +38,15 @@ def strip_direction_tag(text: str) -> str:
 # 表情包标记正则（同时兼容 [sticker:xxx]、[表情:xxx] 以及中英文冒号）
 STICKER_PATTERN = re.compile(r"\[(?:sticker|表情)[:：]([^\]]+)\]", re.IGNORECASE)
 
+# 沉默标记（FIXES13）：模型完整输出恰好是这一行时，表示她本轮选择不回。
+# 只有"整条输出就是它"才算数；行内含 [沉默] 但还夹着别的文字的，一律按正常文本走，防滥用。
+SILENCE_TOKEN = "[沉默]"
+
+
+def is_silence_output(text: str) -> bool:
+    """模型完整输出（strip 后）是否恰好等于 [沉默]"""
+    return text.strip() == SILENCE_TOKEN
+
 # 切句分隔符正则（保留标点）
 SENTENCE_SPLIT_PATTERN = re.compile(r"([^。！？!?\n~～]+[。！？!?\n~～]*)")
 
@@ -210,6 +219,7 @@ class Replier:
 
     def parse_reply(self, raw_text: str, source: str = "reply") -> Tuple[List[Dict[str, Any]], str]:
         """处理回复全文：
+        0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 返回 ([], "")
         1. 字面量换行还原
         2. 行首触发方向标签剥离
         3. 旁白剥离
@@ -226,6 +236,11 @@ class Replier:
         落库记录由最终发出的段反推，实发多少就记多少：
         被截断丢弃的文字段不会留在记录里，不丢表情包段。
         """
+        # 0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 不发送、记录为空（其余情况不触发）
+        if is_silence_output(raw_text):
+            logger.info("[Replier] 命中沉默：模型完整输出为 [沉默]，本轮不发送、记录为空")
+            return [], ""
+
         # 1. 字面量 \n 还原为真换行（模型常把换行写成两个字符）
         clean_text = unescape_literal_newlines(raw_text)
 

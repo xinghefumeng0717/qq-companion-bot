@@ -118,10 +118,14 @@ class MemoryManager:
     async def save_turn_pair(
         self,
         user_msg: str,
-        bot_msg: str,
+        bot_msg: Optional[str],
         has_image: bool = False,
     ) -> None:
-        """保存一轮对话（用户消息 + 机器人回复），递增总轮数，并在后台非阻塞触发日记归档"""
+        """保存一轮对话（用户消息 + 机器人回复），递增总轮数，并在后台非阻塞触发日记归档。
+
+        bot_msg 传 None 表示她本轮选择沉默（[沉默]）：只落用户消息，不落 assistant 记录，
+        避免 turns 里出现空回复污染后续工作记忆。
+        """
         current_time = now_str()
         await self.db.execute(
             """
@@ -130,13 +134,14 @@ class MemoryManager:
             """,
             (user_msg, 1 if has_image else 0, current_time),
         )
-        await self.db.execute(
-            """
-            INSERT INTO turns (role, content, proactive, has_image, created_at)
-            VALUES ('assistant', ?, 0, 0, ?)
-            """,
-            (bot_msg, current_time),
-        )
+        if bot_msg is not None:
+            await self.db.execute(
+                """
+                INSERT INTO turns (role, content, proactive, has_image, created_at)
+                VALUES ('assistant', ?, 0, 0, ?)
+                """,
+                (bot_msg, current_time),
+            )
 
         # 更新计数器
         await self.db.execute(

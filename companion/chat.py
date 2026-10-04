@@ -22,7 +22,7 @@ from companion.mood import MoodEngine
 from companion.observer import Observer
 from companion.persona import Persona
 from companion.prompts import get_mood_description, get_mood_label
-from companion.replier import Replier
+from companion.replier import SILENCE_TOKEN, Replier, is_silence_output
 from companion.stickers import StickerManager
 
 
@@ -122,6 +122,11 @@ class ChatSession:
 
         full_reply = "".join(reply_parts).strip()
         chunks, clean_record_text = self.replier.parse_reply(full_reply)
+        if is_silence_output(full_reply):
+            # 与生产 turn_handler 对齐：[沉默] 只落用户消息，不落 assistant 记录，跳过 observer 结算
+            await self.memory.save_turn_pair(user_msg=text, bot_msg=None, has_image=False)
+            await self.memory.reinforce_memories(text)
+            return SILENCE_TOKEN
         if not clean_record_text:
             clean_record_text = full_reply
 
