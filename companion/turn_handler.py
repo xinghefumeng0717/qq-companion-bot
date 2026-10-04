@@ -22,7 +22,7 @@ from companion.replier import (
     Replier,
     is_silence_output,
     strip_face_markers,
-    typing_text_from_chunks,
+    typing_text_from_chunks_or_record,
 )
 from companion.stickers import image_to_base64_data_url
 
@@ -219,10 +219,12 @@ class TurnHandler:
         FIXES20：打字时长只按"她真正打出来的字"算——记录里的 [face:标签] 标记先抹掉。
         一个 3 字短句挂个脸，不该因为标记字符把 T_typing 拉长近一倍。
         FIXES22：语音整段不算（语音是"说"出来的，她没在打那行字）。这条的口径在
-        **调用方**就已经落实了（turn_handler 传进来的是 `typing_text_from_chunks`
-        的结果，voice 段压根不在里面），所以这里不必再抹一遍——
+        **调用方**就已经落实了（传进来的是 `typing_text_from_chunks_or_record` 的结果，
+        voice 段压根不在里面），所以这里不必再抹一遍——
         早先这里写的是"抹 [voice:] 标记"，而记录里标记早被 chunk_record_text
         换成了「（语音消息）」前缀，那句抹除是**空转**的（注释与实现不符的经典例子）。
+        DEEP_AUDIT B-6：纯语音轮不拿记录文本兜底（否则语音正文被当成打字，实测 10.0 秒），
+        此时 text 为空串、时长落在 typing_min 这一档。
         """
         if not self._typing_on:
             return
@@ -420,7 +422,9 @@ class TurnHandler:
         # 5.5 FIXES15：发送前演"正在输入"，演完再逐段发
         # 打字时长的口径是"她真打出来的字"：从**段**里取，不是从落库记录里抹标记
         # （记录里 voice 已经是「（语音消息）…」形态，标记早没了，抹不掉）。
-        typing_text = typing_text_from_chunks(chunks) or clean_record_text
+        # DEEP_AUDIT B-6：纯语音轮**不**回退记录文本——否则语音正文被当成她打的字
+        # （实测 10.0 秒）。回退只在"既无文字段也无语音段"时发生。
+        typing_text = typing_text_from_chunks_or_record(chunks, clean_record_text)
         await self.play_typing_indicator(typing_text, is_first_reply)
         await self.replier.send_reply_chunks(chunks, self.send_chunk_fn)
 

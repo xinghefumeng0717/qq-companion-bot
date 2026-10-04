@@ -477,25 +477,39 @@ class TestParseReplyFace(unittest.TestCase):
         self.assertEqual([c["type"] for c in chunks], ["combo"])
 
     def test_白名单外降级为文字且留在同一气泡(self):
-        """微笑(14) 是黑名单：不能发出去，但也**不能把一句话拆成两个气泡**。"""
+        """微笑(14) 是黑名单：不能发出去，但也**不能把一句话拆成两个气泡**。
+
+        DEEP_AUDIT B-5 口径变更（所有者拍板）：降级 = **剥掉标记只发正文**，
+        `[face:微笑]` 这种字面量不再上屏（真实仿真已出现过 `[face:月亮]` 漏屏）。
+        """
         chunks, record = _replier().parse_reply("你真棒[face:微笑]")
         self.assertEqual([c["type"] for c in chunks], ["text"])
-        self.assertEqual(chunks[0]["content"], "你真棒[face:微笑]")
-        self.assertEqual(record, "你真棒[face:微笑]")
+        self.assertEqual(chunks[0]["content"], "你真棒")
+        self.assertEqual(record, "你真棒")
 
     def test_微信名降级(self):
-        """模型照着历史复读 [face:旺柴]（我们自己的记录形态不会这样，但它来了也得降级）。"""
-        chunks, _ = _replier().parse_reply("[face:旺柴]")
-        self.assertEqual([c["type"] for c in chunks], ["text"])
-        self.assertEqual(chunks[0]["content"], "[face:旺柴]")
+        """模型照着历史复读 [face:旺柴]（我们自己的记录形态不会这样，但它来了也得降级）。
+
+        B-5 口径变更：剥掉标记后这条没有任何正文可发 → 零段（调用方的空段兜底接管），
+        绝不许把 `[face:旺柴]` 字面量发到机主眼前。
+        """
+        chunks, record = _replier().parse_reply("[face:旺柴]")
+        self.assertEqual(chunks, [])
+        self.assertEqual(record, "")
 
     def test_降级标记与合法脸可以共处一个气泡(self):
+        """非法的剥标记、合法的照发，两者仍在同一个气泡里（B-5 口径变更）。"""
         chunks, _ = _replier().parse_reply("你真棒[face:微笑][face:doge]")
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0]["type"], "combo")
-        self.assertEqual(chunks[0]["parts"][0]["content"], "你真棒[face:微笑]")
+        self.assertEqual(chunks[0]["parts"][0]["content"], "你真棒")
+        self.assertEqual(chunks[0]["parts"][1]["tag"], "doge")
 
-    def test_每轮硬上限2_第三个降级(self):
+    def test_每轮硬上限2_第三个丢弃(self):
+        """超限额的脸只有标记、没有正文可留 → 整段丢弃（B-5 口径变更）。
+
+        旧行为是把它降级成 `[face:晕]` 字面量发上屏，那是本次要治的病。
+        """
         chunks, record = _replier().parse_reply("你[face:doge][face:流泪][face:晕]")
         total = sum(
             1
@@ -504,7 +518,9 @@ class TestParseReplyFace(unittest.TestCase):
             if p["type"] == "face"
         )
         self.assertEqual(total, FACE_MAX_PER_TURN)
-        self.assertIn("[face:晕]", record, "超限的必须按文字降级而不是丢掉")
+        self.assertNotIn("[face:晕]", record, "超限的脸不许以字面量上屏")
+        self.assertNotIn("晕", record)
+        self.assertIn("你", record, "她的正文一个字都不能少")
 
     def test_同一气泡内face不超过2(self):
         chunks, _ = _replier().parse_reply("你[face:doge][face:流泪][face:晕]")
@@ -514,10 +530,15 @@ class TestParseReplyFace(unittest.TestCase):
                 self.assertLessEqual(n, 2, f"同气泡 {n} 个脸，超了")
 
     def test_上限函数单独验(self):
+        """上限函数：保留最靠前的 2 个，超限的**直接丢**（不再造 [face:x] 文字段）。"""
         chunks = [{"type": "face", "tag": str(i), "id": i} for i in range(5)]
         out = keep_face_cap(chunks)
-        self.assertEqual(sum(1 for c in out if c["type"] == "face"), 2)
-        self.assertEqual(sum(1 for c in out if c["type"] == "text"), 3)
+        self.assertEqual([c["type"] for c in out], ["face", "face"])
+        self.assertEqual([c["tag"] for c in out], ["0", "1"], "保留最靠前的两个")
+        self.assertFalse(
+            [c for c in out if c["type"] == "text"],
+            "超限的脸不许降级成文字段（会造出空气泡/字面量）",
+        )
 
     def test_与表情包同轮共存(self):
         """脸与表情包不互斥（一个语气一个图），且表情包语义一个字没改。"""
@@ -582,11 +603,16 @@ class TestParseReplyFace(unittest.TestCase):
         self.assertNotIn("[图片]", record)
 
     def test_两脸混排也不挤掉收尾文字(self):
-        """max_chunks 限的是气泡数：合并后再算预算，不能把"在呢"这种收尾挤掉。"""
+        """max_chunks 限的是气泡数：合并后再算预算，不能把"在呢"这种收尾挤掉。
+
+        B-5 口径变更：超限的第 3 个脸整段丢弃（不再降级成一个文字段），段序随之少一项。
+        """
         raw = "你真棒[face:doge]\n[face:流泪][face:流泪]\n在呢[sticker:猫猫]"
         chunks, record = _replier().parse_reply(raw)
         self.assertIn("在呢", record)
-        self.assertEqual([c["type"] for c in chunks], ["combo", "face", "text", "text", "sticker"])
+        self.assertEqual(
+            [c["type"] for c in chunks], ["combo", "face", "text", "sticker"]
+        )
 
 
 class TestFaceHelpers(unittest.TestCase):
@@ -605,10 +631,12 @@ class TestFaceHelpers(unittest.TestCase):
         self.assertEqual([c["type"] for c in out], ["text", "face"])
 
     def test_normalize_只降级非法标记(self):
+        """合法标记一个字节都不动；非法的**标记剥掉**、只留它前后的正文（B-5 口径）。"""
         src = "你[face:doge]好[face:微笑]呀"
         out = normalize_face_markers(src)
-        self.assertEqual(out, src, "合法标记必须一个字节都不动")
-        self.assertIn("[face:微笑]", out)
+        self.assertIn("[face:doge]", out, "合法标记必须一个字节都不动")
+        self.assertEqual(out, "你[face:doge]好呀")
+        self.assertNotIn("[face:微笑]", out, "非法标记不许以字面量留在正文里")
 
     def test_normalize_无标记短路(self):
         self.assertEqual(normalize_face_markers("在呢"), "在呢")
@@ -800,6 +828,83 @@ class TestFacePrompt(unittest.TestCase):
         from companion.prompts import FACE_USAGE_RULES
 
         self.assertIn("他消息里", FACE_USAGE_RULES)
+
+
+class TestFaceTagReadSideForObserver(unittest.TestCase):
+    """DEEP_AUDIT 面 A-9：读侧词表以前只加在主聊提示词上，observer / 日记拿不到。
+
+    收侧把 face 段翻成 [晕] 后原样喂给 observer（turn_handler 不做预处理），
+    没有词表时纯表情轮次会被"全程无实质内容 0~1"的锚点系统性倒扣。
+    """
+
+    def test_observer系统提示词含词表说明(self):
+        from companion.prompts import FACE_TAG_READ_NOTICE, OBSERVER_SYSTEM_PROMPT
+
+        for kw in ("[xx]", "QQ 系统表情标签", "不是他说出的文字", "纯表情"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, OBSERVER_SYSTEM_PROMPT)
+        # 同源：整份 FACE_LEXICON_BLOCK 直接被引用进来，不是另抄一份词表
+        self.assertIn(FACE_LEXICON_BLOCK, OBSERVER_SYSTEM_PROMPT)
+        self.assertIn(FACE_TAG_READ_NOTICE, OBSERVER_SYSTEM_PROMPT)
+
+    def test_日记系统提示词含同款说明(self):
+        from companion.prompts import FACE_TAG_READ_NOTICE, DIARY_SYSTEM_PROMPT
+
+        self.assertIn(FACE_TAG_READ_NOTICE, DIARY_SYSTEM_PROMPT)
+        self.assertIn(FACE_LEXICON_BLOCK, DIARY_SYSTEM_PROMPT)
+
+
+class TestFaceTagReadSideInObserverMessages(unittest.IsolatedAsyncioTestCase):
+    async def test_纯标签轮次的observer报文带词表(self):
+        """输入 [晕][晕]：observer 实际发给模型的 system 里必须有词表说明（防回归）。"""
+        from helpers import close_db, make_db, make_mock_gateway
+
+        from companion.prompts import FACE_LEXICON_BLOCK
+
+        db = await make_db()
+        try:
+            gw = make_mock_gateway()
+            seen: Dict[str, Any] = {}
+
+            async def _capture(**kwargs: Any) -> str:
+                seen.update(kwargs)
+                return json.dumps(
+                    {
+                        "self_disclosure": 4.0,
+                        "responsiveness": 4.0,
+                        "warmth_score": 4.0,
+                        "resonance": 4.0,
+                        "moments": [],
+                        "mood_impact": {"v": 0.0, "a": 0.0, "trust": 0.0},
+                        "facts": [],
+                        "updated_facts": [],
+                        "followups": [],
+                        "done_followups": [],
+                        "collect_sticker": False,
+                        "sticker_name": "",
+                        "user_state": "平静",
+                    }
+                )
+
+            gw.chat = AsyncMock(side_effect=_capture)
+            obs = Observer(
+                gw,
+                AffectionEngine(db, Persona.load(_QINGZI).initial_dims),
+                MoodEngine(db),
+                MemoryManager(db, gateway=gw, affection=None),
+                _StubStickers(),
+                db,
+            )
+            await obs.settle_turn("[晕][晕]", "现在知道晕了", None)
+        finally:
+            await close_db(db)
+
+        messages = seen["messages"]
+        self.assertIn("[晕][晕]", messages[1]["content"], "机主消息仍原样进报文（不改输入）")
+        self.assertIn(FACE_LEXICON_BLOCK, messages[0]["content"], "system 必须带同源词表说明")
+        for kw in ("[xx]", "不是他说出的文字", "纯表情", "不要按 0~1 分处理"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, messages[0]["content"])
 
 
 # ==========================================

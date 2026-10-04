@@ -8,7 +8,7 @@ import asyncio
 import logging
 import random
 import re
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 from companion.config import ReplyConfig
 from companion.faces import face_id_by_name
@@ -83,6 +83,8 @@ NON_TEXT_CHUNK_CHARS = 5
 
 # 沉默标记（FIXES13）：模型完整输出恰好是这一行时，表示她本轮选择不回。
 # 只有"整条输出就是它"才算数；行内含 [沉默] 但还夹着别的文字的，一律按正常文本走，防滥用。
+# DEEP_AUDIT B-7：**单独占一行**的 [沉默]（整条还有别的内容）按标记剥掉，
+# 不当气泡发上屏；串在别的文字里的（"[沉默] 哈哈"）一个字节都不动（见 drop_silence_marker_lines）。
 SILENCE_TOKEN = "[沉默]"
 
 # 引用标记（FIXES21）：行首的 [quote:N]
@@ -127,6 +129,34 @@ def strip_leading_quote(text: str) -> Tuple[str, Optional[int]]:
 def is_silence_output(text: str) -> bool:
     """模型完整输出（strip 后）是否恰好等于 [沉默]"""
     return text.strip() == SILENCE_TOKEN
+
+
+def drop_silence_marker_lines(text: str) -> str:
+    """剥掉**单独占一行**的 [沉默]（DEEP_AUDIT B-7）。
+
+    沉默权只有"整条输出恰好是它"这一态（FIXES13，防滥用，这条纪律不动），
+    于是模型收尾时多写的一行 [沉默] 会当普通文本上屏——voice 与 [沉默] 同现
+    就是最典型的一例（实测 record `（语音消息）晚安 明天聊\\n[沉默]`）。
+
+    这里只处理"这一行除了 [沉默] 什么都没有"的形态：
+      - 整条输出恰为 [沉默]：**调用方在第 0 步就已判成沉默并返回**，
+        本函数走不到（真走到了也不该改：剩下的只有空白时原样返回）；
+      - 行内还夹着别的文字（"[沉默] 哈哈"）：**一个字节都不动**，
+        继续按普通文本走（防滥用条款）。
+    命中时记 INFO，事后能看出模型写了它。
+    """
+    if not text or SILENCE_TOKEN not in text:
+        return text
+    lines = text.split("\n")
+    kept = [line for line in lines if line.strip() != SILENCE_TOKEN]
+    if len(kept) == len(lines):
+        return text
+    if not "".join(kept).strip():
+        return text  # 剩下的只有空白 = 整条就是沉默，交给调用方的沉默权
+    logger.info(
+        f"[Replier] 混合形态的 [沉默] 行被剥掉，其余内容照发（剥掉 {len(lines) - len(kept)} 行）"
+    )
+    return "\n".join(kept)
 
 # 切句分隔符正则（保留标点）
 SENTENCE_SPLIT_PATTERN = re.compile(r"([^。！？!?\n~～]+[。！？!?\n~～]*)")
@@ -246,6 +276,62 @@ def drop_inner_narration_lines(text: str, source: str = "reply") -> str:
             f"（来源: {source}）: {dropped}"
         )
     return "\n".join(kept)
+
+
+def _segment_start_line(seg: Dict[str, Any]) -> int:
+    """文字段的**起始行号**：段上只记 "_end_line"（它结束在第几行），
+    起始行 = 结束行 − 内容里的换行数（段内容是从原文里原样切下来的）。
+
+    行号只在 parse_reply 内部用来把被标记劈开的同一行拼回整行（见
+    classify_dropped_lines）。取不到/写坏的 "_end_line" 按第 0 行兜底，宁可多判一行。
+    """
+    end_line = seg.get("_end_line")
+    if end_line is None:
+        return 0
+    try:
+        end_line = int(end_line)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, end_line - (seg.get("content") or "").count("\n"))
+
+
+def classify_dropped_lines(
+    segments: List[Dict[str, Any]], source: str = "reply"
+) -> Set[int]:
+    """按**标记拆分之前的原始行**判定两道整行滤网，返回"整行丢弃"的行号集合。
+
+    DEEP_AUDIT B-4 / A-8：两道滤网的判据都是"整行"，可第 4 步的标记拆分
+    （[face:] / [sticker:]）会把一行劈成多个文字段——逐段判定时，
+    尾段丢掉"含'你'就放行"这条保险丝，就会误杀她的正常句
+    （"你怎么知道的[face:吃瓜]我看他朋友圈了" 后半句蒸发）；
+    反过来，"这人嘴硬[face:流泪]我折回去看看。" 这种整句旁白被劈成两半后
+    每半各缺一个条件，整个漏过去照发。判定前提是"这一行没被切开"，
+    所以这里先按段上的行号把同一原始行的**文字段拼回整行**（标记本身不参与
+    判定，与"去标记后整行"同口径），再交既有的两个整行滤网逐行判。
+
+    拼回只影响"判据"，不影响已有契约：拼回的整行不满足滤网条件就照留不误
+    （行内夹杂不删）。命中时由 parse_reply 把这一行的**文字**整行拿掉；
+    行内的 face/sticker/quote/voice 段不是旁白也不是占位符，照旧保留。
+    空行不判（两个滤网都不针对空行）。
+    """
+    line_texts: Dict[int, List[str]] = {}
+    for seg in segments:
+        if seg.get("type") != "text":
+            continue
+        start_line = _segment_start_line(seg)
+        for offset, piece in enumerate((seg.get("content") or "").split("\n")):
+            line_texts.setdefault(start_line + offset, []).append(piece)
+
+    dropped: Set[int] = set()
+    for line in sorted(line_texts):
+        joined = "".join(line_texts[line])
+        if not joined.strip():
+            continue
+        kept_text = drop_image_placeholder_lines(joined, source)
+        kept_text = drop_inner_narration_lines(kept_text, source)
+        if not kept_text.strip():
+            dropped.add(line)
+    return dropped
 
 
 def strip_narration(text: str) -> str:
@@ -403,11 +489,16 @@ def face_chunk(tag: str) -> Optional[Dict[str, Any]]:
 
 
 def normalize_face_markers(text: str) -> str:
-    """把**发不出去**的 [face:标签] 原地还原成普通文字，可发的标记原样留下。
+    """把**发不出去**的 [face:标签] 的**标记剥掉**，只留它前后的正文（可发的标记不动）。
 
-    为什么在标记扫描之前做：降级后的标记就是普通文字，让它自然落进"文字段"，
-    于是它和它前后同一行的字留在**同一个气泡**里（"你真棒[face:微笑]" 一条发出去），
-    而不是被拆成"你真棒" + "[face:微笑]"两个气泡——后者看起来像她突然开始说脏话。
+    为什么在标记扫描之前做：剥掉标记后剩下的就是正文，自然落进"文字段"，
+    于是它和它前后同一行的字留在**同一个气泡**里（"你真棒[face:微笑]" → 一条 "你真棒"），
+    而不是被拆成两个气泡。
+
+    DEEP_AUDIT B-5（口径变更，所有者拍板）：降级**不再**把 `[face:标签]` 字面量发上屏。
+    旧口径是"按普通文字原样发出"，代价是机主屏幕上真的会出现 `[face:月亮]` 这种
+    标记语法（真实仿真已出现一例）。现在与 FIXES22 的 voice 降级口径对齐：
+    **标记语法本身不是她要说的内容，剥掉它、正文一个字不少**。
 
     只处理非法标记，合法标记一个字节都不动（下游按标记正常解析）。
     """
@@ -422,14 +513,14 @@ def normalize_face_markers(text: str) -> str:
         if face_chunk(tag) is not None:
             continue
         out.append(text[last : m.start()])
-        out.append(m.group(0))  # 标记原样留下，当普通文字
+        # B-5：标记本身不落进正文（旧实现这里把 m.group(0) 原样拼回，会漏字面量）
         downgraded.append(tag.strip())
         last = m.end()
     if not downgraded:
         return text
     out.append(text[last:])
     logger.info(
-        f"[Replier] QQ表情不在可用清单/表里，按普通文字原样发出: {downgraded}"
+        f"[Replier] QQ表情不在可用清单/表里，已剥掉标记只发正文: {downgraded}"
     )
     return "".join(out)
 
@@ -437,31 +528,33 @@ def normalize_face_markers(text: str) -> str:
 def keep_face_cap(
     chunks: List[Dict[str, Any]], limit: int = FACE_MAX_PER_TURN
 ) -> List[Dict[str, Any]]:
-    """整轮 QQ 表情硬上限：最多 limit 个，超出的**按普通文字降级**（不丢内容）。
+    """整轮 QQ 表情硬上限：最多 limit 个，**超出的整段丢弃**。
 
-    降级而不是丢弃，和白名单外标签同一口径：模型连甩一串 `[face:x][face:y]...` 时，
-    机主屏幕上会出现字面量 `[face:某标签]`（难看但可解释、且不丢她说的话），
-    而不是她想发的那个脸**无声无息地少一个**——后者会让她显得欲言又止。
-    降级动作记 INFO，事后能查是谁甩的串。
+    DEEP_AUDIT B-5（口径变更，所有者拍板）：旧实现把超限额的脸降级成
+    `[face:标签]` 字面量发上屏（"降级不丢内容"），代价是屏幕上出现标记语法。
+    新口径与 normalize_face_markers 统一：**"降级不丢内容"保的是文字**，
+    标记语法本身不是内容；而超限额的脸只有标记、没有正文可留，所以整段丢弃
+    （与 keep_first_sticker 的"整轮只留 1 个"同一形态）。丢弃记 INFO，事后能查是谁甩的串。
+
+    为什么这里不改成"补发文字"：脸没有可说的话，"降级成文字"只会把
+    `[face:某标签]` 糊到机主脸上——那正是本次要治的病。
     """
-    used = 0
-    downgraded: List[str] = []
+    kept_faces = 0
+    dropped: List[str] = []
     out: List[Dict[str, Any]] = []
     for c in chunks:
         if c.get("type") != "face":
             out.append(c)
             continue
-        if used < limit:
-            used += 1
+        if kept_faces < limit:
+            kept_faces += 1
             out.append(c)
             continue
-        marker = f"[face:{c.get('tag', '')}]"
-        downgraded.append(marker)
-        out.append({"type": "text", "content": marker})
-    if downgraded:
+        dropped.append(f"[face:{c.get('tag', '')}]")
+    if dropped:
         logger.info(
-            f"[Replier] QQ表情硬上限：整轮只保留 {limit} 个，"
-            f"多余 {len(downgraded)} 个按普通文字降级: {downgraded}"
+            f"[Replier] QQ表情硬上限：整轮只保留 {limit} 个，超限 {len(dropped)} 个丢弃: "
+            f"{dropped}"
         )
     return out
 
@@ -705,7 +798,7 @@ def typing_text_from_chunks(chunks: List[Dict[str, Any]]) -> str:
     等于替她把那段话又打了一遍。voice/sticker 是"发出去的一张图/一段声音"，
     不是打字，所以只有 text/combo 的文字部分参与时长计算。
 
-    段为空时返回空串（调用方此时应回退到记录文本，见 turn_handler）。
+    段为空时返回空串（调用方此时应回退到记录文本，见 typing_text_from_chunks_or_record）。
     """
     parts: List[str] = []
     for c in chunks:
@@ -718,6 +811,30 @@ def typing_text_from_chunks(chunks: List[Dict[str, Any]]) -> str:
                         if p.get("type") == "text")
             )
     return "\n".join(p for p in parts if p.strip())
+
+
+def typing_text_from_chunks_or_record(
+    chunks: List[Dict[str, Any]], record_text: str
+) -> str:
+    """打字时长口径的最终文本：段里取不到字时**什么情况下**才回退记录文本。
+
+    DEEP_AUDIT B-6：原来是 `typing_text_from_chunks(chunks) or clean_record_text`
+    的裸 or 兜底，本轮只有语音段时它会失效——`typing_text_from_chunks` 返回空串，
+    于是记录文本（`（语音消息）` + 语音正文）被当成了她打的字（实测 10.0 秒）。
+    正确口径是"语音是她说出来的，她没在打那行字"，所以**纯语音轮的 typing 文本为空**
+    （调用方算出来落在最短档）。
+
+    回退只在"**既没有任何 text/combo 段，也没有 voice 段**"时发生：
+    整轮只有表情包/表情这类段时，记录文本仍是可用的字数来源（历史行为不变）。
+    """
+    typing_text = typing_text_from_chunks(chunks)
+    if typing_text:
+        return typing_text
+    if any(c.get("type") in ("text", "combo", "voice") for c in chunks):
+        # 有文字/混排段却被取空 → 没有可打的字；有语音段 → 语音不算打字。
+        # 两种情况都不能拿记录文本冒充打字（否则语音正文会漏回时长计算）。
+        return ""
+    return record_text
 
 
 def normalize_voice_markers(text: str) -> str:
@@ -898,12 +1015,16 @@ class Replier:
         0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 返回 ([], "")
         0.5 剥掉回复开头的 [quote:N] 标记（FIXES21）：沉默权优先于引用
         1. 字面量换行还原
+        1.5 剥掉单独占一行的 [沉默]（DEEP_AUDIT B-7）：混合形态的标记不上屏
         2. 行首触发方向标签剥离
         3. 旁白剥离
-        4. sticker / face / quote 标记与文字混排拆分（一次扫描，保原句顺序）
+        3.5 发不出去的 [face:标签] 剥掉标记只发正文（DEEP_AUDIT B-5）
+        4. sticker / face / quote / voice 标记与文字混排拆分（一次扫描，保原句顺序）
         5. 整行兜底滤网：图片占位符（[图片] 这类，FIXES12 / E8）→ 内心旁白（FIXES19）
+           判定按**标记拆分前的原始行**拼回后再做（DEEP_AUDIT B-4/A-8）
         6. 句子切段
-        7. 硬上限：表情包整轮 1 个 → QQ 表情整轮 2 个 → 引用整轮 1 条
+        7. 硬上限：表情包整轮 1 个 → QQ 表情整轮 2 个 → 引用整轮 1 条 → 语音整轮 1 条
+           超限额的脸整段丢弃（它是标记、没有正文可留，DEEP_AUDIT B-5）
         8. QQ 表情并进紧邻文字段（混排合并成同一个气泡）
         9. 引用并进紧随其后的第一条消息（_quote 头）
         10. 压到 max_chunks 以内（优先保表情包/表情/混排段）
@@ -930,11 +1051,12 @@ class Replier:
 
         **与滤网的先后关系（FIXES20 任务3 第7条，DEEP_AUDIT 面对账用）**：
         face / quote 标记的识别都在第 4 步，和 sticker 同一位置——即**整行滤网之前**。
-        滤网（第5步）只作用于**文字部分**，face/sticker/quote 段原样穿过。
-        推论与已知代价：模型若把一句话用 [face:] 从中间劈开（"他走了[face:流泪]我难受"），
-        整行滤网看到的是劈开后的两个片段而不是整行，判断依据变窄——这与既有的
-        sticker 行为**完全同构**（表情包标记同样会劈行），本次不引入新差异，
-        也不为它扩大改动范围（宁漏勿错是这两道滤网的设计取舍）。
+        滤网（第5步）按 DEEP_AUDIT B-4/A-8 改成**先按行号把同一原始行的文字段拼回整行
+        再判**（见 classify_dropped_lines）：标记从中间劈行不再影响判据——
+        "你怎么知道的[face:吃瓜]我看他朋友圈了" 拼回后含"你"，整行放行；
+        "这人嘴硬[face:流泪]我折回去看看。" 拼回后命中整行旁白，这一行的**文字**
+        整行消失、行内的脸照旧留下（"只剩脸"，与句尾挂脸同一形态）。
+        非文字段（face/sticker/quote/voice）不参与判定、也不被滤网删除。
         quote 只在行首匹配（第 4 步的 ^ + MULTILINE），所以它**劈不出**行内片段，
         不给滤网制造新的判断歧义。
         """
@@ -967,6 +1089,14 @@ class Replier:
         # 1. 字面量 \n 还原为真换行（模型常把换行写成两个字符）
         clean_text = unescape_literal_newlines(raw_text)
 
+        # 1.5 DEEP_AUDIT B-7：单独占一行的 [沉默] 剥掉（其余内容照发）。
+        #     第 0 步已经把"整条恰为 [沉默] / [quote:N]+[沉默]"的沉默权判完并返回，
+        #     所以走到这里说明本轮还有别的内容要发；模型收尾时多写的那一行
+        #     [沉默] 是标记语法、不是话，留着就会当一个气泡上屏
+        #     （"嗯\n[沉默]"、" [voice:…[/voice]\n[沉默]" 都是真实形态）。
+        #     行内夹着别的内容的（"[沉默] 哈哈"）不受影响：FIXES13 防滥用那条纪律不动。
+        clean_text = drop_silence_marker_lines(clean_text)
+
         # 2. 行首触发方向标签剥离（【起】/【接】/【收】）
         clean_text = strip_direction_tag(clean_text)
 
@@ -987,7 +1117,9 @@ class Replier:
 
         # 4. 表情包 / QQ 表情 / 引用 / 语音标记匹配与切分（一条正则一次扫，原句顺序原样保留）
         #    每段带一个 "_end_line"：它结束在第几行。合并阶段靠它判断
-        #    "这个脸和前面那句是不是同一行"（换行是硬边界，跨行不合并）
+        #    "这个脸和前面那句是不是同一行"（换行是硬边界，跨行不合并）；
+        #    第 5 步的整行滤网还靠行号把同一原始行的文字段拼回整行（DEEP_AUDIT B-4），
+        #    文字段的起始行由内容里的换行数反推（见 _segment_start_line）
         #    FIXES22：语音不可用时换不带 voice 分支的正则——原样照发，不切开她的句子
         mixed_pattern = (
             MIXED_SEGMENT_PATTERN if voice_allowed else MIXED_SEGMENT_PATTERN_NO_VOICE
@@ -1107,22 +1239,37 @@ class Replier:
             segments.append({"type": "text", "content": pending_leading_marker,
                              "_end_line": _line_no(clean_text, len(clean_text))})
 
-        # 5. 整行兜底滤网（都在标记拆分之后、切句之前：此时文字段还是模型原样的
-        #    多行文本，切句会把它拆散，滤网就再也认不出"整行"了。整段被滤空则整段丢弃）
+        # 5. 整行兜底滤网（都在标记拆分之后、切句之前：此时文字段还带着行号，
+        #    切句会把行号拆散，滤网就再也认不出"整行"了。整行被滤空则整行丢弃）
         #    5a. 整行图片占位符（FIXES12 任务1 / E8）
         #    5b. 整行内心旁白（FIXES19）
-        #    非文字段（sticker / face / quote）原样穿过，滤网只管文字
-        filtered_segments: List[Dict[str, Any]] = []
-        for seg in segments:
-            if seg["type"] in ("sticker", "face", "quote", "voice"):
-                filtered_segments.append(seg)
-                continue
-            kept_text = drop_image_placeholder_lines(seg["content"], source)
-            kept_text = drop_inner_narration_lines(kept_text, source)
-            if kept_text.strip():
-                seg["content"] = kept_text
-                filtered_segments.append(seg)
-        segments = filtered_segments
+        #    DEEP_AUDIT B-4/A-8：判定用的是**标记拆分之前的原始行**——
+        #    第 4 步的 [face:]/[sticker:] 会把一行劈成多个文字段，
+        #    逐段判定会让尾段丢掉"含'你'就放行"的保险丝（误杀正常句），
+        #    也会让整句旁白拆开后每半各缺一个条件而照发。
+        #    所以先按行号把同一原始行的文字段拼回再判（见 classify_dropped_lines），
+        #    命中即整行丢弃：这一行**拼回后的文字**整行消失（行内的 face/sticker/
+        #    quote/voice 段不是旁白、也不是占位符，原样保留——"只剩脸"是既有形态）。
+        dropped_lines = classify_dropped_lines(segments, source)
+        if dropped_lines:
+            filtered_segments: List[Dict[str, Any]] = []
+            for seg in segments:
+                if seg["type"] != "text":
+                    # 非文字段（sticker / face / quote / voice）不是旁白也不是
+                    # 占位符，原样穿过滤网（宁漏勿错）：行内的脸照发，
+                    # 与"句尾挂脸只剩脸"的既有形态一致
+                    filtered_segments.append(seg)
+                    continue
+                start_line = _segment_start_line(seg)
+                kept_text = "\n".join(
+                    piece
+                    for offset, piece in enumerate(seg["content"].split("\n"))
+                    if (start_line + offset) not in dropped_lines
+                )
+                if kept_text.strip():
+                    seg["content"] = kept_text
+                    filtered_segments.append(seg)
+            segments = filtered_segments
 
         # 6. 展开文字段切句
         #    切出来的子段只有**最后一个**继承原段的 "_end_line"：它才是这段文字

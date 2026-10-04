@@ -77,9 +77,13 @@ class TestSilenceParsing(unittest.TestCase):
         self.assertEqual(record, f"{SILENCE_TOKEN} 哈哈")
 
     def test_silence_appended_after_text_not_triggered(self):
+        """她先说了话、收尾又多写一行 [沉默]：**不整轮沉默**（防滥用条款照旧），
+        单独占行的 [沉默] 按标记剥掉、不上屏不落库（DEEP_AUDIT B-7）。"""
         chunks, record = self._replier().parse_reply("好呀\n[沉默]")
-        self.assertTrue(chunks)
-        self.assertIn(SILENCE_TOKEN, record)
+        self.assertTrue(chunks, "还有别的内容，必须照发")
+        self.assertEqual([c["content"] for c in chunks], ["好呀"])
+        self.assertEqual(record, "好呀")
+        self.assertNotIn(SILENCE_TOKEN, record)
 
     def test_normal_reply_unaffected(self):
         chunks, record = self._replier().parse_reply("好呀，晚安啦")
