@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from companion.affection import AffectionEngine
-from companion.config import ProactiveConfig
+from companion.config import ProactiveConfig, TimingConfig
 from companion.db import (
     Database,
     STATE_KEY_UNANSWERED_PROACTIVE,
@@ -102,6 +102,8 @@ class ProactiveScheduler:
         send_msg_fn: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
         assembler: Optional[Any] = None,
         holidays_provider: Optional[Callable[[], List[str]]] = None,
+        set_typing_fn: Optional[Callable[[bool], Coroutine[Any, Any, bool]]] = None,
+        timing_config: Optional[TimingConfig] = None,
     ):
         self.config = config
         self.persona = persona
@@ -116,6 +118,15 @@ class ProactiveScheduler:
         self.assembler = assembler
         # 节假日唯一数据源 Config.get_holidays()；不传即视为无节假日
         self._holidays_provider = holidays_provider
+        # FIXES15：主动消息同样走 typing 展示（D=0，T_typing 照常算），不另搞一套。
+        # 两个新参数默认 None = 不演，与改动前一致；生产由 main.py 显式注入。
+        self.set_typing_fn = set_typing_fn
+        self.timing = timing_config
+        self._typing_on = (
+            timing_config is not None
+            and timing_config.typing_indicator_enabled
+            and set_typing_fn is not None
+        )
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -274,6 +285,45 @@ class ProactiveScheduler:
         weekday_map = {0: "周一，新的一周开始啦", 4: "周五啦，快要周末了", 5: "周六休息日", 6: "周日时光"}
         date_sense = weekday_map.get(now_dt.weekday(), "平常的一天")
         return f"日期感念：今天好像是{date_sense}"
+
+    def _calc_typing_duration(self, text: str) -> float:
+        """typing 展示时长：每 10 字 2 秒，钳在 typing_min~typing_max。
+
+        与 turn_handler.calc_typing_duration 同公式，但这里是**故意各留一份**：
+        turn_handler 已经 import proactive，反向 import 会成环；且本方法不吃
+        "首条/非首条"参数（主动消息恒定 D=0），两者不是同一份代码可合的形状。
+        与 _char_jaccard 一样按 FIXES11 负面清单不跨模块合并。
+        """
+        t = self.timing
+        raw = len(text) / 10.0 * t.typing_seconds_per_10chars
+        return max(t.typing_min, min(t.typing_max, raw))
+
+    async def _set_typing(self, typing: bool) -> None:
+        """调注入的 typing 回调，异常/False 一律静默降级（与 turn_handler 同策略）"""
+        if not self._typing_on:
+            return
+        try:
+            await self.set_typing_fn(typing)
+        except Exception as e:
+            logger.warning(
+                f"[Proactive] 正在输入回调异常（{'开' if typing else '关'}），静默降级: {e}"
+            )
+
+    async def _play_typing_indicator(self, text: str) -> None:
+        """发送前演"正在输入"：开 → 等 T_typing → 关。异常降级为"不演了，照发"。"""
+        if not self._typing_on:
+            return
+        duration = self._calc_typing_duration(text)
+        if duration <= 0:
+            return
+        try:
+            await self._set_typing(True)
+            logger.info(f"[Proactive] 正在输入 {duration:.1f} 秒（主动消息，{len(text)} 字）")
+            await asyncio.sleep(duration)
+        except Exception as e:
+            logger.warning(f"[Proactive] 正在输入展示异常，降级为直接发送: {e}")
+        finally:
+            await self._set_typing(False)
 
     async def _is_duplicate_desire(self, topic_hint: str) -> bool:
         """C 分支念头是否与既有题材重复。
@@ -452,6 +502,7 @@ class ProactiveScheduler:
             return
 
         logger.info(f"[Proactive] 正在分段发送主动消息: {clean_text}")
+        await self._play_typing_indicator(clean_text)
         await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
 
         # 发送后落库并累加未回复计数

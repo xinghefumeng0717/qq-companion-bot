@@ -9,7 +9,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,9 @@ LONG_HOLIDAY_MIN_SPAN = 4
 # 长假当天的固定作息文案（与 V3 卡锚点逐字一致）。
 # 长假**不匹配任何 daily_routine**，直接返回这句——按周六作息塞"在琴房练琴"会与角色卡打架。
 LONG_HOLIDAY_ACTIVITY = "放长假中，回绍兴老家陪父母，不在学校"
+
+# 作息表覆盖不到时的回退文案：她"在度过属于自己的时间"，人是在闲的（FIXES15 忙/闲判定）
+FREE_ACTIVITY_FALLBACK = "在度过属于自己的时间"
 
 
 def is_holiday_date(date_str: str, holidays: Optional[List[str]]) -> bool:
@@ -226,28 +229,52 @@ class Persona:
 
         is_holiday 是 FIXES11 旧调用方式的兼容垫片：True 等价 holiday_span=1（短假），
         已有调用方（benchmark_v4.py）与既有测试不需要改，行为与改动前逐格一致。
+
+        只取文案；需要"忙/闲"这一结构化信息时用 get_current_activity_detail。
+        """
+        return self.get_current_activity_detail(
+            hour, weekday, holiday_span=holiday_span, is_holiday=is_holiday
+        )[0]
+
+    def get_current_activity_detail(
+        self,
+        hour: int,
+        weekday: Optional[int] = None,
+        holiday_span: int = 0,
+        is_holiday: bool = False,
+    ) -> Tuple[str, bool]:
+        """同 get_current_activity，但多返回一位"是否命中结构化作息条目"。
+
+        返回 (活动文案, is_structured)：
+          - is_structured=True：命中 daily_routine 里明确的作息条目（上课/练琴/合练/睡觉…），
+            她人在忙——FIXES15 用它选"首条延迟 1~10 分钟"；
+          - is_structured=False：回退文案（在度过属于自己的时间）或长假文案，人在闲——
+            FIXES15 用它选"首条延迟 5~30 秒"。长假虽然文案固定，但它不来自作息表，
+            按任务书要求同样归为回退类（闲）。
+
+        匹配顺序与文案逐格保持 get_current_activity 不变，此处只是把结果与判定一起返回。
         """
         span = holiday_span if holiday_span and holiday_span > 0 else 0
         if is_holiday and not span:
             span = 1
 
         if span >= LONG_HOLIDAY_MIN_SPAN:
-            return LONG_HOLIDAY_ACTIVITY
+            return LONG_HOLIDAY_ACTIVITY, False
 
         if span > 0:
             for item in self.daily_routine:
                 if item.days is not None and HOLIDAY_WEEKDAY in item.days:
                     if _hour_in_item(item, hour):
-                        return item.activity
+                        return item.activity, True
 
         if weekday is not None:
             for item in self.daily_routine:
                 if item.days is not None and weekday in item.days:
                     if _hour_in_item(item, hour):
-                        return item.activity
+                        return item.activity, True
 
         for item in self.daily_routine:
             if item.days is None or (weekday is not None and weekday in item.days):
                 if _hour_in_item(item, hour):
-                    return item.activity
-        return "在度过属于自己的时间"
+                    return item.activity, True
+        return FREE_ACTIVITY_FALLBACK, False

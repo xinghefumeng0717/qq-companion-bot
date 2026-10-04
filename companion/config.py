@@ -238,6 +238,30 @@ class ProactiveConfig:
 
 
 @dataclass
+class TimingConfig:
+    """回复时机人格化（FIXES15）：首条延迟 + "正在输入"视觉签名。
+
+    两个开关互相独立：timing_enabled 只管"拿起手机"的首条延迟，
+    typing_indicator_enabled 只管发送前的 typing 表演。全 False 即回到改动前行为。
+    """
+
+    timing_enabled: bool = True
+    typing_indicator_enabled: bool = True
+    # 首条·忙（作息表命中上课/练琴/合练/睡觉等结构化条目）：1~10 分钟
+    first_reply_busy_delay_min: float = 60.0
+    first_reply_busy_delay_max: float = 600.0
+    # 首条·闲（回退文案"在度过属于自己的时间"/长假）：5~30 秒
+    first_reply_free_delay_min: float = 5.0
+    first_reply_free_delay_max: float = 30.0
+    # 对话激活窗口（秒）：她在这个窗口内回过话就算"聊着呢"，后续回复一律不延迟
+    active_conversation_window: float = 300.0
+    # typing 展示时长：每 10 字 2 秒，钳在 3~25 秒
+    typing_seconds_per_10chars: float = 2.0
+    typing_min: float = 3.0
+    typing_max: float = 25.0
+
+
+@dataclass
 class VoiceConfig:
     enabled: bool = True
     model_dir: str = "data/models/sensevoice"
@@ -257,6 +281,7 @@ class Config:
     character: CharacterConfig = field(default_factory=CharacterConfig)
     reply: ReplyConfig = field(default_factory=ReplyConfig)
     proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    timing: TimingConfig = field(default_factory=TimingConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     admin: AdminConfig = field(default_factory=AdminConfig)
 
@@ -368,12 +393,39 @@ class Config:
             max_unanswered=int(proactive_data.get("max_unanswered", 2)),
         )
 
+        # FIXES15 回复时机：整节缺失时全部走 TimingConfig 代码默认值，
+        # 服务器 config.toml 零改动也能跑（所有者拍板决策 4）
+        timing_data = data.get("timing", {})
+        timing = TimingConfig(
+            timing_enabled=bool(timing_data.get("timing_enabled", True)),
+            typing_indicator_enabled=bool(timing_data.get("typing_indicator_enabled", True)),
+            first_reply_busy_delay_min=float(
+                timing_data.get("first_reply_busy_delay_min", 60.0)
+            ),
+            first_reply_busy_delay_max=float(
+                timing_data.get("first_reply_busy_delay_max", 600.0)
+            ),
+            first_reply_free_delay_min=float(
+                timing_data.get("first_reply_free_delay_min", 5.0)
+            ),
+            first_reply_free_delay_max=float(
+                timing_data.get("first_reply_free_delay_max", 30.0)
+            ),
+            active_conversation_window=float(
+                timing_data.get("active_conversation_window", 300.0)
+            ),
+            typing_seconds_per_10chars=float(
+                timing_data.get("typing_seconds_per_10chars", 2.0)
+            ),
+            typing_min=float(timing_data.get("typing_min", 3.0)),
+            typing_max=float(timing_data.get("typing_max", 25.0)),
+        )
+
         voice_data = data.get("voice", {})
         voice = VoiceConfig(
             enabled=bool(voice_data.get("enabled", True)),
             model_dir=str(voice_data.get("model_dir", "data/models/sensevoice")),
         )
-
         admin_data = data.get("admin", {})
         admin = AdminConfig(
             host=str(admin_data.get("host", "127.0.0.1")),
@@ -387,6 +439,7 @@ class Config:
             character=character,
             reply=reply,
             proactive=proactive,
+            timing=timing,
             voice=voice,
             admin=admin,
         )

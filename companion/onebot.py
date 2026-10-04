@@ -395,6 +395,20 @@ class OneBotClient:
             logger.warning(f"[OneBot] 解析引用消息异常，降级为无引用: {e}")
             return None
 
+    async def set_input_status(self, user_id: int, typing: bool) -> bool:
+        """设置/取消"正在输入"状态（FIXES15 打字视觉签名）。
+
+        action: set_input_status，event_type 1=正在输入、0=停止。
+        失败/超时（2s）/未连接 一律静默降级返回 False，绝不抛异常——
+        打字状态只是"她正在打字"的表演，不支持/超时/网络抖动都不能影响主流程。
+        """
+        data = await self._call_action(
+            "set_input_status",
+            {"user_id": user_id, "event_type": 1 if typing else 0},
+            timeout=2.0,
+        )
+        return data is not None
+
     async def send_private_msg(
         self,
         user_id: int,

@@ -162,6 +162,19 @@ class MemoryManager:
             (bot_msg, now_str()),
         )
 
+    async def get_last_assistant_turn_time(self) -> Optional[datetime]:
+        """最近一条 assistant 消息的落库时间；她从没回过话（或时间戳损坏）返回 None。
+
+        FIXES15 首条判定专用：对话激活窗口 = 距这条记录 < active_conversation_window。
+        主动消息（proactive=1）同样算"她回过话"，所以不过滤 proactive。
+        """
+        row = await self.db.fetchone(
+            "SELECT created_at FROM turns WHERE role = 'assistant' ORDER BY id DESC LIMIT 1"
+        )
+        if not row:
+            return None
+        return parse_dt(row["created_at"])
+
     # ==========================================
     # 2. 情景记忆与日记归档 (diary)
     # ==========================================

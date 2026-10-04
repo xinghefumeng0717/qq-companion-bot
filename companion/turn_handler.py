@@ -6,19 +6,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Coroutine, Dict, Optional
+import random
+from datetime import datetime
+from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
 
 from companion.assembler import PromptAssembler
-from companion.config import Config
+from companion.config import Config, TimingConfig
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.observer import Observer
+from companion.persona import holiday_span
 from companion.proactive import ProactiveScheduler
 from companion.prompts import VISION_PERCEPTION_PROMPT
 from companion.replier import Replier, is_silence_output
 from companion.stickers import image_to_base64_data_url
 
 logger = logging.getLogger("companion")
+
+# 对话进行中（她 5 分钟内回过话）typing 展示的上限：这时候她的打字是快的，
+# 真按字数算会出现"回了 5 条后突然卡 20 秒"的假人感。任务书 §三.4 规定收紧到 8 秒。
+# 不进 TimingConfig：这是节奏标定常量，不是需要按环境调的部署参数。
+TYPING_INLINE_MAX = 8.0
 
 
 class TurnHandler:
@@ -32,6 +40,8 @@ class TurnHandler:
         observer: Observer,
         proactive: ProactiveScheduler,
         send_chunk_fn: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
+        set_typing_fn: Optional[Callable[[bool], Coroutine[Any, Any, bool]]] = None,
+        timing_config: Optional[TimingConfig] = None,
     ):
         self.config = config
         self.gateway = gateway
@@ -41,6 +51,136 @@ class TurnHandler:
         self.observer = observer
         self.proactive = proactive
         self.send_chunk_fn = send_chunk_fn
+        # FIXES15 注入链：本处理器不 import onebot，只拿一个"开/关正在输入"的回调。
+        # 两个新参数默认 None = 整个时机表演关掉，行为与改动前逐格一致（既有测试与
+        # 冒烟脚本零改动即得旧行为）；生产由 main.py 显式注入 config.timing。
+        self.set_typing_fn = set_typing_fn
+        self.timing = timing_config
+        self._typing_on = (
+            timing_config is not None
+            and timing_config.typing_indicator_enabled
+            and set_typing_fn is not None
+        )
+
+    # ==========================================
+    # FIXES15 回复时机人格化
+    # ==========================================
+
+    async def _is_first_reply(self) -> bool:
+        """本轮是不是"她拿起手机的第一条"。
+
+        判据：turns 表最近一条 assistant 消息距今 >= active_conversation_window。
+        从没回过话（None）按首条处理——那正是最该慢的场合。
+        """
+        window = self.timing.active_conversation_window
+        last_dt = await self.memory.get_last_assistant_turn_time()
+        if last_dt is None:
+            return True
+        elapsed = (datetime.now() - last_dt).total_seconds()
+        return elapsed >= window
+
+    def current_busy_state(self) -> Tuple[str, bool]:
+        """此刻她忙不忙：返回 (活动文案, is_busy)。
+
+        走 persona.get_current_activity_detail —— 命中 daily_routine 的结构化条目
+        （上课/练琴/合练/睡觉）算忙，回退文案与长假文案算闲。
+        拿不到 persona（assembler 是 mock 等异常构造）时按闲处理：闲=延迟短，最保守。
+        """
+        persona = getattr(self.assembler, "persona", None)
+        if persona is None or not hasattr(persona, "get_current_activity_detail"):
+            return "未知（取不到作息表）", False
+        now_dt = datetime.now()
+        try:
+            holidays = self.config.get_holidays()
+        except Exception as e:
+            logger.warning(f"[Timing] 读取节假日列表失败，按无节假日处理: {e}")
+            holidays = []
+        span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
+        return persona.get_current_activity_detail(
+            now_dt.hour, now_dt.weekday(), holiday_span=span
+        )
+
+    def choose_first_reply_delay(self, is_busy: bool) -> float:
+        """首条延迟 D：忙 1~10 分钟，闲 5~30 秒。非首条不走这里（D=0）。"""
+        t = self.timing
+        if is_busy:
+            return random.uniform(t.first_reply_busy_delay_min, t.first_reply_busy_delay_max)
+        return random.uniform(t.first_reply_free_delay_min, t.first_reply_free_delay_max)
+
+    def calc_typing_duration(self, text: str, is_first_reply: bool) -> float:
+        """typing 展示时长：每 10 字 2 秒，钳在 typing_min~typing_max；
+        非首条（对话中）再收紧一档到 TYPING_INLINE_MAX。"""
+        t = self.timing
+        raw = len(text) / 10.0 * t.typing_seconds_per_10chars
+        duration = max(t.typing_min, min(t.typing_max, raw))
+        if not is_first_reply:
+            duration = min(duration, TYPING_INLINE_MAX)
+        return duration
+
+    async def set_typing(self, typing: bool) -> None:
+        """调注入的 typing 回调。任何异常/False 返回都只记日志，绝不影响主流程。"""
+        if not self._typing_on:
+            return
+        try:
+            ok = await self.set_typing_fn(typing)
+            if ok is False:
+                logger.debug(
+                    f"[Timing] 正在输入{'开' if typing else '关'}未生效（NapCat 未连接或已降级）"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[Timing] 正在输入回调异常（{'开' if typing else '关'}），静默降级: {e}"
+            )
+
+    async def close_typing(self) -> None:
+        """收掉 typing。沉默分支必须先调它：她选择不回，屏幕上不能留着"正在输入"。"""
+        await self.set_typing(False)
+
+    async def prepare_reply_timing(self) -> bool:
+        """首条判定 + 静默期等待（本轮的第一段等待）。返回本轮是否首条。
+
+        等待拆两段是任务书 §三.4 的硬要求：先睡整段 D（她"还没看到消息"），
+        生成完成后再按实际文字量算 T_typing 演 typing——T_typing 依赖生成结果，
+        睡在生成之前就无从算起。
+        """
+        if self.timing is None:
+            return False
+        is_first = await self._is_first_reply()
+        if not (self.timing.timing_enabled and is_first):
+            return is_first
+
+        activity, is_busy = self.current_busy_state()
+        delay = self.choose_first_reply_delay(is_busy)
+        logger.info(
+            f"[Timing] 首条延迟 {delay:.1f} 秒（作息：{activity}，"
+            f"{'忙' if is_busy else '闲'}）"
+        )
+        await asyncio.sleep(delay)
+        return is_first
+
+    async def play_typing_indicator(self, text: str, is_first_reply: bool) -> None:
+        """"正在输入"视觉签名：开 → 等 T_typing → 关。
+
+        只在确认要发送之后调用（沉默分支不进来）。typing 期间又有新消息进来**不打断**：
+        聚合器只作用在接收侧，发送侧的表演会自己演完。
+        任一环节异常都降级为"不演了，照发"，绝不因打字状态丢掉一条消息。
+        """
+        if not self._typing_on:
+            return
+        duration = self.calc_typing_duration(text, is_first_reply)
+        if duration <= 0:
+            return
+        try:
+            await self.set_typing(True)
+            logger.info(
+                f"[Timing] 正在输入 {duration:.1f} 秒（"
+                f"{'首条' if is_first_reply else '对话中'}，{len(text)} 字）"
+            )
+            await asyncio.sleep(duration)
+        except Exception as e:
+            logger.warning(f"[Timing] 正在输入展示异常，降级为直接发送: {e}")
+        finally:
+            await self.close_typing()
 
     async def handle_turn(self, user_text: str, image_path: Optional[str]) -> None:
         """聚合完毕后，处理完整的一轮对话"""
@@ -48,6 +188,15 @@ class TurnHandler:
 
         # 1. 重置主动消息未回计数
         await self.proactive.reset_unanswered_count()
+
+        # 1.5 FIXES15：首条判定 + 静默期等待（在视觉处理之前，她"还没看到"）
+        # 整段包 try/except：时机表演是加分项，出问题一律降级为"立即生成立即发送"
+        is_first_reply = False
+        try:
+            is_first_reply = await self.prepare_reply_timing()
+        except Exception as e:
+            logger.warning(f"[Timing] 回复时机环节异常，降级为立即发送: {e}")
+            is_first_reply = False
 
         # 2. 图像多模态处理与降级
         image_data_url = None
@@ -91,6 +240,9 @@ class TurnHandler:
         messages, sys_prompt = await self.assembler.assemble_messages(user_text, image_data_url)
 
         # 4. LLM 流式调用
+        # 注意：typing 在这一步之前一定没开过——"生成失败/走神兜底前必须先收掉 typing"
+        # 这条要求在本实现里由结构保证（开 typing 的代码在生成之后），不存在开着打字
+        # 走进兜底分支的路径。
         reply_parts = []
         try:
             async for piece in self.gateway.stream_chat(
@@ -112,6 +264,8 @@ class TurnHandler:
         if is_silence_output(full_reply):
             # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，
             # 但用户消息照常落库（他确实说了这句），并照常做回忆加固。
+            # 沉默优先于 typing（FIXES15 §三.6）：屏幕上不能留着"正在输入"。
+            await self.close_typing()
             logger.info("[Bot] 本轮她选择沉默（[沉默]）：不发送、不落 assistant 记录、跳过 observer 结算")
             await self.memory.save_turn_pair(
                 user_msg=user_text, bot_msg=None, has_image=bool(image_path)
@@ -121,6 +275,9 @@ class TurnHandler:
         if not chunks:
             chunks = [{"type": "text", "content": "刚刚走神了……你再说一次？"}]
             clean_record_text = "刚刚走神了……你再说一次？"
+
+        # 5.5 FIXES15：发送前演"正在输入"，演完再逐段发
+        await self.play_typing_indicator(clean_record_text, is_first_reply)
         await self.replier.send_reply_chunks(chunks, self.send_chunk_fn)
 
         # 6. 本轮对话落库

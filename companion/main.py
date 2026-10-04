@@ -164,6 +164,8 @@ class CompanionBot:
             send_msg_fn=self._send_chunk_to_onebot,
             assembler=self.assembler,
             holidays_provider=config.get_holidays,
+            set_typing_fn=self._set_typing_to_onebot,
+            timing_config=config.timing,
         )
 
         self.turn_handler = TurnHandler(
@@ -175,6 +177,8 @@ class CompanionBot:
             observer=self.observer,
             proactive=self.proactive,
             send_chunk_fn=self._send_chunk_to_onebot,
+            set_typing_fn=self._set_typing_to_onebot,
+            timing_config=config.timing,
         )
         self.aggregator = MessageAggregator(turn_handler=self.turn_handler.handle_turn)
 
@@ -217,6 +221,16 @@ class CompanionBot:
         else:
             return
         await self.onebot.send_private_msg(self.config.account.allowed_user_id, segs)
+
+    async def _set_typing_to_onebot(self, typing: bool) -> bool:
+        """FIXES15 "正在输入"状态。user_id 在这里绑定，处理器/调度器只管开/关。
+
+        NapCat 不支持、未连接或超时时 set_input_status 静默返回 False，
+        那只是打字表演没演成，不影响消息发送。
+        """
+        return await self.onebot.set_input_status(
+            self.config.account.allowed_user_id, typing
+        )
 
     async def _on_raw_message(self, text: str, image_path: Optional[str]) -> None:
         """OneBot 收到机主私聊时交由聚合器"""
