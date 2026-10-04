@@ -14,6 +14,7 @@ from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.observer import Observer
 from companion.proactive import ProactiveScheduler
+from companion.prompts import VISION_PERCEPTION_PROMPT
 from companion.replier import Replier
 from companion.stickers import image_to_base64_data_url
 
@@ -67,7 +68,7 @@ class TurnHandler:
                             {
                                 "role": "user",
                                 "content": [
-                                    {"type": "text", "text": "简明描述这张图片的关键内容、场景与细节（50字以内，客观描述画面即可）："},
+                                    {"type": "text", "text": VISION_PERCEPTION_PROMPT},
                                     {"type": "image_url", "image_url": {"url": data_url}},
                                 ],
                             }

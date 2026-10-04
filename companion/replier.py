@@ -41,6 +41,36 @@ STICKER_PATTERN = re.compile(r"\[(?:sticker|表情)[:：]([^\]]+)\]", re.IGNOREC
 # 切句分隔符正则（保留标点）
 SENTENCE_SPLIT_PATTERN = re.compile(r"([^。！？!?\n~～]+[。！？!?\n~～]*)")
 
+# 「图片」占位符兜底（FIXES12 任务1 / E8）：她没有摄像头，模型却会硬着头皮输出
+# 字面量 [图片] 当普通文字发到 QQ 上（生产实锤：10-04 09:19 主动消息）。
+# 提示词层已加了"不能拍照"的禁令，这里是第二道保险。
+# 只丢「整行就是占位符」的行；行内夹杂其他文字的（今天[图片]里那只猫）一律保留。
+IMAGE_PLACEHOLDER_PATTERN = re.compile(
+    r"^[ \t]*(?:\[[ \t]*(?:图片|照片|image)[ \t]*\]|【[ \t]*(?:图片|照片)[ \t]*】)[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def drop_image_placeholder_lines(text: str, source: str = "reply") -> str:
+    """丢弃整行就是 [图片]/[照片]/[image] 这类占位符的行，行内夹杂文字的保留。
+
+    必须在切句之前调用：切句会把行拆散，滤网就再也认不出"整行"了。
+    丢弃时记 INFO 日志（内容 + 来源），便于回溯是哪条通路漏出来的。
+    """
+    kept: List[str] = []
+    dropped: List[str] = []
+    for line in text.split("\n"):
+        if IMAGE_PLACEHOLDER_PATTERN.match(line):
+            dropped.append(line.strip())
+        else:
+            kept.append(line)
+    if dropped:
+        logger.info(
+            f"[Replier] 图片占位符兜底：丢弃 {len(dropped)} 行整行占位符"
+            f"（来源: {source}）: {dropped}"
+        )
+    return "\n".join(kept)
+
 
 def strip_narration(text: str) -> str:
     """旁白剥离兜底：删除疑似动作描写段，删除时记 WARNING 日志"""
@@ -178,16 +208,20 @@ class Replier:
         self.config = config
         self.stickers = stickers
 
-    def parse_reply(self, raw_text: str) -> Tuple[List[Dict[str, Any]], str]:
+    def parse_reply(self, raw_text: str, source: str = "reply") -> Tuple[List[Dict[str, Any]], str]:
         """处理回复全文：
         1. 字面量换行还原
         2. 行首触发方向标签剥离
         3. 旁白剥离
         4. sticker 标记与文字混排拆分
-        5. 句子切段
-        6. 表情包硬上限（整轮只留第一个）
-        7. 压到 max_chunks 以内（优先保表情包）
+        5. 整行图片占位符丢弃（[图片] 这类，FIXES12 / E8）
+        6. 句子切段
+        7. 表情包硬上限（整轮只留第一个）
+        8. 压到 max_chunks 以内（优先保表情包）
         返回: (发送消息段列表, 纯文本记录)
+
+        source 只用于占位符兜底的 INFO 日志标注（"reply" 主聊 / "proactive" 主动消息），
+        默认主聊，既有调用方无需改动。
 
         落库记录由最终发出的段反推，实发多少就记多少：
         被截断丢弃的文字段不会留在记录里，不丢表情包段。
@@ -232,7 +266,21 @@ class Replier:
             if txt.strip():
                 segments.append({"type": "text", "content": txt})
 
-        # 5. 展开文字段切句
+        # 5. 整行图片占位符兜底（FIXES12 任务1 / E8）
+        # 位置在 sticker 拆分之后、切句之前：此时文字段还是模型原样的多行文本，
+        # 切句会把它拆散，滤网就再也认不出"整行"了。整段被滤空则整段丢弃。
+        filtered_segments: List[Dict[str, Any]] = []
+        for seg in segments:
+            if seg["type"] == "sticker":
+                filtered_segments.append(seg)
+                continue
+            kept_text = drop_image_placeholder_lines(seg["content"], source)
+            if kept_text.strip():
+                seg["content"] = kept_text
+                filtered_segments.append(seg)
+        segments = filtered_segments
+
+        # 6. 展开文字段切句
         final_chunks: List[Dict[str, Any]] = []
         for seg in segments:
             if seg["type"] == "sticker":
@@ -242,13 +290,13 @@ class Replier:
                 for sc in sub_chunks:
                     final_chunks.append({"type": "text", "content": sc})
 
-        # 6. 表情包硬上限：整轮只保留最靠前的第一个（提示词软约束之外的代码防线）
+        # 7. 表情包硬上限：整轮只保留最靠前的第一个（提示词软约束之外的代码防线）
         final_chunks = keep_first_sticker(final_chunks)
 
-        # 7. 总量控制：超限先丢普通文本段，表情包段优先保留
+        # 8. 总量控制：超限先丢普通文本段，表情包段优先保留
         final_chunks = fit_chunks(final_chunks, self.config.max_chunks)
 
-        # 8. 记录与实发一致：每段一条，段间用换行对齐 QQ 上的多条气泡
+        # 9. 记录与实发一致：每段一条，段间用换行对齐 QQ 上的多条气泡
         record_parts = [
             c["content"] if c["type"] == "text" else f"[表情:{c.get('desc', '')}]"
             for c in final_chunks

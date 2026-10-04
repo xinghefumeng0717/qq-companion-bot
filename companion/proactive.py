@@ -444,8 +444,8 @@ class ProactiveScheduler:
             logger.error(f"[Proactive] 生成主动消息失败: {e}")
             return
 
-        # 切段与发送
-        chunks, clean_text = self.replier.parse_reply(reply_text)
+        # 切段与发送（source=proactive：占位符兜底的 INFO 日志据此标注来源）
+        chunks, clean_text = self.replier.parse_reply(reply_text, source="proactive")
         if not chunks:
             return
 
