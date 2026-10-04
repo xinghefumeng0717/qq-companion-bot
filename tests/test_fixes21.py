@@ -740,5 +740,165 @@ class TestSimMeasurement(unittest.TestCase):
         self.assertIn("A 段", m["synthetic_ids_note"])
 
 
+class TestTurnHandlerSilence(unittest.IsolatedAsyncioTestCase):
+    """turn_handler 级的沉默判定（终审打回的那处 bug 就在这里）
+
+    之前所有沉默测试都停在 `parse_reply` 层，而 turn_handler 在 parse 之后
+    **又自己判了一次**、判的是未剥引用的原文——所以 bug 一直没被照到。
+    这一节钉住"从 turn_handler 进去的完整行为"：沉默必须**不发送**、
+    **不落 assistant 记录**、**不结算 observer**，也**绝不能**掉进
+    "刚刚走神了……你再说一次？"那个兜底。
+    """
+
+    async def _run_turn(self, raw_reply: str, batch=None):
+        from helpers import close_db, make_db, make_engine_stack, make_mock_gateway
+
+        db = await make_db()
+        try:
+            gw = make_mock_gateway()
+            stack = make_engine_stack(
+                db, persona_path=os.path.join("characters", "qingzi"), gateway=gw
+            )
+            sent: List[Dict[str, Any]] = []
+            turned: List[Tuple[bool, Any]] = []
+
+            async def collect(chunk):
+                sent.append(chunk)
+
+            async def fake_typing(typing: bool) -> bool:
+                return True
+
+            async def spy_stream(*a, **k):
+                pieces = raw_reply.split("||")
+                for p in pieces:
+                    yield p
+
+            class _Proactive:
+                async def reset_unanswered_count(self):
+                    return None
+
+            handler = _make_handler(stack, collect, fake_typing, _Proactive(), spy_stream)
+            await handler.handle_turn("在吗", None, batch)
+            rows = await stack.memory.db.fetchall("SELECT role, content FROM turns")
+            return sent, [dict(r) for r in rows]
+        finally:
+            await close_db(db)
+
+    async def test_纯沉默不发不发记录(self):
+        sent, rows = await self._run_turn("[沉默]")
+        self.assertEqual(sent, [], "沉默轮不该发任何消息")
+        self.assertFalse(
+            any(r["role"] == "assistant" and r["content"] for r in rows),
+            f"沉默轮不该落 assistant 记录：{rows}",
+        )
+
+    async def test_带引用的沉默不发(self):
+        """**终审打回的那条**：原文是 "[quote:2]\\n[沉默]"，判沉默必须剥掉引用前缀。"""
+        batch = [
+            {"index": 1, "text": "甲", "message_id": 9001},
+            {"index": 2, "text": "乙", "message_id": 9002},
+        ]
+        sent, rows = await self._run_turn("[quote:2]\n[沉默]", batch)
+        self.assertEqual(sent, [], "带引用的沉默必须被当成沉默，不能发兜底文案")
+        for r in rows:
+            self.assertNotIn("走神了", str(r["content"]))
+        self.assertFalse(
+            any(r["role"] == "assistant" and r["content"] for r in rows)
+        )
+
+    async def test_只有引用没正文按沉默处理(self):
+        """只输出 [quote:N]：引用被丢弃后等于什么都没说，不能说"走神了"。"""
+        batch = [
+            {"index": 1, "text": "甲", "message_id": 9001},
+            {"index": 2, "text": "乙", "message_id": 9002},
+        ]
+        sent, rows = await self._run_turn("[quote:2]", batch)
+        self.assertEqual(sent, [])
+        for r in rows:
+            self.assertNotIn("走神了", str(r["content"]))
+
+    async def test_普通回复照发(self):
+        """回归：正常话不能被这套判定误伤。"""
+        sent, rows = await self._run_turn("在呢||你说啥")
+        self.assertTrue(sent, "正常回复必须发出去")
+        self.assertTrue(any(r["role"] == "assistant" for r in rows))
+
+
+class TestSyncImageDesc(unittest.TestCase):
+    """`_sync_image_desc_to_batch` 写回哪一条（终审抓出的错位）"""
+
+    def test_写回image_index指的那一条(self):
+        from companion.turn_handler import _sync_image_desc_to_batch
+
+        batch = [
+            {"index": 1, "text": "", "message_id": 1, "has_image": True},
+            {"index": 2, "text": "", "message_id": 2, "has_image": True, "image_index": 2},
+        ]
+        _sync_image_desc_to_batch(batch, "前一句话 [发来一张照片：一只猫]")
+        self.assertEqual(batch[0]["text"], "", "第一张图不是被采用的那张，不该写它")
+        self.assertIn("一只猫", batch[1]["text"])
+
+    def test_没有image_index时退回第一个带图条目(self):
+        from companion.turn_handler import _sync_image_desc_to_batch
+
+        batch = [
+            {"index": 1, "text": "你先说", "message_id": 1, "has_image": True},
+            {"index": 2, "text": "", "message_id": 2},
+        ]
+        _sync_image_desc_to_batch(batch, "[发来一张照片：晚霞]")
+        self.assertIn("晚霞", batch[0]["text"])
+
+    def test_批次为空不炸(self):
+        from companion.turn_handler import _sync_image_desc_to_batch
+
+        _sync_image_desc_to_batch([], "[发来一张照片：x]")
+
+
+class _DummyObserver:
+    def __init__(self):
+        self.calls: List[Any] = []
+
+    async def settle_turn(self, user_message, assistant_reply, user_image_path=None):
+        self.calls.append((user_message, assistant_reply))
+        return {}
+
+
+def _make_handler(stack, collect, set_typing, proactive, stream_chat):
+    """用真实 assembler/memory 组一个 TurnHandler（只换网关与发送端）
+
+    config 用真实的 `Config(...)`：TurnHandler 只读 llm.text_model /
+    llm.vision_model / get_holidays 三个口子，造一个假 Config 反而容易漏字段。
+    """
+    from companion.config import AccountConfig, Config
+    from companion.turn_handler import TurnHandler
+
+    cfg = Config(account=AccountConfig(allowed_user_id=1, bot_qq=0))
+
+    class _Gw:
+        config = cfg.llm
+
+        def __init__(self):
+            self._stream = stream_chat
+
+        def stream_chat(self, *a, **k):
+            return self._stream(*a, **k)
+
+        async def chat(self, *a, **k):
+            return "{}"
+
+    return TurnHandler(
+        config=cfg,
+        gateway=_Gw(),
+        assembler=stack.assembler,
+        replier=stack.replier,
+        memory=stack.memory,
+        observer=_DummyObserver(),
+        proactive=proactive,
+        send_chunk_fn=collect,
+        set_typing_fn=set_typing,
+        timing_config=None,
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

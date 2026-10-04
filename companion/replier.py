@@ -714,6 +714,38 @@ class Replier:
             return True
         return False
 
+    def is_silence_decision(
+        self,
+        raw_text: str,
+        quote_targets: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """这一轮算不算"她选择沉默"（**带 [quote:N] 前缀的也算**）
+
+        为什么要有这个方法（FIXES21 终审打回的真 bug）：调用方在 `parse_reply`
+        之后还要自己判一次沉默（决定要不要落库、要不要结算 observer），
+        判的却是**原始**输出全文。模型输出 `[quote:2]\\n[沉默]` 时，
+        `is_silence_output(full)` 是 False（原文不是"整条就是 [沉默]"），
+        于是流程落到 `if not chunks:` 的兜底，真的把"刚刚走神了……你再说一次？"
+        发到了机主眼前——她明明选的是沉默。任务书 FIXES21 备注要求的
+        "quote × 沉默权（沉默优先）"就是被这么破坏的。
+
+        本方法与 `parse_reply` 的 0/0.5 步**同源**（同一个 strip_leading_quote +
+        同一个 quote_chunk 校验），改一处必须改两处，所以逻辑只写在这里、
+        parse_reply 也调它。两处判不一致的代价就是"静默失效型"事故。
+
+        额外覆盖一种情况：**只输出 `[quote:N]` 没有正文**。引用被丢弃后等于
+        什么都没说，按任务书"quote 后没有正文不空发"的意图，同样按沉默处理
+        （而不是掉进"走神了"兜底，那是在说假话）。
+        """
+        stripped, index = strip_leading_quote(raw_text)
+        if is_silence_output(stripped):
+            return True
+        if index is not None and not stripped.strip():
+            # 前缀是一个**真的能引用**的编号 + 后面没正文 = 她没打算说话
+            if quote_chunk(index, quote_targets) is not None:
+                return True
+        return False
+
     def parse_reply(
         self,
         raw_text: str,
@@ -776,8 +808,12 @@ class Replier:
             raw_text = stripped_text
 
         # 0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 不发送、记录为空（其余情况不触发）
-        if is_silence_output(raw_text):
-            logger.info("[Replier] 命中沉默：模型完整输出为 [沉默]，本轮不发送、记录为空")
+        #    判定走 is_silence_decision（与调用方同源），别在这里另写一份：
+        #    带 [quote:N] 前缀的沉默与"只有引用没正文"也归它管。
+        if self.is_silence_decision(raw_text, quote_targets):
+            logger.info(
+                "[Replier] 命中沉默：模型本轮不发送（[沉默] 或只有引用没有正文），记录为空"
+            )
             return [], ""
 
         # 1. 字面量 \n 还原为真换行（模型常把换行写成两个字符）

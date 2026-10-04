@@ -25,10 +25,17 @@ logger = logging.getLogger("companion")
 
 
 def _sync_image_desc_to_batch(batch: List[Dict[str, Any]], user_text: str) -> None:
-    """把这一轮补上的图片描述写回批次里**带图的那一条**（FIXES21）
+    """把这一轮补上的图片描述写回批次里**那张被采用的照片**（FIXES21）
 
-    只在确实带了图时调用。找不到带图条目（老数据/异常）就什么都不做：
-    编号块里那条空着也只是少一个可引用目标，不该把整轮带崩。
+    坑（终审抓出来的）：聚合器一轮内多图时**只保留最后一张**（`_image_index`
+    指向它，image_data_url 也只有那一张），所以视觉描述必须写回**那一条**。
+    早先这里找的是"第一个 has_image 条目"——一轮里他连发两张图时，
+    描述会挂到第一张的编号上，而真正被看图识别的是最后一张：
+    她会以为第一张是张照片、最后一张是空条目，引用编号也全错位。
+    没有 image_index 时（老数据/直接调用的测试）才退回"第一个 has_image"。
+
+    拿不到带图条目就什么都不做：编号块里那条空着也只是少一个可引用目标，
+    不该把整轮带崩。
     """
     if not batch:
         return
@@ -36,13 +43,28 @@ def _sync_image_desc_to_batch(batch: List[Dict[str, Any]], user_text: str) -> No
         "[发来一张图片" if "发来一张图片" in user_text else None
     )
     desc = user_text[user_text.rfind(marker) :] if marker else ""
+
+    target_index = None
     for item in batch:
-        if item.get("has_image"):
-            if desc and not item.get("text"):
-                item["text"] = desc
-            elif desc and item.get("text"):
-                item["text"] = f"{item['text']} {desc}".strip()
-            return
+        if item.get("image_index") is not None:
+            target_index = item["image_index"]
+            break
+    if target_index is None:
+        for item in batch:
+            if item.get("has_image"):
+                target_index = item.get("index")
+                break
+    if target_index is None:
+        return
+
+    for item in batch:
+        if item.get("index") != target_index:
+            continue
+        if desc and not item.get("text"):
+            item["text"] = desc
+        elif desc:
+            item["text"] = f"{item['text']} {desc}".strip()
+        return
 
 # 对话进行中（她 5 分钟内回过话）typing 展示的上限：这时候她的打字是快的，
 # 真按字数算会出现"回了 5 条后突然卡 20 秒"的假人感。任务书 §三.4 规定收紧到 8 秒。
@@ -310,12 +332,16 @@ class TurnHandler:
         chunks, clean_record_text = self.replier.parse_reply(
             full_reply, quote_targets=batch
         )
-        if is_silence_output(full_reply):
+        if self.replier.is_silence_decision(full_reply, batch):
             # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，
             # 但用户消息照常落库（他确实说了这句），并照常做回忆加固。
             # 沉默优先于 typing（FIXES15 §三.6）：屏幕上不能留着"正在输入"。
+            # FIXES21 终审修正：判据必须是**剥掉行首 [quote:N] 之后**的文本，
+            # 且"只有引用没正文"同样算沉默；直接拿 full_reply 判会被
+            # "[quote:2]\n[沉默]" 甩进下面的 `if not chunks` 兜底，
+            # 真的把"刚刚走神了……"发出去（沉默权被架空）。
             await self.close_typing()
-            logger.info("[Bot] 本轮她选择沉默（[沉默]）：不发送、不落 assistant 记录、跳过 observer 结算")
+            logger.info("[Bot] 本轮她选择沉默：不发送、不落 assistant 记录、跳过 observer 结算")
             await self.memory.save_turn_pair(
                 user_msg=user_text, bot_msg=None, has_image=bool(image_path)
             )
