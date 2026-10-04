@@ -13,14 +13,14 @@ from companion.affection import AffectionEngine
 from companion.db import Database, TIME_FORMAT, parse_dt, now_str
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
-from companion.persona import Persona, is_holiday_date
+from companion.persona import Persona, holiday_span
 from companion.prompts import (
-    HOLIDAY_PROMPT_NOTE,
     SYSTEM_PROMPT_TEMPLATE,
     get_frustration_description,
     get_mood_description,
     get_neglect_description,
     get_trust_description,
+    holiday_prompt_note,
 )
 from companion.safety import SafetyChecker
 from companion.stickers import StickerManager
@@ -161,11 +161,11 @@ class PromptAssembler:
         weekday_str = WEEKDAYS[now_dt.weekday()]
         current_time_str = f"{now_dt.strftime(TIME_FORMAT)} 星期{weekday_str}"
 
-        # 法定节假日：学校放假不上课（FIXES11 任务2）
+        # 法定节假日：短假学校放假不上课，长假她回绍兴老家（FIXES11 任务2 / FIXES14 任务1）
         holidays = self.get_holidays()
-        is_holiday = is_holiday_date(now_dt.strftime("%Y-%m-%d"), holidays)
-        if is_holiday:
-            current_time_str += f"{HOLIDAY_PROMPT_NOTE}"
+        span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
+        if span:
+            current_time_str += holiday_prompt_note(span)
 
         # 1. 好感度与情绪状态
         aff_state = await self.affection.get_state()
@@ -203,7 +203,7 @@ class PromptAssembler:
         stickers_list = "、".join(self.stickers.get_prompt_sticker_list())
 
         routine_activity = self.persona.get_current_activity(
-            now_dt.hour, now_dt.weekday(), is_holiday=is_holiday
+            now_dt.hour, now_dt.weekday(), holiday_span=span
         )
         mood_desc = get_mood_description(v, a)
         trust_desc = get_trust_description(t)

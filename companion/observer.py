@@ -29,6 +29,14 @@ NEUTRAL_SCORE = 4.0
 DEFAULT_REMIND_HOURS = 24.0
 MAX_REMIND_HOURS = 24.0 * 365
 
+# 观察者模型偶尔把 facts 项回成字典而不是字符串（生产证据 E11：日志持续刷
+# "丢弃畸形 fact (dict: {'内容': ...})"，facts 是长期记忆主输入，等于记忆在漏）。
+# 字典项按这些键依次尝试，取第一个非空字符串；都取不到才算畸形丢弃。
+# 前四个键是 FIXES14 任务书点名的形态，顺序即优先级；"value" 排最后是 FIXES10
+# 就支持的老形态，留在链尾只为"只有它"的旧输出不被回退（生产实测的 {'内容': ...}
+# 不带 value，两键同存属臆造形态，按任务书顺序取前者）。
+FACT_DICT_KEYS = ("内容", "content", "fact", "text", "value")
+
 # 内存环形缓冲，保留最近 5 次观察者结算结果供 /debug 查看
 recent_observer_logs: Deque[Dict[str, Any]] = collections.deque(maxlen=5)
 
@@ -171,7 +179,8 @@ class Observer:
             conv_trust=clamped_t,
         )
 
-        # 3. 语义事实入库（只接受字符串；LLM 偶尔返回字典，提取 value/content 字段，提取不到则丢弃）
+        # 3. 语义事实入库（字符串直接入库；字典形态按 FACT_DICT_KEYS 依次提取，
+        #    提取不到才丢弃——LLM 偶尔返回字典，事实是长期记忆主输入，丢不得）
         facts = data.get("facts")
         if facts is not None and not isinstance(facts, list):
             logger.warning(f"[Observer] 字段 facts 类型异常 ({type(facts).__name__}: {facts!r})，已忽略")
@@ -180,7 +189,16 @@ class Observer:
                 if isinstance(fact, str):
                     fact_str = fact.strip()
                 elif isinstance(fact, dict):
-                    fact_str = str(fact.get("value") or fact.get("content") or "").strip()
+                    fact_str = ""
+                    hit_key = ""
+                    for key in FACT_DICT_KEYS:
+                        raw_val = fact.get(key)
+                        if isinstance(raw_val, str) and raw_val.strip():
+                            fact_str = raw_val.strip()
+                            hit_key = key
+                            break
+                    if fact_str:
+                        logger.info(f"[Observer] 已从字典形态提取 fact (键={hit_key!r}): {fact_str}")
                 else:
                     fact_str = ""
                 if fact_str:
@@ -194,6 +212,11 @@ class Observer:
 
         # 5. 待跟进事项入库（逐项校验：坏项丢单项，不丢整轮）
         followups = data.get("followups")
+        if isinstance(followups, dict):
+            # 观察者偶尔把单条 followup 回成裸字典而不是列表（生产证据 E11 同款形态），
+            # 整批忽略等于丢掉一条待跟进，这里降级成单项处理
+            logger.info("[Observer] followups 是单个字典而非列表，已按单项处理")
+            followups = [followups]
         if followups is not None and not isinstance(followups, list):
             logger.warning(f"[Observer] 字段 followups 类型异常 ({type(followups).__name__}: {followups!r})，已忽略")
         if isinstance(followups, list):

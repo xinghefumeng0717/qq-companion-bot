@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from companion.persona import LONG_HOLIDAY_MIN_SPAN
+
 # ==========================================
 # 1. 主对话 System Prompt 模板 (§6.2)
 # ==========================================
@@ -296,8 +298,26 @@ PROACTIVE_GENERATE_PROMPT = """【背景】
 # ==========================================
 
 # 法定节假日的时间行附注（FIXES11 任务2/E3）：assembler 时间行与主动消息的
-# {current_time} 共用同一句，避免两处各写一套口径
-HOLIDAY_PROMPT_NOTE = "，今天是法定节假日（学校放假，不上课）"
+# {current_time} 共用同一句，避免两处各写一套口径。
+# FIXES14 任务1/E10 拆成短假/长假两句：长假她回绍兴老家，附注必须说"不在学校"，
+# 否则模型按留校理解，校园场景照冒（V3 卡锚点：长假校园场景一律不出现）。
+SHORT_HOLIDAY_PROMPT_NOTE = "，今天是法定节假日（学校放假，不上课）"
+LONG_HOLIDAY_PROMPT_NOTE = "，今天是法定节假日（放长假，她不在学校）"
+# 旧名保留为短假附注的别名，兼容既有引用与测试
+HOLIDAY_PROMPT_NOTE = SHORT_HOLIDAY_PROMPT_NOTE
+
+
+def holiday_prompt_note(span: int) -> str:
+    """按连续假期段长选附注：长假一句、短假一句、非假期空串（不附注）。
+
+    阈值复用 persona.LONG_HOLIDAY_MIN_SPAN，保证"判定长假"与"注入哪句附注"
+    永远同一把尺子，不允许两处各写一个数字。
+    """
+    if not span or span <= 0:
+        return ""
+    if span >= LONG_HOLIDAY_MIN_SPAN:
+        return LONG_HOLIDAY_PROMPT_NOTE
+    return SHORT_HOLIDAY_PROMPT_NOTE
 
 CRISIS_PROMPT = (
     "【重要安全指引】对方当前言语中透露出极度消极或自毁倾向。"

@@ -27,15 +27,15 @@ from companion.db import (
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
-from companion.persona import Persona, is_holiday_date
+from companion.persona import LONG_HOLIDAY_MIN_SPAN, Persona, holiday_span
 from companion.prompts import (
-    HOLIDAY_PROMPT_NOTE,
     PROACTIVE_DECISION_PROMPT,
     PROACTIVE_GENERATE_PROMPT,
     STAGE_GATING_RESTRICTED,
     get_mood_description,
     get_mood_label,
     get_trust_description,
+    holiday_prompt_note,
 )
 from companion.replier import Replier
 from companion.stickers import StickerManager
@@ -235,7 +235,7 @@ class ProactiveScheduler:
         now_dt = datetime.now()
         current_time_str = now_dt.strftime(TIME_FORMAT)
         holidays = self.get_holidays()
-        is_holiday = is_holiday_date(now_dt.strftime("%Y-%m-%d"), holidays)
+        span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
 
         # ① 到期未完成的待跟进事项
         fu_row = await self.db.fetchone(
@@ -254,13 +254,15 @@ class ProactiveScheduler:
             await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (sup_row["id"],))
             return f"之前想对他说但忍住的话题：{sup_row['content']}"
 
-        # ③ 作息活动 + 当前时间（法定节假日按周六作息，学校放假）
+        # ③ 作息活动 + 当前时间（短假按周六作息留校；长假直接回绍兴老家）
         current_activity = self.persona.get_current_activity(
-            now_dt.hour, now_dt.weekday(), is_holiday=is_holiday
+            now_dt.hour, now_dt.weekday(), holiday_span=span
         )
         if current_activity:
-            if is_holiday:
-                current_activity += f"{HOLIDAY_PROMPT_NOTE}"
+            # 长假只附短假那句会漏掉"不在学校"的关键信息，但那句文案本身已写明回绍兴老家，
+            # 叠上去就是同一件事说两遍，所以长假不再附注
+            if 0 < span < LONG_HOLIDAY_MIN_SPAN:
+                current_activity += holiday_prompt_note(span)
             return f"现在是 {now_dt.hour}点多，自己此刻正在：{current_activity}"
 
         # ④ 高强度日记回忆
@@ -327,10 +329,10 @@ class ProactiveScheduler:
 
         # 一次读取配置，决策/生成/C 分支共用（任务2：别重复读配置；now_dt 沿用上方闸门后那次）
         holidays = self.get_holidays()
-        is_holiday = is_holiday_date(now_dt.strftime("%Y-%m-%d"), holidays)
+        span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
         current_time_str = now_dt.strftime(TIME_FORMAT)
-        if is_holiday:
-            current_time_str += HOLIDAY_PROMPT_NOTE
+        if span:
+            current_time_str += holiday_prompt_note(span)
         stage_idx = aff_state.get("stage", 0)
 
         # 任务1：决策层也要看得见最近聊过什么 / 已有定论 / 已忍住的念头，
@@ -356,7 +358,7 @@ class ProactiveScheduler:
             mood_desc=get_mood_description(v, a),
             trust_desc=get_trust_description(t),
             current_activity=self.persona.get_current_activity(
-                now_dt.hour, now_dt.weekday(), is_holiday=is_holiday
+                now_dt.hour, now_dt.weekday(), holiday_span=span
             ),
             pending_followups=fu_str,
             recent_diary=recent_diary_str,
