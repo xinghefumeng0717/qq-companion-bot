@@ -28,7 +28,7 @@
 3. 产出 `data/duo_sim/user_persona_brief.md`：一份给模拟器 system prompt 用的人格简报 = 统计事实 + 15~25 条**原句示例**（从语料里挑，按场景分组：分享/吐槽/敷衍/关心/收尾）+ **真人毛病清单**（短、跳、偶尔只回"嗯"、会已读不回、不打标点）；
 4. **此文件交付时单独列出请所有者过目**——画像像不像他，只有他能判。
 
-## 任务 1：对聊仿真器（scripts/duo_sim.py）
+## 任务 1：对聊仿真器（scripts/sim/duo_sim.py）
 
 1. **青梓侧走全真管道**：临时库（`data/duo_sim/<run_id>/sandbox.db`），完整初始化 `PromptAssembler/AffectionEngine/MoodEngine/MemoryManager/Observer/Replier/LifeArcManager`，逐回合驱动 `TurnHandler.handle_input`（或等价入口）；时钟用 `--start-time` 钉住 + 每回合按剧本推进（复用 card_ab_test 的时间伪装思路），保证作息/阶段/事件消息跑的是真实逻辑；
 2. **用户侧**：v4-pro + system prompt = 画像简报 + 当前剧情卡 + 纪律（QQ 聊天体、不知道她的内心状态、不替她接话、不按剧情卡以外的剧本发挥、回合内只输出他本人的下一条消息原文）；输入给她最近 N 轮对话；
@@ -39,7 +39,7 @@
 4. 回合驱动：交替发言；S3 的"已读不回"用推进时钟 + 跳过用户回合实现，不许伪造用户消息；
 5. 每局产出 `data/duo_sim/<run_id>/`：`transcript.md`（按 QQ 气泡格式渲染，她左侧他右侧，带时间戳）、`raw.json`（每回合她的完整内部状态快照：提示词各区块摘要、observer 评分、affection/mood 前后值、LLM 调用流水）、`metrics.json`（任务 2）。
 
-## 任务 2：多轮专项指标（scripts/duo_sim.py 内嵌或独立模块）
+## 任务 2：多轮专项指标（scripts/sim/duo_sim.py 内嵌或独立模块）
 
 单发指标（复用 benchmark 口径：称呼率/气泡长度中位/句尾问号率/汇报腔黑名单）之外，新增多轮专项：
 

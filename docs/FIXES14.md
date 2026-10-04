@@ -6,7 +6,7 @@
 > 所有者已拍板的决策（不许翻案，直接执行）：
 > 1. 本迭代只含任务 1、2，**不动 `characters/`、`config.toml`**（长假期判定从现有 holidays 列表推导，不新增配置字段）；
 > 2. 部署由所有者另行执行，执行模型**不部署、不碰服务器**；
-> 3. BENCHMARK_V4 的判定口径重校准由 Kimi 另行处理，**执行模型不要动 `scripts/benchmark_v4.py` 的指标口径**。
+> 3. BENCHMARK_V4 的判定口径重校准由 Kimi 另行处理，**执行模型不要动 `scripts/sim/benchmark_v4.py` 的指标口径**。
 >
 > 全局约束（高压线）：
 > 1. 完成后 `./venv/Scripts/python.exe -m unittest discover -s tests` 全绿（当前 319）；
@@ -56,7 +56,7 @@
 
 ## 负面清单（不许做）
 
-1. 不动 `characters/`、`config.toml`、`scripts/benchmark_v4.py` 的指标口径；
+1. 不动 `characters/`、`config.toml`、`scripts/sim/benchmark_v4.py` 的指标口径；
 2. 不新增配置字段；不改 holidays 既有语义（计费侧零影响）；
 3. 不重构 observer/persona 其他部分；不加新依赖；
 4. 不部署、不碰服务器、不动 main 分支；

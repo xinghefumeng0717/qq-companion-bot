@@ -5,17 +5,20 @@
 """
 
 import asyncio
+import inspect
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from companion.chat import ChatSession
 from companion.config import Config, LLMConfig, ModelPreset
 from companion.db import Database
 from companion.gateway import LLMGateway, apply_provider_params
-from companion.reset import reset_database
+from companion.reset import main as reset_main, reset_database
 
 
 class TestTask1Presets(unittest.TestCase):
@@ -274,6 +277,34 @@ class TestTask3DataReset(unittest.TestCase):
         c.execute("SELECT COUNT(*) FROM llm_calls")
         self.assertEqual(c.fetchone()[0], 0)
         conn.close()
+
+    def test_default_backup_dir_is_daily_rotation(self):
+        """C-10：reset 默认备份目录必须是有 14 份轮转的 data/backup/daily，
+        否则一次性 CLI reset 会在 data/backup/ 无限堆积全库拷贝。"""
+        self.assertEqual(
+            inspect.signature(reset_database).parameters["backup_dir"].default,
+            "data/backup/daily",
+        )
+
+    def test_cli_default_backup_lands_in_daily_dir(self):
+        """CLI 不传 --backup-dir 时，快照落在 <cwd>/data/backup/daily/。"""
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.tmp_dir)
+            os.makedirs("data", exist_ok=True)
+            shutil.copy2(self.db_path, os.path.join("data", "companion.db"))
+            with patch.object(sys, "argv", ["companion.reset", "--yes"]):
+                reset_main()
+        finally:
+            os.chdir(cwd)
+        daily = os.path.join(self.tmp_dir, "data", "backup", "daily")
+        backups = [
+            b for b in os.listdir(daily)
+            if b.startswith("companion-") and b.endswith(".db")
+        ]
+        self.assertTrue(
+            backups, f"CLI 默认应备份到 data/backup/daily，实际目录内容: {os.listdir(daily)}"
+        )
 
 
 if __name__ == "__main__":

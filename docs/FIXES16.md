@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS life_arcs (
 ## 任务 6：测试与冒烟
 
 **单元测试**（tests/test_fixes16.py）：建表平滑升级（老库无此表不炸）；状态机各迁移（upcoming→near→today→resolved→faded）；生成去重；活跃上限；注入区块的三种形态（无主线整块省略/只有 resolved/混合）；事件通道（触发、24h 窗口、免打扰等待、日上限、event_announced 置位）；reset 清表。
-**真实 API 冒烟**（scripts/smoke_fixes16.py，全新临时库）：
+**真实 API 冒烟**（scripts/smoke/smoke_fixes16.py，全新临时库）：
 - A 段：手工插入一条 key_date=今天、18:00 后的主线 → 跑推进+事件通道 → 贴出她的事件消息原文（应带"刚发生"的第一反应语气）；
 - B 段：插入一条 near 主线 → 组装 system prompt → 贴【她最近的生活】区块；
 - C 段：跑一次真实生成器 → 贴生成的主线 JSON（检查 key_date 在未来 3~14 天、与素材池气质一致、无重复）。

@@ -386,24 +386,20 @@ class CompanionBot:
         finally:
             await self.close()
 
-    async def _cancel_background_tasks(self) -> None:
-        """取消并等待全部后台定时/消费任务退出。
+    async def _cancel_pending_tasks(self) -> None:
+        """取消并等待**全部**未完成的后台任务退出（D-4 停机顺序修复）。
 
-        必须在 db.close() 之前做：库连接关掉之后，任何仍在跑的任务
-        再执行一条 SQL 都会静默重开连接，aiosqlite 的非守护线程会把进程挂住。
+        这是 close() 的第一步，必须早于任何资源释放：库连接关掉之后，仍在跑的任务
+        （observer.settle_turn、日记归档等 fire-and-forget 的写库协程）再执行一条 SQL
+        都会静默重开连接，aiosqlite 的非守护线程会把进程挂住。走 asyncio 的全局任务表
+        统一取消，天然覆盖那些没有显式引用的写库任务，无需额外维护引用集合。
         """
-        tasks = []
-        for t in [
-            getattr(self.aggregator, "_debounce_task", None),
-            getattr(self.aggregator, "_consumer_task", None),
-            getattr(self.proactive, "_task", None),
-            getattr(self.backup_scheduler, "_task", None),
-        ]:
-            if t and not t.done():
-                t.cancel()
-                tasks.append(t)
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def close(self) -> None:
         if self._closed:
@@ -412,13 +408,15 @@ class CompanionBot:
         logger.info("[Bot] 正在关闭伴侣机器人...")
         # 每一步都打日志：停机若再被 systemd 超时 SIGKILL，日志能直接指出卡在哪一步
 
+        # D-4：第一步先取消全部后台任务（含 observer 结算 / 日记归档等写库任务），
+        # 再做任何资源释放——顺序颠倒会让被取消的任务在 db.close() 之后重连挂住进程。
+        logger.info("[Bot] 正在取消后台任务")
+        await self._cancel_pending_tasks()
+
         logger.info("[Bot] 正在关闭 后台调度器 (aggregator/proactive/backup)")
         self.backup_scheduler.stop()
         self.aggregator.stop()
         self.proactive.stop()
-
-        logger.info("[Bot] 正在取消后台任务")
-        await self._cancel_background_tasks()
 
         logger.info("[Bot] 正在关闭 OneBot 客户端")
         await self.onebot.stop()
@@ -444,15 +442,8 @@ class CompanionBot:
         if self._stopping:
             return
         self._stopping = True
+        # 全局任务取消已前移进 close() 的第一步（D-4），此处无需再取消一遍
         await self.close()
-
-        # 取消所有尚未结束的后台任务并彻底等待其退出
-        current = asyncio.current_task()
-        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
-        for t in pending:
-            t.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
 
 
 def main() -> None:

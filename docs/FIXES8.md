@@ -10,7 +10,7 @@
 > 全局约束：
 > 1. **禁止改动 `characters/` 任何文件、`config.toml`**；
 > 2. 业务代码只允许本文件列出的改动点；完成后 `./venv/Scripts/python.exe -m unittest discover -s tests` 全绿；
-> 3. 数值参数必须用 `scripts/score_simulation.py` 迭代求解，禁止拍脑袋填数；每个参数给出仿真证据；
+> 3. 数值参数必须用 `scripts/sim/score_simulation.py` 迭代求解，禁止拍脑袋填数；每个参数给出仿真证据；
 > 4. 交付：逐项结论 + 参数仿真表 + 测试输出 + 真实 API 冒烟记录（任务 6）。
 
 ---
@@ -37,7 +37,7 @@
 | →9 | 相守 | **渐近线：仿真 3650 天不到达，且复合分曲线在 95+ 明显走平** |
 
 - 同时验证冷淡场景（全 3.0）：复合分单调下行归零、无负数、无震荡；
-- 把求解过程和最终参数写入 `scripts/score_simulation.py`（扩展它，别另起炉灶），输出"目标 vs 实测"对照表；
+- 把求解过程和最终参数写入 `scripts/sim/score_simulation.py`（扩展它，别另起炉灶），输出"目标 vs 实测"对照表；
 - **相守=渐近线**这一点在 `affection.py` 的 `STAGE_THRESHOLDS` 上方写注释说明（一句话：设计上不可达，是方向不是终点）。
 
 ### 1.3 情绪脉冲阈值
@@ -79,7 +79,7 @@
 
 ## 任务 6：真实 API 冒烟验证（≤15 次调用）
 
-复用 `scripts/smoke_tone_test.py` 的思路（真实库副本 + 沙箱 + 真实 API），跑 8 轮零暧昧日常对话后归档日记，断言：
+复用 `scripts/smoke/smoke_tone_test.py` 的思路（真实库副本 + 沙箱 + 真实 API），跑 8 轮零暧昧日常对话后归档日记，断言：
 - 日记文本**不含**"想他/心疼/喜欢/在意"（阶段 1 相识下）；
 - 观察者四评分仍在 [4, 7] 锚点区间；
 - 好感度 update 后六维 ≤100、composite ≤100。

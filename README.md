@@ -274,7 +274,7 @@ sudo systemctl enable --now qq-companion
 ```bash
 ./venv/bin/python -m companion.reset
 ```
-- **自动备份**：清空前自动将当前数据库完整备份到 `data/backup/companion-YYYYMMDD-HHMMSS.db`；
+- **自动备份**：清空前自动将当前数据库完整备份到 `data/backup/daily/companion-YYYYMMDD-HHMMSS.db`（与该目录的 14 份轮转共用）；
 - **清空范围**：清空聊天记录、日记、语义记忆、待跟进事项、好感与情绪状态；默认**保留**表情包图库 (`stickers`) 与计费历史 (`llm_calls`)；
 - **参数说明**：
   - `--purge-all`：连同表情包与计费记录彻底清空；
@@ -338,7 +338,7 @@ powershell -ExecutionPolicy Bypass -File ".\launcher\创建桌面快捷方式.ps
 在浏览器访问 `http://localhost:8080/admin`，支持三大核心日常运维操作：
 - **立即备份**：立刻对当前生产数据库执行在线热备份，生成带时间戳快照并同步更新 `latest.db`；
 - **重启服务**：向服务端发出重启请求，进程将在 5 秒后安全退出，由 Linux systemd 守护进程 (`Restart=always`) 重新自动拉起，实现代码与配置即时热生效；
-- **重置数据 (高危)**：清空所有关系好感与对话记忆，恢复到初始相识阶段。**执行前强制要求手敲输入大写 `YES` 校验**，且会自动在 `data/backup/` 生成一份完整前置快照，表情包资产与调用计费记录默认安全保留。
+- **重置数据 (高危)**：清空所有关系好感与对话记忆，恢复到初始相识阶段。**执行前强制要求手敲输入大写 `YES` 校验**，且会自动在 `data/backup/daily/` 生成一份完整前置快照，表情包资产与调用计费记录默认安全保留。
 
 ---
 

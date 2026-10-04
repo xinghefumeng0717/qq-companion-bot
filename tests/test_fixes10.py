@@ -578,6 +578,34 @@ class TestShutdownSequence(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[Bot] 正在关闭 Admin 仪表盘", log_text)
         self.assertIn("[Bot] 正在取消后台任务", log_text)
 
+    async def test_settling_observer_task_is_cancelled_and_shutdown_returns(self):
+        """D-4：停机时正在结算的 observer 任务（fire-and-forget、无显式引用）
+        必须被统一取消，且取消发生在 db.close 之前——否则它会在库关掉后重连挂住进程。"""
+        events = []
+        bot, _ = self._build_bot(events, with_bg_task=False)
+
+        async def settle_turn():
+            events.append("settle.start")
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                events.append("settle.cancelled")
+                raise
+
+        settle_task = asyncio.create_task(settle_turn())
+        await asyncio.sleep(0.05)  # 让结算任务真正跑起来
+        self.assertIn("settle.start", events)
+
+        await asyncio.wait_for(bot.close(), timeout=5.0)
+
+        self.assertIn("settle.cancelled", events, "未跟踪的写库任务也必须被取消")
+        self.assertTrue(settle_task.done())
+        self.assertLess(
+            events.index("settle.cancelled"),
+            events.index("db.close"),
+            "取消结算任务必须发生在 db.close 之前",
+        )
+
     async def test_admin_stop_timeout_does_not_block_shutdown(self):
         events = []
         hanging_admin = _FakeAsyncComponent(events, "admin", delay=30.0)
@@ -615,7 +643,7 @@ class TestScreenshotHelperIsolation(unittest.TestCase):
         cwd = os.getcwd()
         try:
             spec = importlib.util.spec_from_file_location(
-                "screenshot_helper_under_test", "scripts/screenshot_helper.py"
+                "screenshot_helper_under_test", "scripts/util/screenshot_helper.py"
             )
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
@@ -624,7 +652,7 @@ class TestScreenshotHelperIsolation(unittest.TestCase):
 
         self.assertEqual(module.DEMO_DB_PATH, "data/screenshot_demo.db")
 
-        with open("scripts/screenshot_helper.py", encoding="utf-8") as f:
+        with open("scripts/util/screenshot_helper.py", encoding="utf-8") as f:
             source = f.read()
         self.assertNotIn('db_path = "data/companion.db"', source)
         self.assertNotIn("data/test_screenshot.db", source)

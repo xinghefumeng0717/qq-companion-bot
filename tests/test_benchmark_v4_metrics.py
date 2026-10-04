@@ -1,6 +1,6 @@
 """BENCHMARK_V4 指标口径单测 (tests/test_benchmark_v4_metrics.py)
 
-跑分工具（scripts/benchmark_v4.py）里的客观指标全是纯正则函数，不打 API。
+跑分工具（scripts/sim/benchmark_v4.py）里的客观指标全是纯正则函数，不打 API。
 这里给它们钉上单测：口径写错会**静默地**把 FAIL 变成 PASS，所以必须锁死。
 重点覆盖三类最容易出错的判定：
   1. 沉默/短收/该断就断的边界（≤6 字、无问号、沉默不重复计入短收）；
@@ -15,7 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from scripts.benchmark_v4 import (  # noqa: E402
+from scripts.sim.benchmark_v4 import (  # noqa: E402
     A_CLOSE_MAX_CHARS,
     B_CAUTION_MAX,
     CAUTION_RE,
@@ -215,7 +215,7 @@ class TestInviteNoise(unittest.TestCase):
         # "大约" 会命中邀约正则里的「约」，属于已知噪声：任务书禁止为凑 PASS 改口径，
         # 所以保留命中并在报告里标注噪声，让人工能分辨真假阳性。
         self.assertTrue(INVITE_RE.search("大约三点"))
-        from scripts.benchmark_v4 import INVITE_NOISE_RE
+        from scripts.sim.benchmark_v4 import INVITE_NOISE_RE
 
         self.assertTrue(INVITE_NOISE_RE.search("大约三点"))
 

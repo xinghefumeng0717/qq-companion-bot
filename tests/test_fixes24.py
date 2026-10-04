@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, patch
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _REPO_ROOT)
-sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "sim"))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
 
 import duo_sim as D  # noqa: E402
@@ -37,7 +37,7 @@ from companion.db import STATE_KEY_UNANSWERED_PROACTIVE  # noqa: E402
 from companion.gateway import LLMGateway  # noqa: E402
 from helpers import make_db, make_engine_stack, make_mock_gateway  # noqa: E402
 
-BRIEF_SKIP_REASON = "画像简报不存在：需先跑 scripts/duo_sim_persona.py 生成"
+BRIEF_SKIP_REASON = "画像简报不存在：需先跑 scripts/sim/duo_sim_persona.py 生成"
 
 
 def require_brief(tc: unittest.TestCase) -> None:

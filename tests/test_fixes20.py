@@ -34,8 +34,8 @@ from typing import Any, Dict, List
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-if os.path.join(_REPO_ROOT, "scripts") not in sys.path:
-    sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
+if os.path.join(_REPO_ROOT, "scripts", "sim") not in sys.path:
+    sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "sim"))
 
 from companion.affection import AffectionEngine
 from companion.aggregator import MessageAggregator

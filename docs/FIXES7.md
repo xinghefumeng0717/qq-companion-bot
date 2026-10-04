@@ -36,7 +36,7 @@ flash 看图生成文字描述 → 注入 pro 的主聊提示词。核查：
 
 ### A4. System Prompt 长度挤占（assembler.py）
 记忆 15 条 + facts + 日记 + 阶段 examples + 角色卡 + 作息全部进 system prompt。核查：
-- 主聊模型上下文上限下，system prompt 典型长度（取生产真实组装结果测量，可用 scripts/model_bakeoff.py 的组装路径）；
+- 主聊模型上下文上限下，system prompt 典型长度（取生产真实组装结果测量，可用 scripts/ab/model_bakeoff.py 的组装路径）；
 - 对话历史在剩余预算内最多能带几轮，有无历史截断策略；记忆条目过多时有无降级（如只带前 N 条）；
 - 阶段 examples 是否确实位于提示词末尾"最高优先级"位置（角色卡大修时的关键设计），还是被后来的区块顶到了中间。
 - 验证方法：用生产数据（data/companion.db 只读副本）真实组装一次，统计各区块 token 数（按字符数/3 估算即可）并列表。

@@ -42,7 +42,7 @@
 
 **单元测试**（tests/test_fixes21.py）：message_id 穿链（入站→聚合→编号映射）；`[quote:]` 识别（行首合法/行中降级/编号越界/非数字）；每轮上限 1 条；quote+text 合并发送的段数组结构；quote 无正文丢弃；reply 段失败重发正文；proactive 通路降级；与 FIXES20 face 段同轮共存（quote+文字+face 一条消息的段顺序）。
 
-**真实 API 冒烟**（scripts/smoke_fixes21.py）：
+**真实 API 冒烟**（scripts/smoke/smoke_fixes21.py）：
 - A 段：模拟他连发 3 条（mock 进站、真实管道），其中第 1 条埋一个需要回应的点，贴出她的回复——命中引用时贴 OneBot 出站报文（reply 段 id 与第 1 条消息 id 一致）；
 - B 段：对聊仿真跑一局（S2 卡，模拟器连发习惯会自然制造场景，¥0.5 内），统计她的引用次数与命中率——验收标准：**引用率低（多数轮次不引用）但命中场景时不缺位**。
 

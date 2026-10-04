@@ -7,7 +7,7 @@
 3. **落库形态** `（语音消息）文本`：与收侧他的语音转写同格式，observer/日记只认这个
 4. **日计数跨天清零** + 与 face/sticker/quote 同轮共存 + proactive 通路共用账目
 
-全部本地构造，**零真实合成**（真合成在 scripts/smoke_fixes22.py，
+全部本地构造，**零真实合成**（真合成在 scripts/smoke/smoke_fixes22.py，
 mp3 留给所有者亲耳试听）。
 """
 

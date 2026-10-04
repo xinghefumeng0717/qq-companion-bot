@@ -3,3 +3,4 @@ aiosqlite>=0.19.0
 pillow>=10.0.0
 sherpa-onnx>=1.10.0  # 仅语音输入用
 edge-tts==7.2.8       # 仅语音输出用（FIXES22 阶段 A）；钉版本：接口有改版史，7.x 的 Communicate(text, voice, rate=...) 签名在 7.2.8 实测通过
+# python-docx  # 仅本地表情包审核工具（scripts/audit/build_sticker_review_docx.py）用

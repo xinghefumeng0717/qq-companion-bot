@@ -1,5 +1,5 @@
 """数据重置工具 (companion/reset.py)
-一键清空关系数据，自动先备份到 data/backup/，从头开始相处。
+一键清空关系数据，自动先备份到 data/backup/daily/（纳入 14 份轮转），从头开始相处。
 用法:
   python -m companion.reset [--purge-all] [--yes]
 """
@@ -33,7 +33,7 @@ RELATIONSHIP_TABLES = [
 
 def reset_database(
     db_path: str = "data/companion.db",
-    backup_dir: str = "data/backup",
+    backup_dir: str = "data/backup/daily",
     purge_all: bool = False,
 ) -> Dict[str, Any]:
     """执行数据库备份与重置，返回执行结果摘要"""
@@ -118,8 +118,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--backup-dir",
-        default="data/backup",
-        help="备份保存目录（默认 data/backup）",
+        default="data/backup/daily",
+        help="备份保存目录（默认 data/backup/daily，纳入 14 份轮转）",
     )
     args = parser.parse_args()
 
@@ -130,7 +130,7 @@ def main() -> None:
     if not args.yes:
         print("\n" + "!" * 60)
         print("【警告】此操作将清空所有关系数据（聊天记录、好感度、心境、日记、记忆等）！")
-        print("系统会在重置前将当前数据库完整备份到 data/backup/ 目录。")
+        print("系统会在重置前将当前数据库完整备份到 data/backup/daily/ 目录。")
         if args.purge_all:
             print("注意：已指定 --purge-all，表情包与计费历史也将被一并清除！")
         print("!" * 60)

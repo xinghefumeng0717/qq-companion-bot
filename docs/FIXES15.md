@@ -87,7 +87,7 @@ async def set_input_status(self, user_id: int, typing: bool) -> bool:
 - 熔断：延迟环节抛异常降级为立即发送。
 - 用 fake clock/mock asyncio.sleep 验证，不许真睡。
 
-**沙箱验证**（scripts/smoke_fixes15.py，真实 API）：
+**沙箱验证**（scripts/smoke/smoke_fixes15.py，真实 API）：
 - 忙时首条：日志可见"延迟 D 秒（作息：xxx）"→ typing 开 → typing 关 → 发送的完整序列；
 - 连续第二条：无长延迟；
 - 贴日志序列作为证据（沙箱注入的 typing 假实现打印开/关）。

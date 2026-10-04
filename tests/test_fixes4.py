@@ -343,7 +343,7 @@ class TestTask3AdminAPIAndManagement(AioHTTPTestCase):
         data = await resp.json()
         self.assertEqual(data.get("status"), "ok")
 
-        # 备份必须落在注入的临时 backup_dir 里，不能污染真实 data/backup/（无轮转）
+        # 备份必须落在注入的临时 backup_dir 里，不能污染真实 data/backup/daily/
         backup_path = str((data.get("result") or {}).get("backup_path", ""))
         self.assertTrue(backup_path, "重置结果必须带 backup_path")
         self.assertTrue(os.path.exists(backup_path))

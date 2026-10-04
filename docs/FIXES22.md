@@ -44,7 +44,7 @@
 ## 任务 4：测试与冒烟
 
 **单元测试**（tests/test_fixes22.py）：`[voice:]` 识别与边界（未闭合/多个/行内位置）；降级四路径（开关关/日上限/闸门关/合成失败）逐路径用例；60 字截断；落库 `（语音消息）` 形态；日计数跨天清零；与 face/sticker/quote 同轮共存；proactive 通路。
-**真实 API 冒烟**（scripts/smoke_fixes22.py）：
+**真实 API 冒烟**（scripts/smoke/smoke_fixes22.py）：
 - A 段：真实 edge-tts 合成一句话 → 打印 mp3 文件大小与时长（文件保留在 `data/voice_out/smoke_*.mp3` **供所有者亲耳试听**）；
 - B 段：mock 她输出含 `[voice:]` 的回复走完整发送管道到 mock OneBot，贴出站报文（record 段结构）与落库记录；
 - C 段：闸门验证——构造"她在上课"的活动状态，确认 voice 被降级成文字。

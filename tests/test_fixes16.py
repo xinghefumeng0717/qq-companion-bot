@@ -362,6 +362,7 @@ class TestGeneration(ArcsTestBase):
         self.assertEqual(added, 0)
         self.assertEqual(len(self.gen_calls()), 0, "达到上限时不该调 LLM")
 
+    @patch("companion.arcs.datetime", _FrozenDatetime)
     async def test_at_most_max_active_even_if_model_returns_many(self):
         for i in range(MAX_ACTIVE_ARCS - 1):
             await self.arcs.insert_arc(f"已有{i}", "背景", _d(5 + i))
@@ -383,6 +384,7 @@ class TestGeneration(ArcsTestBase):
         self.assertEqual(await self.arcs.ensure_arcs(), 0)
         self.assertEqual(len(self.gen_calls()), 0)
 
+    @patch("companion.arcs.datetime", _FrozenDatetime)
     async def test_jaccard_dedup_rejects_near_identical_arc(self):
         await self.arcs.insert_arc(
             "乐团节目审查",
@@ -406,6 +408,7 @@ class TestGeneration(ArcsTestBase):
         self.assertEqual(added, 0, "与近 30 天主线几乎一字不差，应判重丢弃")
         self.assertEqual(await self.arcs.count_active(), 1)
 
+    @patch("companion.arcs.datetime", _FrozenDatetime)
     async def test_jaccard_threshold_is_actually_used(self):
         """反向对照：相似度明显低的主题必须放行，证明闸门不是"一律拒绝"。"""
         await self.arcs.insert_arc("乐团节目审查", "下周三彩排，低音部没合齐", _d(5))
@@ -452,6 +455,7 @@ class TestGeneration(ArcsTestBase):
                 self.assertEqual(added, 0, f"key_date={kd} 应被丢弃（{why}）")
                 await self.db.set_state_json("life_arc_generate", {"last_attempt": ""})
 
+    @patch("companion.arcs.datetime", _FrozenDatetime)
     async def test_generate_cooldown_blocks_second_attempt(self):
         # 两条候选必须写得足够不同：Jaccard 是按汉字集合算的，
         # "第一次｜背景" vs "第二次｜背景" 相似度 0.67，会被去重闸门当成同一条。
@@ -477,10 +481,12 @@ class TestGeneration(ArcsTestBase):
         self.assertEqual(await self.arcs.ensure_arcs(), 0)
         self.assertEqual(len(self.gen_calls()), n_after_first, "1 小时内不该再发 API")
 
-        # 把上次尝试挪到 2 小时前 → 放行
+        # 把上次尝试挪到 2 小时前 → 放行。
+        # 这里必须用 _FrozenDatetime.now()（与 arcs 同一口钟）：若用真实 now，
+        # 钉死时钟后写进去的会是"未来时间"，节流闸把第三次也拦住。
         await self.db.set_state_json(
             "life_arc_generate",
-            {"last_attempt": (datetime.now() - timedelta(minutes=GENERATE_COOLDOWN_MINUTES + 5)).strftime(TIME_FORMAT)},
+            {"last_attempt": (_FrozenDatetime.now() - timedelta(minutes=GENERATE_COOLDOWN_MINUTES + 5)).strftime(TIME_FORMAT)},
         )
         self.gateway.chat = AsyncMock(
             side_effect=lambda **kw: (self.calls.append(kw), _arc_json([second_arc]))[1]
@@ -520,6 +526,7 @@ class TestGeneration(ArcsTestBase):
         self.assertIn("2026-10-18", prompt)         # date_max = 今天+14
         self.assertEqual(self.gen_calls()[0]["purpose"], "life_arc")
 
+    @patch("companion.arcs.datetime", _FrozenDatetime)
     async def test_recent_titles_are_injected_to_avoid_repeat(self):
         await self.arcs.insert_arc("旧主线甲", "背景甲", _d(5))
         self.gateway.chat = AsyncMock(

@@ -828,6 +828,7 @@ class AdminServer:
 
         async def _delayed_restart() -> None:
             await asyncio.sleep(5)
+            logger.warning("[AdminAction] 硬退出，跳过优雅停机")
             os._exit(0)
 
         asyncio.create_task(_delayed_restart())

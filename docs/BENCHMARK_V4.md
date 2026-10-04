@@ -18,7 +18,7 @@
 
 ## 一、方法论铁律（执行模型必读，逐条遵守）
 
-1. **每个（场景×采样）一个全新空库**；跑完删除临时库。现成 harness：`scripts/sandbox_v3_ab.py`（FIXES13 构建，支持多轮脚本、时间伪装、raw 留档、`--runs N`、全新空库、跑完删库）——本任务在它基础上扩展为 `scripts/benchmark_v4.py`，不要另起炉灶。
+1. **每个（场景×采样）一个全新空库**；跑完删除临时库。现成 harness：`scripts/ab/sandbox_v3_ab.py`（FIXES13 构建，支持多轮脚本、时间伪装、raw 留档、`--runs N`、全新空库、跑完删库）——本任务在它基础上扩展为 `scripts/sim/benchmark_v4.py`，不要另起炉灶。
 2. **采样数 N=5**（n=3 在 FIXES13 验证中已证明噪声偏大）；每个场景同时报告逐次结果与汇总，禁止只报均值掩盖波动。
 3. **指标分两层**：客观指标（正则/计数，脚本判定）为主；风格类指标（比喻质量、语句通顺、整体"像不像人"）只做采样收集+原文呈现，**不用 LLM 裁判打分**（公榜教训：LLM 裁判与真人偏好相关性存疑，最终裁判是所有者本人）。
 4. **时间伪装两个时钟**每个涉作息场景各跑一遍：工作日钟（如 2026-10-09 周五 15:00）与长假钟（2026-10-05 周一 15:00，国庆长假中）。
@@ -92,7 +92,7 @@
 1. `data/benchmark_v4/report.json`：场景×时钟×采样的全部原始输出 + 逐指标数值 + 通过线判定（PASS/FAIL 逐场景）；
 2. `data/benchmark_v4/report.md`：一页汇总表（场景 | 指标 | 通过线 | 结果 | 判定）+ 每个 FAIL 场景的全部原文；
 3. `data/benchmark_v4/transcripts.md`：全部 transcript 留档；
-4. 工具：`scripts/benchmark_v4.py` 支持 `--scenarios A,B` `--runs 5` `--from-raw`（复算不重打 API）；
+4. 工具：`scripts/sim/benchmark_v4.py` 支持 `--scenarios A,B` `--runs 5` `--from-raw`（复算不重打 API）；
 5. 回复摘要：汇总表 + 成本（llm_calls 实际扣费）+ 任何发现的生产侧异常（只记录）。
 
 ## 负面清单

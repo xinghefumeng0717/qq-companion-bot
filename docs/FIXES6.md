@@ -4,10 +4,10 @@
 >
 > 全局约束：
 > 1. **禁止改动 `companion/` 下任何业务代码、prompts.py、characters/、config.toml**；
-> 2. 只允许新增 `scripts/score_simulation.py` 一个文件（及测试如需）；
+> 2. 只允许新增 `scripts/sim/score_simulation.py` 一个文件（及测试如需）；
 > 3. 仿真直接 import 生产公式（`AffectionEngine`/`MoodEngine`/`calc_*`），禁止复制粘贴公式另写一份——算的就是线上在跑的东西；
 > 4. 完成后 `./venv/Scripts/python.exe -m unittest discover -s tests` 全绿（现有 71 个不许动）；
-> 5. 交付：`scripts/score_simulation.py` 运行输出 + 在本文件末尾追加"验证结果"章节。
+> 5. 交付：`scripts/sim/score_simulation.py` 运行输出 + 在本文件末尾追加"验证结果"章节。
 
 ## 背景：已确诊的三个病灶（仿真需量化其严重度）
 
@@ -47,7 +47,7 @@ MoodEngine 从默认初态出发，不喂对话冲击（conv_*=0），模拟连�
 
 ## 交付格式
 
-1. `scripts/score_simulation.py`：`python scripts/score_simulation.py` 一次跑完全部 4 个任务，打印结构化表格；
+1. `scripts/sim/score_simulation.py`：`python scripts/sim/score_simulation.py` 一次跑完全部 4 个任务，打印结构化表格；
 2. 本文件末尾追加 `## 验证结果` 章节：每个任务一张结果表 + 对每个"验收判据"的 通过/不通过 + 给所有者的参数调整建议（只给建议，不改代码）。
 
 ---

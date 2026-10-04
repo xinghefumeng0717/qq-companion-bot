@@ -26,7 +26,7 @@
 1. 【本地电脑执行】从服务器拉回当前生产表情包库到 `data/sticker_audit_workdir/`（只读 scp，命令规范见 AGENTS.md）；
 2. **查明 DB `stickers` 表（57 行）与 `stickers/index.json`（42 键）的漂移**：按上面预审方向核实 15 行差集的来源（逐行比对 name/md5，判断是"历世收藏孤儿"还是"双写不一致"）；结论写进交付摘要。若查实是收藏写入路径本身存在双写不一致（而非历史孤儿），**只记录报告，不在本迭代修**（另立项）。
 
-## 任务 1：批量重打标（scripts/relabel_stickers.py）
+## 任务 1：批量重打标（scripts/audit/relabel_stickers.py）
 
 1. 输入：任务 0 拉回的 workdir（图片 + index.json）；
 2. 对每张图：视觉模型（flash，vision）按三栏提示词直接输出 JSON：`{"画面": "...", "含义": "...", "适用场景": "..."}`。提示词要点（写死）：
@@ -38,7 +38,7 @@
 4. 跑完打印成本与失败清单（个别图标注失败允许，列入表尾"待人工"区）；
 5. **到此停工**，在交付摘要里明确提示所有者审核 `data/sticker_audit.md`。
 
-## 任务 2：应用入库（scripts/apply_sticker_audit.py，所有者审完后才跑）
+## 任务 2：应用入库（scripts/audit/apply_sticker_audit.py，所有者审完后才跑）
 
 1. 解析所有者改过的 `data/sticker_audit.md`，容错：解析不了的行跳过并列清单，绝不猜；
 2. 写回 **index.json**：每个键扩展为 `{"file": ..., "desc": 旧画面描述, "meaning": 含义, "usage": 适用场景}`（保留 desc 字段兼容，新增 meaning/usage）；审核表中"待人工"区或所有者留空的行保持原样不动；

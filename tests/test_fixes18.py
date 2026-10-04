@@ -10,12 +10,12 @@
 
 前置条件（新环境必读）
   `data/duo_sim/user_persona_brief.md`（画像简报）由**私有 QQ 语料**经
-  `scripts/duo_sim_persona.py` 生成，落在 gitignored 的 `data/` 下，**不入库**；
+  `scripts/sim/duo_sim_persona.py` 生成，落在 gitignored 的 `data/` 下，**不入库**；
   新 clone 的仓库里必然不存在，仿真器的 `setup()` 会因缺这个文件直接抛错。
   因此凡必经 `DuoSimulator._load_brief()` 的用例（所有经 `_make_sim` → `setup()`
   的仿真用例，以及 `TestPersonaBrief`）统一走 `require_brief()` 跳过，不报 FAIL/ERROR。
   要真正跑这些用例，先生成简报：
-      ./venv/Scripts/python.exe scripts/duo_sim_persona.py --export "导出文件路径"
+      ./venv/Scripts/python.exe scripts/sim/duo_sim_persona.py --export "导出文件路径"
 
 纪律：不碰 characters/、config.toml；不发起真实 API 调用（网关在类级别被替换）。
 """
@@ -34,7 +34,7 @@ from unittest.mock import patch
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _REPO_ROOT)
-sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "sim"))
 
 import duo_sim as D
 from companion.gateway import LLMGateway
@@ -108,7 +108,7 @@ def _pair(start: int, user_text: str, her_text: str) -> List[Dict[str, Any]]:
 # 前置条件：画像简报（gitignored，新环境必缺）
 # ==========================================
 
-BRIEF_SKIP_REASON = "画像简报不存在：需先跑 scripts/duo_sim_persona.py 生成"
+BRIEF_SKIP_REASON = "画像简报不存在：需先跑 scripts/sim/duo_sim_persona.py 生成"
 
 
 def require_brief(tc: unittest.TestCase) -> None:
@@ -748,7 +748,7 @@ class TestPersonaBrief(unittest.TestCase):
     def test_画像简报已生成(self):
         self.assertTrue(
             os.path.exists(D.PERSONA_BRIEF),
-            f"缺画像简报 {D.PERSONA_BRIEF}，请先跑 scripts/duo_sim_persona.py",
+            f"缺画像简报 {D.PERSONA_BRIEF}，请先跑 scripts/sim/duo_sim_persona.py",
         )
 
     def test_system_prompt含画像与纪律(self):

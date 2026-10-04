@@ -26,9 +26,9 @@
 
 ## 一、体检概况与红线合规审查
 
-1. **业务代码零改动**：本次体检未对 `companion/`、`prompts.py`、`characters/`、`config.toml` 作出任何修改，仅新增 `tests/test_fixes7.py` 与 `scripts/smoke_fixes7.py`。
+1. **业务代码零改动**：本次体检未对 `companion/`、`prompts.py`、`characters/`、`config.toml` 作出任何修改，仅新增 `tests/test_fixes7.py` 与 `scripts/smoke/smoke_fixes7.py`。
 2. **测试全绿验证**：执行 `./venv/Scripts/python.exe -m unittest discover -s tests -v`，测试用例由原先 71 个扩展至 **83 个，全部 PASS（0 fail, 0 error）**。
-3. **真实 API 成本控制**：B 类冒烟测试严格通过 `scripts/smoke_fixes7.py` 调度，5 轮对话累计调用 LLM **11 次**（主聊 5 次 + 观察者 5 次 + 视觉 1 次），未超额调用 pro 模型，远低于 15 次上限。
+3. **真实 API 成本控制**：B 类冒烟测试严格通过 `scripts/smoke/smoke_fixes7.py` 调度，5 轮对话累计调用 LLM **11 次**（主聊 5 次 + 观察者 5 次 + 视觉 1 次），未超额调用 pro 模型，远低于 15 次上限。
 
 ---
 

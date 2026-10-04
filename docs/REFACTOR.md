@@ -4,7 +4,7 @@
 > 性质：**纯重构，不加功能、不改行为**。这是 FIXES8 上线后、最终部署+reset 前的代码质量收拾。
 >
 > 所有者已拍板的决策（不许再翻案讨论，直接执行）：
-> 1. 范围 = companion/ 生产代码 + tests/ 测试样板 + scripts/score_simulation.py 的公式引用；**launcher/ 不动**；
+> 1. 范围 = companion/ 生产代码 + tests/ 测试样板 + scripts/sim/score_simulation.py 的公式引用；**launcher/ 不动**；
 > 2. 死代码（status.py、data/dashboard_dump.html、未用 import、写了从不读的属性）**直接删除**，git 历史即备份；
 > 3. 两个真 bug（admin 缺 `import asyncio`、看板遗忘公式分叉）已由 Kimi 在重构前单独修复并 commit（`bb5ab65`），**不属于本任务书范围，不要重复修、不要回滚**；
 > 4. 遗忘曲线公式以 `memory.py` 生产公式（`tau_base = max(10.0, importance * 6.8)`）为唯一基准，admin/仿真/测试三处拷贝统一向它引用。
@@ -21,7 +21,7 @@
 
 ## 任务 0：建立零变化基线（先做这个，别的都靠它兜底）
 
-1. 写 `scripts/snapshot_dashboard.py`（新工具脚本，不算业务代码）：
+1. 写 `scripts/util/snapshot_dashboard.py`（新工具脚本，不算业务代码）：
    - 参考 `tests/test_m6_admin.py:22-68` 的引擎栈组装方式，用 `data/companion.db` 的**临时副本**（复制到 `data/snapshot_tmp.db`，用完删）启动 AdminServer（端口用一个空闲端口如 18080）；
    - 用 aiohttp 抓取 7 个页面（`/`、`/memory`、`/debug`、`/costs`、`/stickers`、`/logs`、`/admin`）+ `/api/status`，存入指定目录；
    - `--save <dir>` 抓快照；`--diff <dir_a> <dir_b>` 对比：先做归一化再逐字节 diff。归一化规则（正则替换为占位符）：
@@ -51,10 +51,10 @@
 
 ## 任务 3：遗忘曲线公式单点化（memory.py）
 
-- 现状：同一公式 4 份拷贝——memory.py:335-343（生产基准）、admin.py:874-882（bugfix 后已对齐）、scripts/score_simulation.py:281-283、tests/test_fixes8.py:94-103；
+- 现状：同一公式 4 份拷贝——memory.py:335-343（生产基准）、admin.py:874-882（bugfix 后已对齐）、scripts/sim/score_simulation.py:281-283、tests/test_fixes8.py:94-103；
 - 在 memory.py 提取公共函数（建议签名：`calc_diary_strength(importance, recall_count, sentiment, days) -> tuple[float, float]`，返回 strength 与 tau_effective，具体以现有代码为准），四处全部改为 import 调用；
 - tests/test_fixes8.py 里的拷贝改成 import 后，**原断言不许删**——它就地从"抄公式"升级为"回归检测器"；
-- 验收：92 测试全绿 + `scripts/score_simulation.py` 跑一遍，输出与重构前一致（同一天运行对比）。
+- 验收：92 测试全绿 + `scripts/sim/score_simulation.py` 跑一遍，输出与重构前一致（同一天运行对比）。
 
 ## 任务 4：两个小提取（JSON 容错解析 + 时间解析）
 

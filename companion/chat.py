@@ -84,7 +84,7 @@ class ChatSession:
 
         生产由 main.py 注入 onebot.set_input_status；沙箱没有 NapCat 通道，
         注入这个就能让 TurnHandler/proactive 的 typing 表演照常跑起来并留日志证据，
-        同时保证沙箱零外呼。冒烟脚本 scripts/smoke_fixes15.py 直接注入本方法。
+        同时保证沙箱零外呼。冒烟脚本 scripts/smoke/smoke_fixes15.py 直接注入本方法。
         """
         print(f"[沙箱] 正在输入 {'开' if typing else '关'}")
         return True
