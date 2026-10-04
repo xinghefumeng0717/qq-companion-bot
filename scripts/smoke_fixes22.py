@@ -295,8 +295,8 @@ async def section_c() -> Dict[str, Any]:
         prompt_ok = (not off_has) and on_has
         add("提示词双保险（关着不注入/开着才注入）", True, prompt_ok,
             f"off_has_voice={off_has}, on_has_voice={on_has}")
-        print(f"  · 提示词双保险 → 关着有 [voice:: {off_has} / "
-              f"开着有 [voice:: {on_has}（期望 False/True）")
+        print(f"  · 提示词双保险 → 关着有 [voice: {off_has} / "
+              f"开着有 [voice: {on_has}（期望 False/True）")
     finally:
         await close_db(db)
 

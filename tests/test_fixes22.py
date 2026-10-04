@@ -92,21 +92,27 @@ class TestDefaultOff(unittest.TestCase):
         self.assertEqual(record, "在呢睡啦", "默认关时剥掉标记只发正文")
 
     def test_提示词教的写法必须解析得出来(self):
-        """**这条是终审逼出来的真 bug**：提示词教模型写 `[voice:]…[/voice]`
-        （冒号后带右括号），而解析器只认 `[voice:…[/voice]` —— 模型照着提示词写
-        的东西根本解析不出来，功能 100% 静默失效，而且单测全绿（用例都写对了）。
-        两种写法都必须收，提示词与解析器不许各说各话。"""
-        for raw in (
-            "在呢[voice:]睡啦[/voice]",      # 提示词里教的写法
+        """**这条是终审逼出来的真 bug**：提示词教的写法与解析器各说各话——
+        模型照提示词写的东西解析不出来，功能 100% 静默失效，而单测全绿。
+        示范直接从 prompts.VOICE_PROMPT_BLOCK 里抽：提示词改了这条才会跟着红。"""
+        import re as _re
+
+        from companion.prompts import VOICE_PROMPT_BLOCK
+
+        taught = _re.findall(r"\[voice[:：]\]?[^\[\]]*\[/voice\]", VOICE_PROMPT_BLOCK)
+        self.assertTrue(taught, "VOICE_PROMPT_BLOCK 里应至少有一个 voice 示范")
+
+        cases = list(taught) + [
+            "在呢[voice:]睡啦[/voice]",      # 带右括号写法
             "在呢[voice:睡啦[/voice]",        # 无右括号写法
             "在呢[voice：睡啦[/voice]",        # 全角冒号
             "在呢[voice: 睡啦 [/voice]",      # 带空格
-        ):
+        ]
+        for raw in cases:
             with self.subTest(raw=raw):
                 chunks, record = _replier().parse_reply(raw, voice_allowed=True)
-                self.assertEqual(_types(chunks), ["text", "voice"],
-                                 f"这��写法没被认出来：{raw}")
-                self.assertEqual(chunks[1]["content"], "睡啦")
+                self.assertIn("voice", _types(chunks),
+                              f"这种写法没被认出来：{raw}")
 
 
 # ==========================================
@@ -718,7 +724,7 @@ class TestVoicePrompt(unittest.TestCase):
                 await close_db(db)
 
         prompt = asyncio.run(run())
-        self.assertNotIn("[voice:]", prompt, "默认关时模型不该认识 [voice:]")
+        self.assertNotIn("[voice:", prompt, "默认关时模型不该认识 [voice:]")
 
     def test_开着时提示词里有voice(self):
         from helpers import close_db, make_db, make_engine_stack

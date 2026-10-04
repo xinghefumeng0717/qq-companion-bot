@@ -93,9 +93,9 @@ QUOTE_PATTERN = re.compile(r"^[ \t]*\[quote[:：](\d+)\]", re.IGNORECASE | re.MU
 # 刻意用成对标签而不是裸标记：语音是"一段"，开口与闭口要能对上；
 # 裸标记一旦落进正文就会把她正常说话的一部分吃成语音。
 #
-# ⚠ 冒号后**允许**一个右括号：提示词里教的是 `[voice:]…[/voice]`，
-# 而模型极可能照着写成 `[voice:…[/voice]`。只认后者 = 提示词教的写法解析不出来、
-# 功能 100% 静默失效（单测写对了才没照到）。两种都收。
+# ⚠ 冒号后**允许**一个右括号（两种写法都收）：提示词示范用无括号写法
+# `[voice:…[/voice]`，但模型可能自作主张加成 `[voice:]…[/voice]`。
+# 只认其中一种 = 另一种静默失效（这个雷已经炸过一次，单测写对了才没照到）。
 VOICE_PATTERN = re.compile(
     r"\[voice[:：]\]?\s*([^\[\]]*?)\s*\[/voice\]", re.IGNORECASE
 )
@@ -718,17 +718,6 @@ def typing_text_from_chunks(chunks: List[Dict[str, Any]]) -> str:
                         if p.get("type") == "text")
             )
     return "\n".join(p for p in parts if p.strip())
-def strip_voice_segments(text: str) -> str:
-    """把 `[voice:]…[/voice]` **整段抹掉**（只留她真打出来的字）。
-
-    给 typing 时长用（FIXES22 任务2 第5条）：语音是"说"出来的不是"打"出来的，
-    拿她的语音正文去算打字时长会平白拉长"正在输入"的表演。
-    注意与 `strip_voice_markers` 的区别：那个是**落库形态**（要留内容），
-    这个是**打字表演**（连内容都不算）。
-    """
-    if not text:
-        return text or ""
-    return VOICE_PATTERN.sub("", text)
 
 
 def normalize_voice_markers(text: str) -> str:
