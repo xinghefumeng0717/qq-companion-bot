@@ -31,10 +31,15 @@ from companion.stickers import StickerManager, image_to_base64_data_url, parse_s
 
 SANDBOX_DB = "data/smoke_fixes17_sandbox.db"
 REPORT_FILE = "data/smoke_fixes17_report.json"
+# 图片一律从 data/sticker_audit_workdir（服务器只读副本）读：image_to_base64_data_url 会**就地缩放**，
+# 不能拿生产目录的图当代价。键名→文件名映射改取生产 index——workdir 那份是改名前的历史副本，
+# 用它会拿着新键名找不到旧文件。
 WORKDIR = "data/sticker_audit_workdir/stickers"
+PROD_DIR = "characters/qingzi/stickers"
+INDEX_FILE = os.path.join(PROD_DIR, "index.json")
 
 # 挑三张有代表性的：模板角色（已知含义容易塌）、静物、需要脑补情绪的
-PICKS = ["菲比欢呼", "收到", "冰雕小猫"]
+PICKS = ["菲比乖巧", "夸夸", "冰雕小猫"]
 
 
 async def main() -> int:
@@ -46,7 +51,7 @@ async def main() -> int:
     gateway = LLMGateway(config.llm, db)
     model = config.llm.vision_model
 
-    with open(os.path.join(WORKDIR, "index.json"), "r", encoding="utf-8") as f:
+    with open(INDEX_FILE, "r", encoding="utf-8") as f:
         index = json.load(f)
 
     report = {
@@ -110,8 +115,8 @@ async def main() -> int:
 
     await gateway.close()
 
-    # C：用真实入库后的 index 看提示词列表长什么样
-    mgr = StickerManager(WORKDIR, db)
+    # C：用生产 index（改名后的事实源）看提示词列表长什么样（只读，不落盘）
+    mgr = StickerManager(PROD_DIR, db)
     lst = mgr.get_prompt_sticker_list()
     report["C_prompt_list_sample"] = lst[:6]
     report["C_prompt_list_total"] = len(lst)

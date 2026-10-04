@@ -73,7 +73,7 @@ E8_PROD_TRANSCRIPT = (
 # 占位符黑名单（含各种写法，滤网必须全拦下）
 PLACEHOLDER_TOKENS = ["[图片]", "【图片】", "[照片]", "【照片】", "[image]", "[IMAGE]"]
 
-# B 段：一张真实表情包（"收到"语义=对话收尾信号，正是 E9 里的场景）
+# B 段：一张真实表情包（「夸夸」＝赞同、认可，正是 E9 里的场景）
 B_STICKER = "characters/qingzi/stickers/cat_thanks.jpg"
 # E9 的判据：描述里必须出现"社交含义"而非只有画面元素
 SOCIAL_MEANING_KEYWORDS = [
