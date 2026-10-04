@@ -104,6 +104,7 @@ class ProactiveScheduler:
         holidays_provider: Optional[Callable[[], List[str]]] = None,
         set_typing_fn: Optional[Callable[[bool], Coroutine[Any, Any, bool]]] = None,
         timing_config: Optional[TimingConfig] = None,
+        arcs: Optional[Any] = None,
     ):
         self.config = config
         self.persona = persona
@@ -122,6 +123,8 @@ class ProactiveScheduler:
         # 两个新参数默认 None = 不演，与改动前一致；生产由 main.py 显式注入。
         self.set_typing_fn = set_typing_fn
         self.timing = timing_config
+        # FIXES16 生活主线：可选注入（None = 无生活剧本，行为与改动前逐字节一致）
+        self.arcs = arcs
         self._typing_on = (
             timing_config is not None
             and timing_config.typing_indicator_enabled
@@ -354,8 +357,111 @@ class ProactiveScheduler:
                 return True
         return False
 
+    async def _generate_and_send(self, material: str, current_time_str: str) -> bool:
+        """给定话题素材走"生成 → 切段 → typing 表演 → 发送 → 落库"整条管道。
+
+        A 分支（常规决策选中想发）与 FIXES16 事件通道共用这一条，
+        保证两条路产出的消息在切段、typing、落库、未回复计数上完全同构。
+        返回 True = 消息已发出并落库。
+        """
+        stickers_list = "、".join(self.stickers.get_prompt_sticker_list())
+
+        # 任务1：生成层注入最近 8 条对话历史。E1 的根因就是这里 0 条历史，
+        # 她对"他已经坐动车到家"完全无知，只能拿永不更新的 facts 硬编
+        gen_turns = await self.memory.get_recent_turns(limit=8)
+        recent_chat_block = format_recent_chat(gen_turns, max_chars=60)
+
+        gen_user_prompt = PROACTIVE_GENERATE_PROMPT.format(
+            user_address=self.persona.user_address,
+            current_time=current_time_str,
+            topic_material=material,
+            recent_chat=recent_chat_block,
+            stickers_list=stickers_list,
+        )
+
+        # 完整人格 system prompt 注入
+        system_prompt = await self.assembler.assemble_system_prompt("")
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": gen_user_prompt},
+        ]
+
+        try:
+            reply_text = await self.gateway.chat(
+                messages=messages,
+                model=self.gateway.config.text_model,
+                temperature=0.8,
+                purpose="proactive_message",
+            )
+        except Exception as e:
+            logger.error(f"[Proactive] 生成主动消息失败: {e}")
+            return False
+
+        # 切段与发送（source=proactive：占位符兜底的 INFO 日志据此标注来源）
+        chunks, clean_text = self.replier.parse_reply(reply_text, source="proactive")
+        if not chunks:
+            return False
+
+        logger.info(f"[Proactive] 正在分段发送主动消息: {clean_text}")
+        await self._play_typing_indicator(clean_text)
+        await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
+
+        # 发送后落库并累加未回复计数
+        await self.memory.save_proactive_turn(clean_text)
+        await self.increment_unanswered_count()
+        return True
+
+    async def _try_event_channel(self) -> bool:
+        """FIXES16 事件通道：生活主线刚出结果 → 抢先于 LLM 决策层发一条"脱口而出"。
+
+        返回 True = 本周期已被事件通道处理（无论发没发出去，调用方都不要再走常规决策）。
+        事件消息与常规主动消息共用 _generate_and_send，因此同样计入未回复连续闸门。
+
+        免打扰时段不会被这里绕过：调用方在本方法之前就过了规则闸门，
+        0~8 点整条 trigger_cycle 提前 return，事件留在库里等下一轮。
+        """
+        if self.arcs is None:
+            return False
+        try:
+            arc = await self.arcs.claim_event()
+        except Exception as e:
+            logger.error(f"[Proactive] 事件通道取主线异常: {e}")
+            return False
+        if not arc:
+            return False
+
+        logger.info(f"[Proactive] 命中生活事件通道: 《{arc.get('title')}》")
+        now_dt = datetime.now()
+        current_time_str = now_dt.strftime(TIME_FORMAT)
+        span = holiday_span(now_dt.strftime("%Y-%m-%d"), self.get_holidays())
+        if span:
+            current_time_str += holiday_prompt_note(span)
+
+        sent = await self._generate_and_send(
+            self.arcs.build_event_material(arc), current_time_str
+        )
+        if sent:
+            try:
+                await self.arcs.mark_event_sent()
+            except Exception as e:
+                logger.warning(f"[Proactive] 事件消息已发但日计数记账失败: {e}")
+        else:
+            # 生成/发送失败：回滚置位，让它下轮还能再试
+            try:
+                await self.arcs.release_event(arc)
+            except Exception as e:
+                logger.warning(f"[Proactive] 事件回滚失败: {e}")
+        return True
+
     async def trigger_cycle(self) -> None:
         """执行单次主动消息评估周期"""
+        # FIXES16：状态机每次醒来顺手推一次（极便宜，只在 today 且过 18:00 才发 API）
+        if self.arcs is not None:
+            try:
+                await self.arcs.advance_states()
+            except Exception as e:
+                logger.warning(f"[Proactive] 生活主线状态推进异常: {e}")
+
         # 第一层：规则闸门
         blocked, reason = await self._check_rules_gate()
         if blocked:
@@ -363,6 +469,18 @@ class ProactiveScheduler:
             return
 
         logger.info(f"[Proactive] 规则闸门通过，进入 LLM 潜意识决策层")
+
+        # FIXES16 任务5：事件检查在常规 LLM 决策**之前**。
+        # 当天无事件时 claim_event 返回 None，行为与改动前完全一致（回落常规决策层）。
+        if await self._try_event_channel():
+            return
+
+        # FIXES16 任务2：活跃主线 < 2 条时即时补（自身带 1 小时节流，连烧不了）
+        if self.arcs is not None:
+            try:
+                await self.arcs.ensure_arcs()
+            except Exception as e:
+                logger.warning(f"[Proactive] 补充生活主线异常: {e}")
 
         # 第二层：LLM 决策
         aff_state = await self.affection.get_state()
@@ -463,51 +581,7 @@ class ProactiveScheduler:
 
         # 第三层：A 分支生成与发送
         material = topic_hint or await self._select_topic_material()
-        stickers_list = "、".join(self.stickers.get_prompt_sticker_list())
-
-        # 任务1：生成层注入最近 8 条对话历史。E1 的根因就是这里 0 条历史，
-        # 她对"他已经坐动车到家"完全无知，只能拿永不更新的 facts 硬编
-        gen_turns = await self.memory.get_recent_turns(limit=8)
-        recent_chat_block = format_recent_chat(gen_turns, max_chars=60)
-
-        gen_user_prompt = PROACTIVE_GENERATE_PROMPT.format(
-            user_address=self.persona.user_address,
-            current_time=current_time_str,
-            topic_material=material,
-            recent_chat=recent_chat_block,
-            stickers_list=stickers_list,
-        )
-
-        # 完整人格 system prompt 注入
-        system_prompt = await self.assembler.assemble_system_prompt("")
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": gen_user_prompt},
-        ]
-
-        try:
-            reply_text = await self.gateway.chat(
-                messages=messages,
-                model=self.gateway.config.text_model,
-                temperature=0.8,
-                purpose="proactive_message",
-            )
-        except Exception as e:
-            logger.error(f"[Proactive] 生成主动消息失败: {e}")
-            return
-
-        # 切段与发送（source=proactive：占位符兜底的 INFO 日志据此标注来源）
-        chunks, clean_text = self.replier.parse_reply(reply_text, source="proactive")
-        if not chunks:
-            return
-
-        logger.info(f"[Proactive] 正在分段发送主动消息: {clean_text}")
-        await self._play_typing_indicator(clean_text)
-        await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
-
-        # 发送后落库并累加未回复计数
-        await self.memory.save_proactive_turn(clean_text)
-        await self.increment_unanswered_count()
+        await self._generate_and_send(material, current_time_str)
 
     async def _run_loop(self) -> None:
         """后台轮询主循环"""

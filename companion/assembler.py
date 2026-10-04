@@ -37,19 +37,22 @@ class PromptAssembler:
         affection: AffectionEngine,
         mood: MoodEngine,
         memory: MemoryManager,
-        stickers: StickerManager,
+        stickers_manager: StickerManager,
         db: Database,
         holidays_provider: Optional[Callable[[], List[str]]] = None,
+        arcs: Optional[Any] = None,
     ):
         self.persona = persona
         self.affection = affection
         self.mood = mood
         self.memory = memory
-        self.stickers = stickers
+        self.stickers = stickers_manager
         self.db = db
         # 节假日唯一数据源是 Config.get_holidays()（转发自 [llm.pricing].holidays）。
         # 这里只收一个只读取值函数，脚本/测试不传即视为"无节假日"，行为与旧版一致。
         self._holidays_provider = holidays_provider
+        # FIXES16 生活主线：可选注入，不传即整块省略（既有调用方零改动）
+        self.arcs = arcs
         self.last_assembled_prompt: str = ""
 
     def get_holidays(self) -> List[str]:
@@ -155,6 +158,16 @@ class PromptAssembler:
             logger.error(f"[Assembler] 生成欲言又止块异常: {e}")
             return ""
 
+    async def _build_life_arcs_block(self) -> str:
+        """FIXES16【她最近的生活】区块。arcs 未注入或无活跃主线时返回空串（整块省略）。"""
+        if self.arcs is None:
+            return ""
+        try:
+            return await self.arcs.build_prompt_block()
+        except Exception as e:
+            logger.error(f"[Assembler] 生成生活主线块异常: {e}")
+            return ""
+
     async def assemble_system_prompt(self, user_message: str) -> str:
         """按 §6.2 组装完整的 System Prompt"""
         now_dt = datetime.now()
@@ -216,6 +229,7 @@ class PromptAssembler:
         diaries_block = await self._build_diaries_block(v)
         followups_block = await self._build_followups_block()
         suppressed_block = await self._build_suppressed_block()
+        life_arcs_block = await self._build_life_arcs_block()
 
         # 安全边界检查 (§13)：模板里占位符位于 {stage_block} 之后、收尾句之前，
         # 保证危机/依赖指引排在"最高优先级"阶段规则之后，不被阶段规则压过
@@ -242,6 +256,7 @@ class PromptAssembler:
             diaries_block=diaries_block,
             followups_block=followups_block,
             suppressed_block=suppressed_block,
+            life_arcs_block=life_arcs_block,
             safety_block=safety_block,
         )
 

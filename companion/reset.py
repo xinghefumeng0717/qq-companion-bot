@@ -26,6 +26,8 @@ RELATIONSHIP_TABLES = [
     "observer_scores",
     "milestones",
     "state",
+    # FIXES16：reset 即清档，生活主线随记忆一起清零（否则清档后她还记得上次没交上的报告）
+    "life_arcs",
 ]
 
 

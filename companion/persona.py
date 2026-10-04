@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,85 @@ LONG_HOLIDAY_ACTIVITY = "放长假中，回绍兴老家陪父母，不在学校"
 
 # 作息表覆盖不到时的回退文案：她"在度过属于自己的时间"，人是在闲的（FIXES15 忙/闲判定）
 FREE_ACTIVITY_FALLBACK = "在度过属于自己的时间"
+
+
+# FIXES16 生活主线生成器的学期节奏锚点：示例大学校历硬事实，来源 docs/ZJU_LIFE_MATERIALS.md 第一节
+# （2025-2026 学年校历；人设 2024 级，该学年正好读大二）。每项 (起, 止, 一句话锚点)，
+# 止<起 表示跨年（12-31~01-06）。全年无缺口，生成主线时注入"当前锚点 + 下一个锚点"，
+# 让她编出来的事踩在真实校历上，而不是凭空冒出个"下周答辩"。
+# 口径说明：只取与"她本人"有关的节点（新生报到军训与她无关，未收录）。
+# 年份漂移风险：这里是 2025-2026 的月日锚点，跨年后逐年会与实际校历有几天出入，
+# 属"氛围级"误差（她不会说错考试是几号，只是可能差两三天），不在本轮做逐年会推。
+ZJU_CALENDAR_ANCHORS: List[Tuple[str, str, str]] = [
+    ("09-12", "09-15", "老生报到注册（9-12），秋学期正式上课（9-15），课外锻炼打卡也是这天开始"),
+    ("09-16", "10-07", "秋学期刚开课没几周，读书报告和小组 pre 陆续压上来，DDL 总堆在周末"),
+    ("10-08", "10-23", "秋学期上半段，课程论文和 pre 交叉赶工"),
+    ("10-24", "10-26", "秋季校运动会，10-24 当天停课"),
+    ("10-27", "11-07", "秋学期最后一波课，下周就进考试周了"),
+    ("11-08", "11-09", "秋学期考试第一块（两天）"),
+    ("11-10", "11-14", "冬学期紧跟着开学，中间几乎没有喘息"),
+    ("11-15", "11-16", "秋学期考试第二块（两天）"),
+    ("11-17", "12-12", "冬学期上半段，体测从 11 月中开始要提前预约"),
+    ("12-13", "12-30", "四六级笔试（12-13）"),
+    ("12-31", "01-06", "示例大学学生节（12-31），元旦前后校园里都是人"),
+    ("01-07", "01-16", "冬学期期末考周，全校停课考试"),
+    ("01-17", "02-26", "放寒假（1-17 起），2-17 春节"),
+    ("02-27", "03-01", "学生报到注册（2-27）"),
+    ("03-02", "04-17", "春学期开课，课程和 pre 重新开始"),
+    ("04-18", "04-19", "春季校运动会"),
+    ("04-20", "04-24", "春学期上半段的尾巴"),
+    ("04-25", "04-26", "春夏学期考试第一块（两天）"),
+    ("04-27", "05-08", "夏学期开课（4-27）"),
+    ("05-09", "05-10", "春夏学期考试第二块（两天）"),
+    ("05-11", "05-20", "夏学期上半段"),
+    ("05-21", "06-24", "校庆日（5-21），夏学期下半段"),
+    ("06-25", "07-04", "夏学期期末考，6-25 起停课考试"),
+    ("07-05", "09-11", "放暑假（7-05 起），她回绍兴老家不在学校；老生 9-12 才报到注册"),
+]
+
+
+def _mmdd(date_str: str) -> str:
+    """取 YYYY-MM-DD 的 MM-DD 部分；**格式不合法返回空串**。
+
+    必须校验：不能只切片。"not-a-date"[5:10] 会切出 "a-date"，而 "a-date" >= "12-31"
+    在字符串比较下成立，于是任何乱码都会被跨年锚点（12-31~01-06）静默命中——
+    脏数据伪装成了一条真实校历锚点。
+    """
+    if not isinstance(date_str, str):
+        return ""
+    m = re.match(r"^\d{4}-(\d{2}-\d{2})", date_str)
+    return m.group(1) if m else ""
+
+
+def _anchor_contains(start: str, end: str, mmdd: str) -> bool:
+    """MM-DD 是否落在 [start, end] 内；end < start 视为跨年区间（如 12-31~01-06）"""
+    if end < start:
+        return mmdd >= start or mmdd <= end
+    return start <= mmdd <= end
+
+
+def calendar_anchor_note(date_str: str, lookahead: int = 1) -> str:
+    """取"当前日期所在锚点 + 后面 lookahead 个锚点"的节奏提示文本。
+
+    查不到当前锚点时（日期格式异常）返回空串，调用方据此不注入——
+    节奏锚点是氛围加成，不该因为查不到就让主线生成整条链失败。
+    """
+    mmdd = _mmdd(date_str)
+    if not mmdd:
+        return ""
+
+    ordered = sorted(ZJU_CALENDAR_ANCHORS, key=lambda a: a[0])
+    idx = next(
+        (i for i, (s, e, _n) in enumerate(ordered) if _anchor_contains(s, e, mmdd)),
+        None,
+    )
+    if idx is None:
+        return ""
+
+    parts = [f"眼下：{ordered[idx][2]}"]
+    for j in range(idx + 1, min(idx + 1 + max(0, lookahead), len(ordered))):
+        parts.append(f"接下来：{ordered[j][2]}")
+    return "；".join(parts)
 
 
 def is_holiday_date(date_str: str, holidays: Optional[List[str]]) -> bool:

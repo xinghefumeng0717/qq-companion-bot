@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 import sqlite3
-from typing import List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from companion.db import TIME_FORMAT
 
@@ -115,7 +115,12 @@ def get_last_backup_time(backup_dir: str = "data/backup/daily") -> Optional[str]
 
 
 class DailyBackupScheduler:
-    """应用内备份调度器：每天 04:17 自动备份，启动时若当天尚未备份则补一次"""
+    """应用内备份调度器：每天 04:17 自动备份，启动时若当天尚未备份则补一次
+
+    FIXES16：on_maintenance 是"备份/维护时段跑完后"的异步回调钩子，
+    用来挂生活主线的每日补充（不另起一个调度器，避免多一个醒来周期）。
+    不传即完全不调用，行为与改动前一致。
+    """
 
     def __init__(
         self,
@@ -124,14 +129,27 @@ class DailyBackupScheduler:
         target_hour: int = 4,
         target_minute: int = 17,
         max_keep: int = 14,
+        on_maintenance: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         self.db_path = db_path
         self.backup_dir = backup_dir
         self.target_hour = target_hour
         self.target_minute = target_minute
         self.max_keep = max_keep
+        self.on_maintenance = on_maintenance
         self._task: Optional[asyncio.Task] = None
         self._running = False
+
+    async def _run_maintenance(self) -> None:
+        """跑维护回调。异常一律吞掉：备份已经成功了，不能被后续钩子拖成失败。"""
+        if self.on_maintenance is None:
+            return
+        try:
+            await self.on_maintenance()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[Backup] 维护回调执行失败（不影响备份结果）: {e}")
 
     def start(self) -> None:
         if self._running:
@@ -173,6 +191,7 @@ class DailyBackupScheduler:
 
                 if self._running and os.path.exists(self.db_path):
                     run_daily_backup(self.db_path, self.backup_dir, self.max_keep)
+                    await self._run_maintenance()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -196,5 +215,6 @@ class DailyBackupScheduler:
             try:
                 logger.info("[Backup] 启动检测：当天尚未执行备份，立即补做一次每日备份...")
                 run_daily_backup(self.db_path, self.backup_dir, self.max_keep)
+                await self._run_maintenance()
             except Exception as e:
                 logger.warning(f"[Backup] 启动补做备份失败: {e}")

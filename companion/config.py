@@ -112,7 +112,14 @@ class LLMConfig:
     pricing: PricingConfig
 
     # 后台任务里"写出来的文字用户看得见"的用途，默认开 low 思考（不思考的 flash 行文会不通顺）
-    DEFAULT_THINKING_PURPOSES = ["diary_archive", "vision_perception", "proactive_message"]
+    # FIXES16：life_arc 也开——主线的 detail/emotional_stake/resolution 会间接进入她的话，
+    # 措辞质量不是装饰。不开也不炸：服务器 config.toml 零改动，靠这个代码默认值兜底。
+    DEFAULT_THINKING_PURPOSES = [
+        "diary_archive",
+        "vision_perception",
+        "proactive_message",
+        "life_arc",
+    ]
 
     def __init__(
         self,

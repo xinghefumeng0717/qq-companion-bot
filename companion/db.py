@@ -20,6 +20,10 @@ TIME_FORMAT = "%Y-%m-%d %H:%M"
 STATE_KEY_AFFECTION = "affection"
 STATE_KEY_MOOD = "mood"
 STATE_KEY_UNANSWERED_PROACTIVE = "unanswered_proactive"
+# FIXES16：生活主线生成器的节流账（记上次尝试时刻，避免主线不足时每轮都烧一次 flash 调用）
+STATE_KEY_ARC_GENERATE = "life_arc_generate"
+# FIXES16：当天已发过几条"生活事件"主动消息（日上限 1 条的账）
+STATE_KEY_ARC_EVENT_DAILY = "life_arc_event_daily"
 
 COUNTER_KEY_TOTAL_TURNS = "total_turns"
 COUNTER_KEY_ARCHIVED_TURNS = "archived_turns"
@@ -255,6 +259,21 @@ class Database:
                 warmth_score REAL,
                 resonance REAL,
                 created_at TEXT
+            );
+
+            -- FIXES16 生活主线表：她的生活按时间自动向前滚动，节点事件驱动主动消息。
+            -- 只做"现在到哪儿了"的账本，与 mood/affection 零耦合（见 arcs.py）。
+            CREATE TABLE IF NOT EXISTS life_arcs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,            -- 一句话主线名，如"乐团节目审查"
+                detail TEXT NOT NULL,           -- 两三句背景与她的牵挂点
+                key_date TEXT NOT NULL,         -- 节点日期 YYYY-MM-DD
+                status TEXT NOT NULL DEFAULT 'upcoming',  -- upcoming / near / today / resolved / faded
+                emotional_stake TEXT DEFAULT '', -- 她的情绪赌注，如"紧张，低音部那段还没合齐"
+                resolution TEXT DEFAULT '',      -- 结果（当日 18:00 后由模型生成）
+                event_announced INTEGER DEFAULT 0,  -- 事件消息是否已发
+                created_at TEXT NOT NULL,
+                resolved_at TEXT DEFAULT ''
             );
             """
         )

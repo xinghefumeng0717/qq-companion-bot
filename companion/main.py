@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from companion.admin import AdminServer
 from companion.affection import AffectionEngine
 from companion.aggregator import MessageAggregator
+from companion.arcs import LifeArcManager
 from companion.assembler import PromptAssembler
 from companion.backup import DailyBackupScheduler
 from companion.config import Config
@@ -135,6 +136,9 @@ class CompanionBot:
         self.gateway = LLMGateway(config.llm, self.db)
         self.memory = MemoryManager(self.db, self.gateway, self.affection, self.persona)
 
+        # FIXES16 生活主线：只往提示词加事实，与 mood/affection/observer 零耦合
+        self.arcs = LifeArcManager(self.db, self.gateway, self.persona)
+
         self.assembler = PromptAssembler(
             self.persona,
             self.affection,
@@ -143,6 +147,7 @@ class CompanionBot:
             self.stickers,
             self.db,
             holidays_provider=config.get_holidays,
+            arcs=self.arcs,
         )
         self.replier = Replier(config.reply, self.stickers)
         self.observer = Observer(
@@ -166,6 +171,7 @@ class CompanionBot:
             holidays_provider=config.get_holidays,
             set_typing_fn=self._set_typing_to_onebot,
             timing_config=config.timing,
+            arcs=self.arcs,
         )
 
         self.turn_handler = TurnHandler(
@@ -185,6 +191,7 @@ class CompanionBot:
         self.backup_scheduler = DailyBackupScheduler(
             db_path=self.db_path,
             backup_dir="data/backup/daily",
+            on_maintenance=self._daily_arcs_topup,
         )
 
         self._stopping = False
@@ -211,6 +218,18 @@ class CompanionBot:
             db_path=self.db_path,
             backup_dir="data/backup/daily",
         )
+
+    async def _daily_arcs_topup(self) -> None:
+        """FIXES16 凌晨维护钩子：备份/维护时段跑完后把生活主线补到 3 条。
+
+        这里是"每日补一次"的那个时机（另一个时机是主动消息周期里发现不足 2 条时即时补）。
+        异常一律吞掉：备份已经成功了，钩子炸了不该影响主流程。
+        """
+        try:
+            await self.arcs.advance_states()
+            await self.arcs.ensure_arcs(min_active=3)
+        except Exception as e:
+            logger.warning(f"[Bot] 凌晨补充生活主线失败: {e}")
 
     async def _send_chunk_to_onebot(self, chunk: Dict[str, Any]) -> None:
         """分段发送底层调用"""
