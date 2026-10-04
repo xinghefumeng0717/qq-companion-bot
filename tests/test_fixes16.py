@@ -435,17 +435,22 @@ class TestGeneration(ArcsTestBase):
             ("2026-09-01", "已经过去"),
             ("garbage", "根本不是日期"),
         ]
-        for kd, why in cases:
-            self.calls.clear()
-            self.gateway.chat = AsyncMock(
-                side_effect=lambda kd=kd, **kw: (
-                    self.calls.append(kw),
-                    _arc_json([_arc(f"候选{kd}", kd)]),
-                )[1]
-            )
-            added = await self.arcs.ensure_arcs()
-            self.assertEqual(added, 0, f"key_date={kd} 应被丢弃（{why}）")
-            await self.db.set_state_json("life_arc_generate", {"last_attempt": ""})
+        # 追评（2026-10-05）：本用例的 `_d()` 基准写死 2026-10-04，而 arcs 的有效区间
+        # 是"真实今天 +3/+14"——不把 arcs 的钟钉死，用例只在 10-04 当天绿（10-05 起
+        # _d(15)=10-19 落进 +14 区间，断言翻转）。钉死时钟以保住原意。
+        with patch("companion.arcs.datetime", _FrozenDatetime):
+            _FrozenDatetime.set(datetime(2026, 10, 4, 12, 0))
+            for kd, why in cases:
+                self.calls.clear()
+                self.gateway.chat = AsyncMock(
+                    side_effect=lambda kd=kd, **kw: (
+                        self.calls.append(kw),
+                        _arc_json([_arc(f"候选{kd}", kd)]),
+                    )[1]
+                )
+                added = await self.arcs.ensure_arcs()
+                self.assertEqual(added, 0, f"key_date={kd} 应被丢弃（{why}）")
+                await self.db.set_state_json("life_arc_generate", {"last_attempt": ""})
 
     async def test_generate_cooldown_blocks_second_attempt(self):
         # 两条候选必须写得足够不同：Jaccard 是按汉字集合算的，
@@ -501,7 +506,11 @@ class TestGeneration(ArcsTestBase):
                 _arc_json([_arc("选题", _d(5))]),
             )[1]
         )
-        await self.arcs.ensure_arcs()
+        # 追评（2026-10-05）：下面两条日期断言是"今天+3/+14"，必须把 arcs 的钟钉在
+        # _d() 的基准日上，否则用例只在写它的那天（10-04）绿。
+        with patch("companion.arcs.datetime", _FrozenDatetime):
+            _FrozenDatetime.set(datetime(2026, 10, 4, 12, 0))
+            await self.arcs.ensure_arcs()
         prompt = self.gen_calls()[0]["messages"][0]["content"]
         self.assertIn("文琴乐团近百人", prompt)      # 素材池第四节
         self.assertIn("大食堂", prompt)              # 素材池第二节

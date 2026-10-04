@@ -12,8 +12,10 @@ thinking_chat = true
 thinking_effort_chat = "low"
 thinking_tasks = false               # 后台总开关：true 则全部用途开思考（旧行为）
 thinking_effort_tasks = "low"
-# 总开关关闭时，按用途白名单开思考（默认即下列三项：写出来的文字用户看得见，不思考的 flash 行文会不通顺）
-thinking_tasks_purposes = ["diary_archive", "vision_perception", "proactive_message"]
+# 总开关关闭时，按用途白名单开思考（默认即下列四项：写出来的文字用户看得见，不思考的 flash 行文会不通顺）
+# ⚠ 手工填写本字段时须包含 life_arc（她的生活主线）——写了白名单却漏掉它，
+#   主线生成会静默退回不思考，FIXES16 的效果等于没上。整行删掉则用代码默认值（同样含 life_arc）。
+thinking_tasks_purposes = ["diary_archive", "vision_perception", "proactive_message", "life_arc"]
 
 # 每个 [models.<名>] 是一家厂商的完整档案
 [models.deepseek]
@@ -73,6 +75,21 @@ wake_interval_min = 20             # 唤醒间隔（分钟）下限，每次随�
 wake_interval_max = 40
 quiet_hours = [0, 8]               # 免打扰时段
 max_unanswered = 2                 # 连续 N 条主动消息未获回复，当天停止
+
+# 回复时机人格化（FIXES15）——**整节删掉也能跑**，缺字段全部走代码默认值
+# 两个开关互相独立：timing_enabled 只管"拿起手机"的首条延迟，
+# typing_indicator_enabled 只管发送前的"正在输入"表演；全 false 即回到改动前行为。
+[timing]
+timing_enabled = true                 # 首条回复延迟总开关（false = 秒回）
+typing_indicator_enabled = true       # 发送前"正在输入"表演总开关
+first_reply_busy_delay_min = 60.0     # 首条·忙（作息表命中上课/练琴/睡觉）：延迟下限（秒）
+first_reply_busy_delay_max = 600.0    # 首条·忙：延迟上限（秒），与上一行合起来是 1~10 分钟
+first_reply_free_delay_min = 5.0      # 首条·闲（在度过属于自己的时间/长假）：延迟下限（秒）
+first_reply_free_delay_max = 30.0     # 首条·闲：延迟上限（秒）
+active_conversation_window = 300.0    # 对话激活窗口（秒）：窗口内她回过话就算"聊着呢"，后续回复不再延迟
+typing_seconds_per_10chars = 2.0      # "正在输入"时长：每 10 字 2 秒
+typing_min = 3.0                      # "正在输入"最短展示（秒）
+typing_max = 25.0                     # "正在输入"最长展示（秒）
 
 [voice]
 enabled = true

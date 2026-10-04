@@ -94,6 +94,10 @@ TIME_PATCH_MODULES = (
     "companion.memory",
     "companion.mood",
     "companion.affection",
+    # PricingConfig.is_peak 的默认参数是 datetime.now(BEIJING_TZ)（config.py:61）。
+    # 不 patch 它，组装期状态片段走仿真钟、而成本估算走真实墙钟，峰谷价差 2 倍
+    # 会直接错档（DEEP_AUDIT 面 B-2）。
+    "companion.config",
 )
 _ORIG_DATETIME: Dict[str, Any] = {}
 
@@ -515,8 +519,9 @@ def build_report(raw: Dict[str, Any], manual_blocks: Dict[str, str]) -> str:
     L.append(
         f"- **时间伪装**：组装期注入的「现在」固定为 **{meta['fake_now']}**"
         f"（星期{'一二三四五六日'[datetime.strptime(meta['fake_now'], '%Y-%m-%d %H:%M').weekday()]}），"
-        f"经 `{', '.join(TIME_PATCH_MODULES)}` 五个模块的 `datetime` 属性 patch 生效"
-        f"（`now_str()` 定义在 `companion.db`，其余模块引用同一函数对象，patch 一处全链路生效）；"
+        f"经 `{', '.join(TIME_PATCH_MODULES)}` 共 {len(TIME_PATCH_MODULES)} 个模块的 `datetime` 属性 patch 生效"
+        f"（`now_str()` 定义在 `companion.db`，其余模块引用同一函数对象，patch 一处全链路生效；"
+        f"`companion.config` 管 `PricingConfig.is_peak` 的峰谷判定，不 patch 它计费会按真实墙钟走）；"
         f"random 种子固定为 {meta['seed']}，两卡状态逐字节一致。"
     )
     L.append(f"- 模型：`{meta['model']}`，temperature {meta['temperature']}，thinking enabled / reasoning_effort low（与生产一致）")

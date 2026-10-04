@@ -343,6 +343,10 @@ TIME_PATCH_MODULES = (
     "companion.mood",
     "companion.affection",
     "companion.proactive",   # 场景 J 走主动消息，决策层/生成层各自读 now()
+    # PricingConfig.is_peak 默认参数就是 datetime.now(BEIJING_TZ)（config.py:61），
+    # 不 patch 它则 llm_calls.created_at 走仿真钟、cost_estimate 走真实墙钟，跨日
+    # 跑分时峰谷价差 2 倍直接错档（DEEP_AUDIT 面 B-2）。
+    "companion.config",
 )
 _ORIG_DATETIME: Dict[str, Any] = {}
 

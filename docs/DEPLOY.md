@@ -66,6 +66,7 @@ path = "characters/qingzi"     # ← 改成你的角色卡目录名
 # 本地，Git Bash，在项目上一级目录执行：
 cd /d
 tar --exclude='QQ chatter/venv' --exclude='QQ chatter/data' --exclude='QQ chatter/.git' \
+    --exclude='QQ chatter/config.toml' \
     -czf qq-companion.tar.gz "QQ chatter"
 scp qq-companion.tar.gz ubuntu@服务器IP:/home/ubuntu/
 ```
@@ -77,7 +78,12 @@ sudo tar -xzf /home/ubuntu/qq-companion.tar.gz -C /opt/qq-companion --strip-comp
 sudo chown -R ubuntu:ubuntu /opt/qq-companion
 ```
 
-> config.toml 会被一起传上去（服务器需要它），它不进 GitHub 但要上传服务器。
+> **死规则：服务器上的 `config.toml` 一律就地编辑，禁止用本地上传覆盖。**
+> 覆盖会**静默清空**服务器已填的节假日（本地 `holidays = []`）——计费把长假按工作日高峰算、
+> 作息把长假当上课日；若本地的 QQ 号 / access_token 与服务器不一致，还会直接登不上。
+> 上面的打包命令已用 `--exclude='QQ chatter/config.toml'` 把它排除在外，解包只会带代码与角色卡。
+>
+> 首次部署时服务器上还没有 `config.toml`：在服务器上 `cp /opt/qq-companion/config.example.toml /opt/qq-companion/config.toml`，再用 `nano` 就地逐项填写（字段说明见第 0 步 0.1）。此后**任何一次**上传 / 解包都不再包含它，配置改动一律在服务器上改。
 
 **方式 B：GitHub 中转（适合以后长期迭代）**
 
@@ -86,6 +92,8 @@ sudo chown -R ubuntu:ubuntu /opt/qq-companion
 cd "/d/qq-companion" && git status --short
 # 然后提交推送，服务器上 git clone；
 # 注意：clone 后服务器上没有 config.toml 和你的私有角色卡，需单独 scp：
+# ⚠ 这两条 scp 只限**首次安装**（服务器上还没有 config.toml 时）执行；
+#   服务器已有 config.toml 时禁止覆盖，改动一律就地编辑（见方式 A 的死规则）。
 scp "/d/qq-companion/config.toml" ubuntu@服务器IP:/opt/qq-companion/
 scp -r "/d/qq-companion/characters/qingzi" ubuntu@服务器IP:/opt/qq-companion/characters/
 ```
