@@ -215,6 +215,8 @@ class CompanionBot:
             allowed_user_id=config.account.allowed_user_id,
             on_message_callback=self._on_raw_message,
             voice_processor=self.voice_processor,
+            # FIXES23：对方输入状态直连聚合器（同步回调，见 OneBotClient 注释）
+            on_typing_callback=self.aggregator.notify_peer_typing,
         )
 
         self.admin = AdminServer(

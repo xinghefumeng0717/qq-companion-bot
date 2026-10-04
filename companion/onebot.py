@@ -1,5 +1,9 @@
 """OneBot v11 WebSocket 客户端 (onebot.py)
 管理与 NapCat 的 WebSocket 连接、心跳维护、断线重连、消息上报解析、图片下载与重试发送。
+
+FIXES23：接入**对方输入状态**事件（NapCat `notice` / `sub_type=input_status`），
+把"他手指停没停"这个信号交给聚合器——他打字她等，别把一段话劈成两截。
+发侧那套 `set_input_status`（她演"正在输入"）是 FIXES15 的另一条链，不动。
 """
 
 from __future__ import annotations
@@ -16,6 +20,73 @@ from companion.config import OneBotConfig
 from companion.faces import segment_face_tag
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# FIXES23：对方输入状态事件
+#
+# 事件骨架核对自 NapCat 官方源码（2026-10-04 拉取 main 分支）：
+#   packages/napcat-onebot/event/notice/OB11InputStatusEvent.ts
+#     notice_type = 'notify'; sub_type = 'input_status';
+#     status_text = '对方正在输入...'; event_type = 1; user_id; group_id;
+# 交叉印证：跨协议适配库 nagisa（docs.rs/nagisa-types）同样记
+#   `notify` sub_type=`input_status`，字段 user/group/status_text/event_type；
+#   .NET 端 NapPlana 的 NotifySubType 枚举里 InputStatus = "input_status"。
+# 群场景 group_id 非 0；本项目只跑私聊（机主大号），group_id 恒为 0。
+# ---------------------------------------------------------------------------
+INPUT_STATUS_NOTICE_TYPE = "notify"
+INPUT_STATUS_SUB_TYPE = "input_status"
+
+# event_type 极性：按 NapCat **自己的 set_input_status 动作**口径取
+# 1=正在输入、0=停止（FIXES15 发侧已在用这个口径），事件类的字段默认值也是
+# `event_type = 1` 配 `status_text = '对方正在输入...'`，两边自洽。
+#
+# ⚠️ 这不是权威文档，是交叉推断：跨协议库 nagisa 的注释写的是"0=输入中等"
+# 并自标"端相关"，与上面的口径相反；两家说法不一致且都无官方文档裁定。
+# 取错极性的后果被两层兜底夹住——协议层的 15 秒自愈（见下）与聚合器的
+# 30 秒绝对上限——最坏只是"等他"的时机对调，退化成约等于现状，
+# 绝不会把回复饿死。**部署日按 DEPLOY 清单抓一次真实事件核一眼**，
+# 若极性相反只需改这一个常量。
+INPUT_STATUS_TYPE_ON = 1
+INPUT_STATUS_TYPE_OFF = 0
+
+# 事件不可信原则：开始输入后 15 秒内没收到结束事件，自动视为已结束。
+# NapCat 的结束事件不保证来（客户端被杀、网络抖、旧版本不上报），
+# 没有这道自愈，"他其实早停了"会让她一直傻等到 30 秒绝对上限才开口。
+INPUT_STATUS_STALE_LIMIT = 15.0
+
+
+def parse_input_status_event(data: Dict[str, Any]) -> Optional[bool]:
+    """把一条 OneBot 报文解析成"他在不在打字"。
+
+    返回 True（开始输入）/ False（已停手）/ None（不是输入状态事件，或取值不认识→忽略）。
+
+    取值做宽容处理：`event_type` 可能是 int、"1"/"0" 字符串或 bool，都认；
+    其他值（未知状态码、缺字段、类型不对）一律返回 None 忽略——不猜。
+
+    纯函数、不碰 self，事件解析这一层可以直接单测。
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("notice_type") != INPUT_STATUS_NOTICE_TYPE:
+        return None
+    if data.get("sub_type") != INPUT_STATUS_SUB_TYPE:
+        return None
+
+    raw = data.get("event_type")
+    if isinstance(raw, bool):
+        code = int(raw)
+    elif isinstance(raw, int):
+        code = raw
+    elif isinstance(raw, str) and raw.strip() in ("0", "1"):
+        code = int(raw.strip())
+    else:
+        return None
+
+    if code == INPUT_STATUS_TYPE_ON:
+        return True
+    if code == INPUT_STATUS_TYPE_OFF:
+        return False
+    return None
 
 
 def detect_image_ext_and_mime(data: bytes, filename_or_url: str = "") -> Tuple[str, str]:
@@ -111,12 +182,19 @@ class OneBotClient:
         on_message_callback: Optional[Callable[..., Coroutine[Any, Any, None]]] = None,
         image_save_dir: str = "data/images",
         voice_processor: Optional[Any] = None,
+        on_typing_callback: Optional[Callable[[bool], None]] = None,
     ):
         self.config = config
         self.allowed_user_id = allowed_user_id
         self.on_message_callback = on_message_callback
         self.image_save_dir = image_save_dir
         self.voice_processor = voice_processor
+        # FIXES23：对方输入状态回调。**故意是同步的**（与 on_message_callback 不同）：
+        # 这条是抢时间的信号，聚合器要在静默计时器到期前把它撤掉，
+        # 走 _message_queue 排队就等于白排。回调内部只做取消/重挂计时器，不 await。
+        self.on_typing_callback = on_typing_callback
+        self._peer_typing = False
+        self._typing_watchdog: Optional[asyncio.Task] = None
         os.makedirs(self.image_save_dir, exist_ok=True)
 
         self._session: Optional[aiohttp.ClientSession] = None
@@ -176,6 +254,9 @@ class OneBotClient:
     async def stop(self) -> None:
         """停止客户端并释放资源"""
         self._running = False
+        # FIXES23：自愈计时器也是定时器，不清就是新的一条泄漏路径
+        self._cancel_typing_watchdog()
+        self._peer_typing = False
         if self._dispatcher_task and not self._dispatcher_task.done():
             self._dispatcher_task.cancel()
         try:
@@ -225,6 +306,80 @@ class OneBotClient:
             if msg_type == "private" and user_id == self.allowed_user_id:
                 # FIXES21：message_id 随消息一起穿链（发侧引用要靠它指回具体哪一条）
                 self._dispatch_message_event(data.get("message"), data.get("message_id"))
+
+        # 4. 对方输入状态（FIXES23）：他手指停没停，聚合窗要"看得见"
+        if post_type == "notice":
+            self._handle_input_status_event(data)
+
+    def _handle_input_status_event(self, data: Dict[str, Any]) -> None:
+        """处理 NapCat 的"对方正在输入"通知（FIXES23）。
+
+        两道闸门：
+        1. 只认机主本人的输入状态——与私聊消息共用同一个 allowed_user_id，
+           别人的输入状态跟我们无关（群聊/陌生人事件一律丢掉）；
+        2. **只在状态真正变化时**才回调下游。重复的"开始输入"不重置自愈表，
+           否则连发的心跳式上报能把"他在打字"无限续命，那道 15 秒兜底就废了。
+        """
+        if not self._running:
+            # stop() 之后仍可能收到在途帧：直接丢弃（与 _dispatch_message_event 同理），
+            # 否则会把自愈计时器在收尾之后重新拉起来
+            return
+
+        is_typing = parse_input_status_event(data)
+        if is_typing is None:
+            return
+        if data.get("user_id") != self.allowed_user_id:
+            return
+
+        if is_typing == self._peer_typing:
+            # 状态没变：重复的开始、或一个无处可收的结束（乱序）。不惊动下游。
+            return
+        self._peer_typing = is_typing
+
+        self._cancel_typing_watchdog()
+        if is_typing:
+            self._typing_watchdog = asyncio.create_task(self._typing_watchdog_wait())
+            logger.info("[OneBot] 对方开始输入，通知聚合器等他")
+        else:
+            logger.info("[OneBot] 对方停止输入，通知聚合器可以起静默窗了")
+        self._emit_typing(is_typing)
+
+    def _emit_typing(self, is_typing: bool) -> None:
+        """把输入状态交给聚合器。回调异常一律吞掉——它只是让回复晚一点点，
+        绝不能因为聚合器一时出错把消息链带崩。"""
+        if not self.on_typing_callback:
+            return
+        try:
+            self.on_typing_callback(is_typing)
+        except Exception as e:
+            logger.warning(
+                f"[OneBot] 输入状态回调异常（{'开' if is_typing else '关'}），静默忽略: {e}"
+            )
+
+    async def _typing_watchdog_wait(self) -> None:
+        """开始输入后 INPUT_STATUS_STALE_LIMIT 秒没等到结束事件 → 当作已结束。
+
+        事件不可信原则：结束事件不保证来（他直接发了消息就切走了、
+        客户端被杀、网络抖、旧版本不上报）。没有这道自愈，
+        聚合器会一直等到 30 秒绝对上限才开口——那是纯粹的傻等。
+        """
+        try:
+            await asyncio.sleep(INPUT_STATUS_STALE_LIMIT)
+        except asyncio.CancelledError:
+            return
+        if not self._peer_typing:
+            return
+        self._peer_typing = False
+        self._typing_watchdog = None
+        logger.info(
+            f"[OneBot] 输入状态自愈：{INPUT_STATUS_STALE_LIMIT:.0f} 秒没等到结束事件，按已停手处理"
+        )
+        self._emit_typing(False)
+
+    def _cancel_typing_watchdog(self) -> None:
+        if self._typing_watchdog and not self._typing_watchdog.done():
+            self._typing_watchdog.cancel()
+        self._typing_watchdog = None
 
     def _dispatch_message_event(self, raw_msg: Any, message_id: Any = None) -> None:
         """把消息事件投进内部队列，立即返回，读循环不被消息处理拖住。

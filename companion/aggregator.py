@@ -6,6 +6,12 @@ FIXES21：批次里除了拼好的文本，还要保住**每条消息的编号�
 （发侧引用要靠它指回"他哪一条"）。批次元素形如
 `{"index": 1, "text": "...", "message_id": 123, "has_image": False}`，
 index 从 1 起，编号与 message_id 一一对应，模型看到的 [1][2][3] 就是这几个。
+
+FIXES23：**他打字她等**。静默窗只认"停手 6 秒"，他打字慢、句间停超过 6 秒，
+她就抢话把一段话劈成两截。NapCat 会上报对方输入状态（见 onebot.py），
+这个信号让聚合窗"看见他在打字"：他手指没停，她就再等一等。
+**纯增强**——收不到输入状态事件时 `_peer_typing` 恒为 False，
+本文件行为与改动前逐字节一致（既有 test_fixes9 锁定 6.0/15.0 两个常量）。
 """
 
 from __future__ import annotations
@@ -20,6 +26,14 @@ logger = logging.getLogger(__name__)
 SILENCE_WINDOW = 6.0
 # 硬上限：从本轮第一条消息起算，无论后续来多少条，最多等这么久
 HARD_LIMIT = 15.0
+# FIXES23 输入状态绝对上限：同样从本轮第一条消息起算，**他还在打字也只延到这么久**。
+# 等待可以因为"他在打字"被延长，但绝不能被续命——他真写小作文她也不能等到天黑。
+#
+# 实测提醒（2026-10-04 冒烟）：这根线在真机上**基本够不着**——协议层的 15 秒自愈
+# （onebot.INPUT_STATUS_STALE_LIMIT）几乎总与下面的 15 秒硬上限同时到点，轮次总在
+# ~15 秒就关了。它是**冗余兜底**（自愈失效、或结束事件永远不来时的最后一道闸），
+# 不是生效路径。真机可见的效果是"她最多把整段话攒住约 15 秒"。
+TYPING_ABSOLUTE_LIMIT = 30.0
 
 # 批次里一条消息的形状（用 TypedDict 只是给读代码的人看，这里保持 dict 以便序列化）
 BatchItem = Dict[str, Any]
@@ -37,6 +51,8 @@ class MessageAggregator:
         self._image_index: Optional[int] = None  # 批次里第几条带了图（编号从 1 起）
         self._first_msg_time: float = 0.0
         self._debounce_task: Optional[asyncio.Task] = None
+        # FIXES23：他此刻手指是否还搭在键盘上（由 onebot 的输入状态事件驱动）
+        self._peer_typing: bool = False
         self._queue: asyncio.Queue[Tuple[str, Optional[str], List[BatchItem]]] = asyncio.Queue()
         self._consumer_task: Optional[asyncio.Task] = None
         self._running = False
@@ -108,8 +124,12 @@ class MessageAggregator:
 
         elapsed = now - self._first_msg_time
 
+        # FIXES23 双上限：他在打字时天花板从 15s 抬到 30s，但抬不抬**只取决于他手指停没停**。
+        # 收不到输入状态事件时 _peer_typing 恒为 False，走的还是原来那条 15s 线。
+        active_limit = TYPING_ABSOLUTE_LIMIT if self._peer_typing else HARD_LIMIT
+
         # 达到硬上限（从本轮第一条消息起算），立即触发
-        if elapsed >= HARD_LIMIT:
+        if elapsed >= active_limit:
             if self._debounce_task and not self._debounce_task.done():
                 self._debounce_task.cancel()
             self._flush_buffer()
@@ -119,8 +139,98 @@ class MessageAggregator:
         if self._debounce_task and not self._debounce_task.done():
             self._debounce_task.cancel()
 
+        if self._peer_typing:
+            # 手指还搭在键盘上：他刚发的这句可能只是个逗号，静默窗在这里不适用，
+            # 改挂"等到绝对上限"（同一条 deadline，重发不续命）
+            self._debounce_task = asyncio.create_task(
+                self._wait_typing_until_deadline(self._first_msg_time + TYPING_ABSOLUTE_LIMIT)
+            )
+            return
+
+        wait_time = min(SILENCE_WINDOW, active_limit - elapsed)
+        self._debounce_task = asyncio.create_task(self._wait_and_flush(wait_time))
+
+    def notify_peer_typing(self, is_typing: bool) -> None:
+        """他打字她等（FIXES23）：对方输入状态联动聚合窗。
+
+        **缓冲为空时也要把状态记下来，但不起任何表**——"他没说话光打字"不能
+        凭空等一轮，可这条知识更不能扔：真机上提示几乎总是**先于**消息到达
+        （消息走内部队列异步消费，输入状态在读循环里同步处理），
+        照任务书字面"缓冲为空直接忽略"的话，这条信号会被系统性丢掉，功能等于死的。
+        下一条消息进缓冲时 `push_message` 会看到 `_peer_typing`，改挂绝对上限。
+
+        开始输入 → 撤掉静默计时，改挂"等他停手"；停手 → 重新起满 SILENCE_WINDOW。
+
+        纯同步（不 await）：onebot 在读循环里就地调它抢时间，排队会把这个信号作废。
+        """
+        if not self._running:
+            # stop() 之后仍可能收到在途帧：必须直接丢弃，
+            # 否则会把已经收尾的计时器重新拉起来（新的一条泄漏路径）
+            return
+
+        now = asyncio.get_running_loop().time()
+        elapsed = now - self._first_msg_time
+        has_buffer = bool(self._text_buffer) or bool(self._image_buffer)
+
+        if is_typing:
+            if self._peer_typing:
+                # 重复上报：不重置任何东西。允许它续命的话，
+                # 连发心跳就能把"他在打字"永远挂着，静默窗形同虚设。
+                return
+            self._peer_typing = True
+            if not has_buffer:
+                # 只记状态，不起表（这一条不该让她凭空等任何东西）
+                logger.debug("[Aggregator] 缓冲为空，记下他已在打字，等他先开口")
+                return
+            if self._debounce_task and not self._debounce_task.done():
+                self._debounce_task.cancel()
+            self._debounce_task = asyncio.create_task(
+                self._wait_typing_until_deadline(self._first_msg_time + TYPING_ABSOLUTE_LIMIT)
+            )
+            logger.info(
+                f"[Aggregator] 他还在打字，暂不插话（本轮已等 {elapsed:.1f}s，静默窗已撤）"
+            )
+            return
+
+        # 停手
+        was_typing = self._peer_typing
+        self._peer_typing = False
+        if not has_buffer or not was_typing:
+            # 无处可收的结束事件（乱序/重复/还没开口），别去重启静默窗——
+            # 那等于凭空给一个早就该结束的窗口又续了 6 秒
+            return
+
+        if elapsed >= HARD_LIMIT:
+            logger.info(
+                f"[Aggregator] 他已停手，但本轮已等 {elapsed:.1f}s 已过 {HARD_LIMIT:.0f}s 硬上限，立刻回"
+            )
+            if self._debounce_task and not self._debounce_task.done():
+                self._debounce_task.cancel()
+            self._flush_buffer()
+            return
+
+        if self._debounce_task and not self._debounce_task.done():
+            self._debounce_task.cancel()
         wait_time = min(SILENCE_WINDOW, HARD_LIMIT - elapsed)
         self._debounce_task = asyncio.create_task(self._wait_and_flush(wait_time))
+        logger.info(
+            f"[Aggregator] 他已停手，重新起静默窗 {wait_time:.1f}s（本轮已等 {elapsed:.1f}s）"
+        )
+
+    async def _wait_typing_until_deadline(self, deadline: float) -> None:
+        """他一直在打字：睡到绝对上限就 flush，谁还在打字都不好使。
+
+        刻意不轮询、不等"停手事件"——停手由 notify_peer_typing(False) 取消本任务、
+        另挂静默窗。这样 `_debounce_task` 这个槽位始终只有一个活计时器，
+        stop() 沿用原来的清理即可，不添新的泄漏路径。
+        """
+        try:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            self._flush_buffer()
+        except asyncio.CancelledError:
+            pass
 
     async def _wait_and_flush(self, wait_seconds: float) -> None:
         try:
@@ -154,6 +264,8 @@ class MessageAggregator:
         self._image_index = None
         self._first_msg_time = 0.0
         self._debounce_task = None
+        # FIXES23：一轮结束，下一轮从"他没在打字"重新开始
+        self._peer_typing = False
 
         quoteable = sum(1 for b in batch if b.get("message_id") is not None)
         logger.info(
