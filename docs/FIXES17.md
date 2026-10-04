@@ -18,8 +18,13 @@
 
 ## 任务 0：摸底盘点（先做，结果写进交付摘要）
 
+> 规划模型预审注记（2026-10-04，代码层面已确认，执行模型据此缩小排查面）：
+> - **提示词数据源 = index.json，不是 DB**。`get_prompt_sticker_list()` 与 `match_sticker()` 都只读 `self._index`（companion/stickers.py）；DB `stickers` 表只承担三件事：200 张上限计数、MD5 去重、启动时把 index.json 种子同步进库（`sync_initial_stickers`）。
+> - `collect_sticker` 是双写（index.json + DB），所以**单世内两边必然一致**；57 vs 42 的 15 行差集只会来自跨世累积——reset 清档清单不含 stickers（两世收藏都留在 DB），而 index.json 若历史上被手动替换/裁剪过，对应 DB 行就成了孤儿。执行模型往这个方向核实，不要从零猜。
+> - 因此任务 2 第 3 条的答案**预判为"不动 DB"**（DB 不是数据源，改了也没效果），但仍须在生产数据上核实后下结论。
+
 1. 【本地电脑执行】从服务器拉回当前生产表情包库到 `data/sticker_audit_workdir/`（只读 scp，命令规范见 AGENTS.md）；
-2. **查明 DB `stickers` 表（57 行）与 `stickers/index.json`（42 键）的关系与漂移**：哪个是 `get_prompt_sticker_list()` 的真实数据源、两边差集是什么（生产实测两边数量不一致，必须解释清楚再动手）；结论写进交付摘要。若发现收藏写入路径存在双写不一致，**只记录报告，不在本迭代修**（另立项）。
+2. **查明 DB `stickers` 表（57 行）与 `stickers/index.json`（42 键）的漂移**：按上面预审方向核实 15 行差集的来源（逐行比对 name/md5，判断是"历世收藏孤儿"还是"双写不一致"）；结论写进交付摘要。若查实是收藏写入路径本身存在双写不一致（而非历史孤儿），**只记录报告，不在本迭代修**（另立项）。
 
 ## 任务 1：批量重打标（scripts/relabel_stickers.py）
 
