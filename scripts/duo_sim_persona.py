@@ -3,9 +3,9 @@
 FIXES18 任务 0：从**真实语料**算出“他”的说话画像，产出给对聊仿真器用的 system prompt 简报。
 
 数据源（按优先级，全部只读）：
-  1. QQ 真实聊天导出 `D:\\private\\private_chat_export\\【第三方】_聊天记录_20250927-20260611.txt`
-     —— 主源。6592 条他的消息，是“他怎么打字”最硬的证据。
-     路径可用 --export 覆盖；文件不存在时自动降级到 2 号源并在报告里标注。
+  1. QQ 真实聊天导出的纯文本文件 —— **主源**，提供“他怎么打字”最硬的证据。
+     路径**必填**：命令行 `--export` 或环境变量 `DUO_SIM_EXPORT`，两者都没有就报错退出。
+     导出文件是私有语料，**绝不入库**（本仓库是公开仓库，第三方姓名不得出现在跟踪文件里）。
   2. 生产库前两世备份 `data/backups/*.db` 的 `turns` 表 `role='user'`
      —— 他对**青梓**的真实发言（与对真人的语风对照用）。自动剔除互为子集的快照。
   3. `data/archive/real_chat_analysis.md` —— 已有结论直接引用，不重算。
@@ -15,7 +15,8 @@ FIXES18 任务 0：从**真实语料**算出“他”的说话画像，产出给
   data/duo_sim/user_persona_stats.json    全部统计数字（供审计，brief 里的每个数都出自这里）
 
 用法：
-  ./venv/Scripts/python.exe scripts/duo_sim_persona.py
+  ./venv/Scripts/python.exe scripts/duo_sim_persona.py --export "D:\\导出\\chat_export.txt"
+  也可先设环境变量 DUO_SIM_EXPORT 指向同一个导出文件，再省掉 --export。
 
 纪律：不改 characters/、config.toml、companion/ 任何文件；只读语料，只写 data/duo_sim/。
 """
@@ -36,7 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-EXPORT_DEFAULT = r"D:\private\private_chat_export\【第三方】_聊天记录_20250927-20260611.txt"
+EXPORT_ENV = "DUO_SIM_EXPORT"   # 语料导出路径的环境变量名（与 --export 等价）
 BACKUP_GLOB = "data/backups/*.db"
 OUT_DIR = "data/duo_sim"
 BRIEF_MD = os.path.join(OUT_DIR, "user_persona_brief.md")
@@ -83,8 +84,8 @@ UNICODE_EMOJI_RE = re.compile(
 SCENE_WRITE_RE = re.compile(r"窗外|天黑|路灯|晚霞|落叶|月光|夜色|星空|夕阳")
 
 # 称呼候选（对“她”的）。基线结论是全库零称呼，这里要拿数据自己验一遍。
+# **只放通用称呼词**：真实姓名/由姓名派生的昵称一律不许进公开仓库。
 ADDRESS_TERMS = (
-    "【第三方】", "【第三方】", "【第三方】", "【第三方】",
     "同学", "大佬", "学霸", "宝贝", "宝宝", "丫头", "仙女", "姐姐", "妹妹",
 )
 
@@ -973,13 +974,42 @@ def render_brief(
 # ──────────────────────────── main ────────────────────────────
 
 
-def main() -> None:
-    export_path = EXPORT_DEFAULT
-    for i, a in enumerate(sys.argv):
-        if a == "--export" and i + 1 < len(sys.argv):
-            export_path = sys.argv[i + 1]
+USAGE = (
+    "用法：\n"
+    "  ./venv/Scripts/python.exe scripts/duo_sim_persona.py --export \"D:\\导出\\chat_export.txt\"\n"
+    "  （也可以先设环境变量 DUO_SIM_EXPORT 指向同一个导出文件，再省掉 --export）\n"
+    "语料是私有数据，不入库；路径必须由使用者显式给出，脚本里不内置任何默认路径。"
+)
+
+
+def resolve_export_path(argv: Sequence[str]) -> Optional[str]:
+    """从命令行 / 环境变量取语料路径。没给返回 None（由调用方报错退出）。
+
+    优先级：`--export=<p>` > `--export <p>` > 环境变量。**不给默认值**：
+    私有语料路径写进代码就等于把第三方姓名和本机目录结构提交进公开仓库。
+    """
+    path: Optional[str] = None
+    for i, a in enumerate(argv):
+        if a == "--export" and i + 1 < len(argv):
+            path = argv[i + 1]
         elif a.startswith("--export="):
-            export_path = a.split("=", 1)[1]
+            path = a.split("=", 1)[1]
+    if path:
+        return path
+    return os.environ.get(EXPORT_ENV) or None
+
+
+def main() -> None:
+    export_path = resolve_export_path(sys.argv)
+    if not export_path:
+        print(
+            f"错误：未指定语料导出路径（--export 或环境变量 {EXPORT_ENV}）。\n\n{USAGE}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if not os.path.exists(export_path):
+        print(f"错误：语料文件不存在：{export_path}\n\n{USAGE}", file=sys.stderr)
+        raise SystemExit(2)
 
     print("加载语料…")
     exp_msgs, exp_stream, exp_meta = load_export(export_path)

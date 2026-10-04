@@ -428,6 +428,53 @@ def build_user_system_prompt(brief: str, scene: Scene) -> str:
     )
 
 
+# 青梓侧 system prompt 的已知区块头（以 companion/prompts.py 模板及各子块实际渲染的
+# 标题为准）。子块【关于他】【她的记忆】【待跟进】【欲言又止】【她最近的生活】
+# 【安全边界】是【事实】内部的分段，单列是为了看清"记忆与生活主线把提示词撑大了多少"。
+PROMPT_BLOCK_HEADS = (
+    "【角色】",
+    "【聊天规则】",
+    "【她此刻】",
+    "【事实】",
+    "【关于他】",
+    "【她的记忆】",
+    "【待跟进】",
+    "【欲言又止】",
+    "【她最近的生活】",
+    "【当前关系阶段·最高优先级】",
+    "【安全边界】",
+)
+PROMPT_BLOCK_PREFIX = "首个区块前"
+
+
+def split_prompt_blocks(prompt: str) -> Dict[str, int]:
+    """按已知区块头把组装好的 system prompt 切成 {区块名: 字符数}。
+
+    FIXES18 任务 1 第 5 条要求每回合留"提示词各区块摘要"。切分是**容错**的：
+    模板改版或区块改名导致一个头都认不出时返回空 dict，调用方退化为只记总长——
+    记录摘要的代码绝不许把仿真本身炸掉。
+    """
+    if not prompt:
+        return {}
+    hits: List[Tuple[int, str]] = []
+    for head in PROMPT_BLOCK_HEADS:
+        start = prompt.find(head)
+        while start != -1:
+            hits.append((start, head))
+            start = prompt.find(head, start + len(head))
+    if not hits:
+        return {}
+    hits.sort()
+    blocks: Dict[str, int] = {}
+    if hits[0][0] > 0:
+        blocks[PROMPT_BLOCK_PREFIX] = hits[0][0]
+    for i, (start, head) in enumerate(hits):
+        end = hits[i + 1][0] if i + 1 < len(hits) else len(prompt)
+        name = head.strip("【】")
+        blocks[name] = blocks.get(name, 0) + (end - start)
+    return blocks
+
+
 # ==========================================
 # 指标（纯函数，确定性计算，不用 LLM 裁判）
 # ==========================================
@@ -1145,7 +1192,7 @@ class DuoSimulator:
                 "state_before": before,
                 "state_after": await self._state_snapshot(),
                 "llm_calls": await self._llm_rows_since_cursor() if llm_before is not None else [],
-                "system_prompt_len": len(getattr(self.assembler, "last_assembled_prompt", "") or ""),
+                **self._prompt_block_summary(),
             },
         )
         self.turns.append(rec)
@@ -1191,6 +1238,18 @@ class DuoSimulator:
                 }
             await asyncio.sleep(0.05)
         return None
+
+    def _prompt_block_summary(self) -> Dict[str, Any]:
+        """本轮 system prompt 的总长 + 各区块字数。
+
+        区块切分失败（模板改版等）时只留总长，`system_prompt_blocks` 为空 dict——
+        摘要缺失是可接受的降级，仿真本身不许因此中断。
+        """
+        prompt = getattr(self.assembler, "last_assembled_prompt", "") or ""
+        return {
+            "system_prompt_len": len(prompt),
+            "system_prompt_blocks": split_prompt_blocks(prompt),
+        }
 
     async def _state_snapshot(self) -> Dict[str, Any]:
         aff = await self.affection.get_state()

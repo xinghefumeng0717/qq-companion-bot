@@ -8,6 +8,15 @@
 5. 成本熔断触发
 6. 临时库隔离（跑完生产库零变化）
 
+前置条件（新环境必读）
+  `data/duo_sim/user_persona_brief.md`（画像简报）由**私有 QQ 语料**经
+  `scripts/duo_sim_persona.py` 生成，落在 gitignored 的 `data/` 下，**不入库**；
+  新 clone 的仓库里必然不存在，仿真器的 `setup()` 会因缺这个文件直接抛错。
+  因此凡必经 `DuoSimulator._load_brief()` 的用例（所有经 `_make_sim` → `setup()`
+  的仿真用例，以及 `TestPersonaBrief`）统一走 `require_brief()` 跳过，不报 FAIL/ERROR。
+  要真正跑这些用例，先生成简报：
+      ./venv/Scripts/python.exe scripts/duo_sim_persona.py --export "导出文件路径"
+
 纪律：不碰 characters/、config.toml；不发起真实 API 调用（网关在类级别被替换）。
 """
 
@@ -95,10 +104,27 @@ def _pair(start: int, user_text: str, her_text: str) -> List[Dict[str, Any]]:
     ]
 
 
+# ==========================================
+# 前置条件：画像简报（gitignored，新环境必缺）
+# ==========================================
+
+BRIEF_SKIP_REASON = "画像简报不存在：需先跑 scripts/duo_sim_persona.py 生成"
+
+
+def require_brief(tc: unittest.TestCase) -> None:
+    """缺画像简报时跳过当前用例。前置条件说明见文件头。
+
+    只在这一处判定，所有硬依赖（`_FakeGatewayBase` 的仿真用例、`TestPersonaBrief`）
+    都调它——否则新环境下会连环 FAIL/ERROR，而不是干净地 skip。"""
+    if not os.path.exists(D.PERSONA_BRIEF):
+        tc.skipTest(BRIEF_SKIP_REASON)
+
+
 class _FakeGatewayBase(unittest.IsolatedAsyncioTestCase):
     """把 LLMGateway 的两个出口整体换成假的，整类测试零 API 成本。"""
 
     async def asyncSetUp(self) -> None:
+        require_brief(self)
         self._p1 = patch.object(LLMGateway, "stream_chat", _fake_stream_chat)
         self._p2 = patch.object(LLMGateway, "chat", _fake_chat)
         self._p1.start()
@@ -392,6 +418,41 @@ class TestMetrics(unittest.TestCase):
         for k in ("梗复读", "告别拖尾", "话量膨胀", "称呼漂移", "[沉默]合规", "表情包"):
             self.assertIn(k, m["verdicts"])
 
+
+# ==========================================
+# 4b. 提示词区块摘要（raw.json 快照要求，任务 1 第 5 条）
+# ==========================================
+
+
+class TestPromptBlockSummary(unittest.TestCase):
+    def test_按区块头切分且总量守恒(self):
+        prompt = "【角色】甲甲甲【她此刻】乙乙【事实】丙"
+        blocks = D.split_prompt_blocks(prompt)
+        self.assertEqual(set(blocks), {"角色", "她此刻", "事实"})
+        self.assertEqual(sum(blocks.values()), len(prompt), "切分漏字或重复计字")
+        self.assertGreater(blocks["角色"], blocks["事实"])
+
+    def test_首个区块前的文字也被记账(self):
+        prompt = "前言【角色】x"
+        blocks = D.split_prompt_blocks(prompt)
+        self.assertEqual(blocks[D.PROMPT_BLOCK_PREFIX], len("前言"))
+        self.assertEqual(sum(blocks.values()), len(prompt))
+
+    def test_切不出来时退化为空而不是抛错(self):
+        """模板改版/区块改名后，摘要是缺失可接受的降级；炸掉仿真不可接受。"""
+        self.assertEqual(D.split_prompt_blocks("没有区块头的一段话"), {})
+        self.assertEqual(D.split_prompt_blocks(""), {})
+
+    def test_区块头清单与prompts模板一致(self):
+        """清单漂了就等于摘要静默失效——这里把它钉在真实模板上。"""
+        from companion.prompts import SYSTEM_PROMPT_TEMPLATE as T
+
+        for head in ("【角色】", "【聊天规则】", "【她此刻】", "【事实】",
+                     "【当前关系阶段·最高优先级】"):
+            with self.subTest(head=head):
+                self.assertIn(head, T)
+                self.assertIn(head, D.PROMPT_BLOCK_HEADS)
+
 # ==========================================
 # 1. 回合驱动器状态流转
 # ==========================================
@@ -450,6 +511,31 @@ class TestTurnDriver(_FakeGatewayBase):
             len(scored), len(her_raw),
             f"有 {len(her_raw) - len(scored)} 轮没拿到观察者评分（超时或未落地）",
         )
+
+    async def test_每轮快照含提示词各区块摘要(self):
+        """FIXES18 任务 1 第 5 条：raw.json 每回合要有"提示词各区块摘要"。
+
+        只存总长的话，看不出"记忆/生活主线把提示词撑大了多少"——而这正是要验的东西。
+        """
+        sim = await self._make_sim("S1", turns=3, user_lines=["嗯"] * 30)
+        try:
+            with D._TimePatch(sim.clock, sim.sleep_log):
+                await sim.run()
+        finally:
+            await sim.close()
+        her_raw = [r for r in sim.raw_turns
+                   if r.get("speaker") == "her" and not r.get("proactive")]
+        self.assertTrue(her_raw, "没有任何她的回合快照")
+        for r in her_raw:
+            blocks = r.get("system_prompt_blocks")
+            self.assertTrue(blocks, f"第 {r.get('idx')} 轮缺提示词区块摘要")
+            for head in ("角色", "聊天规则", "她此刻", "事实"):
+                self.assertIn(head, blocks, f"第 {r.get('idx')} 轮缺区块 {head}")
+            self.assertEqual(
+                sum(blocks.values()), r["system_prompt_len"],
+                "区块字数与 system_prompt_len 对不上（切分漏字或重复计字）",
+            )
+        self.assertGreater(her_raw[0]["system_prompt_len"], 0)
 
     async def test_用户侧模型用途单独归集(self):
         """两侧成本要能分开记账，否则成本实报没法对账。"""
@@ -650,6 +736,9 @@ class TestSandboxIsolation(_FakeGatewayBase):
 
 
 class TestPersonaBrief(unittest.TestCase):
+    def setUp(self) -> None:
+        require_brief(self)
+
     def test_画像简报已生成(self):
         self.assertTrue(
             os.path.exists(D.PERSONA_BRIEF),
