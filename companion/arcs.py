@@ -162,7 +162,7 @@ class LifeArcManager:
         key_date: str,
         emotional_stake: str = "",
     ) -> bool:
-        """写入一条主线；成功返回 True，参数不合法或写库失败返回 False。"""
+        """写入一条主线；成功返回 True，参数不合法或写库失败返回 None（假值）。"""
         title = (title or "").strip()
         detail = (detail or "").strip()
         key_date = (key_date or "").strip()[:10]
@@ -285,11 +285,6 @@ class LifeArcManager:
 
         candidates = await self._generate_raw()
         if not candidates:
-            return 0
-
-        if active >= MAX_ACTIVE_ARCS:
-            # 生成期间别的路径可能又加了几条，复查一次
-            logger.info("[Arcs] 生成期间活跃主线已达上限，本轮结果全部丢弃")
             return 0
 
         now = datetime.now()
