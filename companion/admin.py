@@ -161,11 +161,32 @@ class AdminServer:
     # 写操作鉴权
     # ==========================================
     async def _write_authorized(self, request: web.Request) -> bool:
-        """写操作鉴权。
+        """写操作鉴权 + CSRF 防护。
+
+        CSRF（外部审计发现）：只认 POST + confirm 字段挡不住跨站表单——
+        恶意网页能跨站构造 POST 打向 127.0.0.1:8080。这里拦一道：
+        浏览器跨站提交必带 Origin 头，Origin 的 host 与本服务不一致即拒绝；
+        不带 Origin 的非浏览器客户端（curl/脚本）不受影响。
 
         token 为空 = 仅 localhost 信任模式，直接放行（与改动前行为逐字节一致）；
         token 非空时，要求请求头 X-Admin-Token 或表单/JSON 字段 token 与之相等。
         """
+        origin = request.headers.get("Origin") or request.headers.get("Referer")
+        if origin:
+            from urllib.parse import urlparse
+
+            def _norm(host: str) -> str:
+                # localhost 与 127.0.0.1 视为同源（浏览器怎么开的都有）
+                h = host.split("@")[-1].lower()
+                return h.replace("localhost", "127.0.0.1").replace("[::1]", "127.0.0.1")
+
+            origin_host = _norm(urlparse(origin).netloc)
+            if origin_host and origin_host != _norm(request.host):
+                logger.warning(
+                    f"[AdminAction] 拒绝跨站写操作：Origin={origin_host} != {request.host}"
+                )
+                return False
+
         expected = self.config.token
         if not expected:
             return True

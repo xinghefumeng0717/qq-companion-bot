@@ -91,7 +91,15 @@ class VoiceProcessor:
             local_path = url[7:]
             if os.name == "nt" and local_path.startswith("/"):
                 local_path = local_path[1:]
-            return local_path if os.path.exists(local_path) else None
+            # 路径白名单（外部审计发现）：file:// 直接透传会让伪造事件把
+            # 服务器任意可读文件（file:///etc/passwd）喂给 ffmpeg 再进提示词。
+            # 只放行项目目录（含 NapCat 挂载进来的缓存）之下的文件。
+            real = os.path.realpath(local_path)
+            allowed_root = os.path.realpath(os.getcwd())
+            if not (real + os.sep).startswith(allowed_root + os.sep):
+                logger.warning(f"[Voice] file:// 路径越出项目目录，拒绝读取: {real}")
+                return None
+            return real if os.path.exists(real) else None
 
         filename = f"{uuid.uuid4().hex[:12]}.silk"
         save_path = os.path.join(self.voice_dir, filename)
