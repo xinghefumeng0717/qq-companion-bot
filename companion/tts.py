@@ -1,8 +1,12 @@
-"""语音回复合成模块 (tts.py) —— FIXES22 阶段 A
+"""语音回复合成模块 (tts.py) —— FIXES22 阶段 A（edge-tts）+ 阶段 B（海螺 MiniMax）
 
 与 `voice.py`（语音**输入**）对称：那边把 QQ 语音转成文字，这边把文字转成 QQ 语音。
-阶段 A 只用 edge-tts 的**官方预置音色**（合规红线：绝不碰任何真人声音素材；
-声音复刻属阶段 B，须真人书面授权后另立项）。
+只用**官方预置音色**（合规红线：绝不碰任何真人声音素材；声音复刻须真人书面授权后另立项）。
+
+provider 两档，由 `[tts].provider` 选：
+  · `"edge"`（默认）——阶段 A 的 edge-tts，零成本、保留可用；
+  · `"minimax"`——海螺 t2a_v2，音色 `Chinese (Mandarin)_Gentle_Senior`（温柔学姐）、
+    语速 1.0，key 复用现有 `[models.minimax]` 档案（不新增密钥字段）。
 
 三条硬纪律（任务书所有者拍板）：
 1. **默认关**（`[tts].enabled` 缺省 false）：新功能一律"先装死、后激活"，
@@ -12,11 +16,13 @@
    调用方把文本按普通文字发出去。
 
 失败纪律的写法与 voice.py 一致：整个流程 try/except 包死，finally 清理临时文件。
+MiniMax 侧只走项目既有的 aiohttp（不引新依赖），**不引入 edge-tts 之外的任何新包**。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -24,15 +30,119 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from companion.config import TTSConfig
+from companion.config import ModelPreset, TTSConfig
 
 logger = logging.getLogger(__name__)
 
 # 每日语音计数在 state 表里的键（与 proactive 的未回计数同一套机制，跨天自动清零）
 STATE_KEY_TTS_DAILY = "tts_daily_count"
 
-# 合成超时（秒）。任务书定 10s：edge-tts 走公网，超时按"发不出"降级
+# 合成超时（秒）。任务书定 10s：两家都走公网，超时按"发不出"降级
 SYNTH_TIMEOUT = 10.0
+
+# ── MiniMax（海螺）t2a_v2 接口常量 ──
+# 官方文档：POST https://api.minimaxi.com/v1/t2a_v2（主端点；备用 api-bj.minimaxi.com）
+# 鉴权：Authorization: Bearer <API_KEY> + Content-Type: application/json
+# **GroupId 不需要**：它是老接口的查询参数，t2a_v2 的 body/query 里都没有它
+# （2026-10-05 实测：只带 Bearer 头、不带 GroupId，直接 status_code=0 成功）。
+# 仍留一个可选 group_id 配置：万一将来接口回退成要 GroupId，改配置即可，不用改代码。
+MINIMAX_DEFAULT_BASE_URL = "https://api.minimaxi.com/v1"
+MINIMAX_DEFAULT_MODEL = "speech-2.8-hd"
+MINIMAX_VOICE_ID_DEFAULT = "Chinese (Mandarin)_Gentle_Senior"
+
+
+def minimax_endpoint(base_url: str, group_id: str = "") -> str:
+    """拼 t2a_v2 的 URL：base_url 缺省/带/不带尾斜杠、或直接写了完整端点都能对。
+
+    group_id 非空时按老接口形态挂 `?GroupId=...`（当前接口不需要，留作兼容开关）。
+    """
+    base = (base_url or MINIMAX_DEFAULT_BASE_URL).strip().rstrip("/")
+    if not base:
+        base = MINIMAX_DEFAULT_BASE_URL
+    url = base if base.endswith("/t2a_v2") else f"{base}/t2a_v2"
+    if group_id:
+        url = f"{url}?GroupId={group_id}"
+    return url
+
+
+def build_minimax_payload(
+    text: str, voice_id: str, speed: float, model: str
+) -> Dict[str, Any]:
+    """t2a_v2 请求体（纯函数，方便单测逐字段钉住）。
+
+    字段依据官方文档（同步 HTTP）：`model` / `text` 必填；`voice_setting.voice_id`
+    必填，`speed` 范围 [0.5, 2]；`audio_setting` 给 mp3 单声道。
+    `output_format` 默认就是 `hex`（音频以十六进制字符串塞在 JSON 里），
+    这里显式写上，避免默认值哪天变了我们这边静默解析失败。
+    `language_boost="auto"`：中英混读（pre / DDL 这类）让模型自己识别语种，
+    所有者已实测这个音色混读正确、无需预处理。
+    """
+    return {
+        "model": model or MINIMAX_DEFAULT_MODEL,
+        "text": text,
+        "stream": False,
+        "output_format": "hex",
+        "language_boost": "auto",
+        "voice_setting": {
+            "voice_id": voice_id or MINIMAX_VOICE_ID_DEFAULT,
+            "speed": float(speed),
+            "vol": 1.0,
+            "pitch": 0,
+        },
+        "audio_setting": {
+            "sample_rate": 32000,
+            "bitrate": 128000,
+            "format": "mp3",
+            "channel": 1,
+        },
+    }
+
+
+def extract_minimax_audio(resp: Dict[str, Any]) -> Tuple[Optional[bytes], str]:
+    """从 t2a_v2 响应里解出 mp3 字节；任何异常形态都返回 (None, 原因)。
+
+    响应结构（官方文档）：
+      data.audio     十六进制音频
+      data.status    2 = 合成完成
+      extra_info     usage_characters（计费字符数）/ audio_length（毫秒）等
+      base_resp      status_code（0 = 成功）
+    """
+    if not isinstance(resp, dict):
+        return None, "响应不是 JSON 对象"
+    base_resp = resp.get("base_resp")
+    if not isinstance(base_resp, dict):
+        base_resp = {}
+    code = base_resp.get("status_code")
+    if code not in (0, "0", None):
+        return None, f"接口返回错误 status_code={code} msg={base_resp.get('status_msg')!r}"
+    data = resp.get("data")
+    if not isinstance(data, dict):
+        return None, "响应缺 data（可能被限流或参数不合法）"
+    audio_hex = data.get("audio")
+    if not audio_hex or not isinstance(audio_hex, str):
+        return None, "响应里没有音频数据"
+    try:
+        audio = bytes.fromhex(audio_hex)
+    except (ValueError, TypeError) as e:
+        return None, f"音频十六进制解码失败: {e}"
+    if not audio:
+        return None, "音频长度为 0"
+    return audio, ""
+
+
+def _minimax_extra_note(resp: Dict[str, Any]) -> str:
+    """把计费/时长等可查字段摘成一行日志（冒烟要报告"API 返回的计费字段"）"""
+    if not isinstance(resp, dict):
+        return ""
+    extra = resp.get("extra_info") or {}
+    if not isinstance(extra, dict):
+        return ""
+    keys = ("usage_characters", "audio_length", "audio_size", "word_count")
+    parts = [f"{k}={extra[k]}" for k in keys if k in extra]
+    trace = (resp or {}).get("trace_id")
+    if trace:
+        parts.append(f"trace_id={trace}")
+    return " ".join(parts)
 
 # ============================================================================
 # 作息场景闸门
@@ -107,17 +217,41 @@ def truncate_for_voice(text: str, max_chars: int) -> str:
 class TTSManager:
     """文本 → mp3 的合成器 + 两道闸门（开关/日上限/作息）+ 每日计数
 
+    provider（`[tts].provider`）决定走哪家合成：
+      · `"edge"`（默认）——edge-tts，分钟级零成本；
+      · `"minimax"`——海螺 t2a_v2，鉴权 key 从**现有** `[models.minimax]` 档案读
+        （`minimax_preset` 由 main 传进来；不新增密钥字段、不新建密钥文件）。
+
     与 voice.VoiceProcessor 的对称点：
       · 延迟加载（edge_tts 只在第一次真的要用时才 import，模块缺失不影响主流程）
       · 失败一律降级不抛（这里返回 None，调用方发文字）
       · 临时文件先落盘再发送、发完 finally 删
     """
 
-    def __init__(self, config: TTSConfig, db: Any = None, out_dir: str = "data/voice_out"):
+    def __init__(
+        self,
+        config: TTSConfig,
+        db: Any = None,
+        out_dir: str = "data/voice_out",
+        minimax_preset: Optional[ModelPreset] = None,
+    ):
         self.config = config
         self.db = db
         self.out_dir = out_dir
+        self.minimax_preset = minimax_preset
         os.makedirs(self.out_dir, exist_ok=True)
+
+    @property
+    def provider(self) -> str:
+        """归一化后的 provider 名（缺省/空串按 edge，大小写不敏感）"""
+        return (self.config.provider or "edge").strip().lower()
+
+    def _minimax_credentials(self) -> Tuple[str, str]:
+        """MiniMax 鉴权材料：(api_key, base_url)，都取自现有 [models.minimax] 档案"""
+        preset = self.minimax_preset
+        api_key = (getattr(preset, "api_key", "") or "").strip() if preset else ""
+        base_url = (getattr(preset, "base_url", "") or "").strip() if preset else ""
+        return api_key, base_url or MINIMAX_DEFAULT_BASE_URL
 
     # ------------------------------------------------------------------
     # 闸门
@@ -173,6 +307,7 @@ class TTSManager:
 
         纪律：超时 10s、异常、空文件、零字节都算失败，**不抛异常**——
         语音只是锦上添花，绝不能因为它把她的这条消息弄丢。
+        provider 只在这里分流；闸门与计数两家共用（切换供应商不动账目口径）。
         """
         text = (text or "").strip()
         if not text:
@@ -188,6 +323,26 @@ class TTSManager:
             text = clipped
         if not text:
             return None
+
+        provider = self.provider
+        if provider == "minimax":
+            # 兜底安全网：_synthesize_minimax 内部已把每条失败路径收干（超时/网络/
+            # 错误码/坏 hex/写盘），这里再包一层是纪律要求——
+            # **绝不因为合成器出任何幺蛾子把她这句话弄丢**（调用方没有 except）。
+            try:
+                return await self._synthesize_minimax(text)
+            except Exception as e:
+                logger.warning(f"[TTS] MiniMax 合成未预期地失败，语音降级为文字: {e}")
+                return None
+        if provider == "edge":
+            return await self._synthesize_edge(text)
+        # 配置写错（拼错的 provider 名）时不许静默降级成"能发出去"：
+        # 报一句警告、按发不出处理，所有者能立刻从日志看出是配置问题。
+        logger.warning(f"[TTS] 未知 provider={self.config.provider!r}（只认 edge/minimax），语音降级为文字")
+        return None
+
+    async def _synthesize_edge(self, text: str) -> Optional[str]:
+        """阶段 A 路径：edge-tts 预置音色"""
         try:
             edge_tts = self._import_edge_tts()
         except Exception as e:
@@ -213,10 +368,97 @@ class TTSManager:
             logger.warning("[TTS] 合成产物为空，语音降级为文字")
             return None
         logger.info(
-            f"[TTS] 合成成功: voice={self.config.voice} rate={self.config.rate} "
-            f"chars={len(text)} size={os.path.getsize(out_path)}B"
+            f"[TTS] 合成成功: provider=edge voice={self.config.voice} "
+            f"rate={self.config.rate} chars={len(text)} size={os.path.getsize(out_path)}B"
         )
         return out_path
+
+    async def _synthesize_minimax(self, text: str) -> Optional[str]:
+        """阶段 B 路径：海螺（MiniMax）t2a_v2 预置音色
+
+        接口事实（2026-10-05 核实 + 实测）：
+          · `POST {base_url}/t2a_v2`（本机配置 base_url=https://api.minimaxi.com/v1）
+          · `Authorization: Bearer <key>`，key 取自现有 `[models.minimax]` 档案
+          · **不需要 GroupId**（那是老接口的查询参数）
+          · 音频以 hex 塞在 `data.audio` 里，落盘前 `bytes.fromhex` 解回二进制
+          · 计费看 `extra_info.usage_characters`，日志里留痕便于对账
+
+        失败纪律与 edge 路径一字不差：超时/异常/错误码/空音频一律返回 None，
+        调用方按文字发；临时文件只在**真的拿到音频**之后才写盘。
+        """
+        api_key, base_url = self._minimax_credentials()
+        if not api_key:
+            logger.warning(
+                "[TTS] MiniMax 档案缺 api_key（[models.minimax].api_key），语音降级为文字"
+            )
+            return None
+        url = minimax_endpoint(base_url, self.config.group_id)
+        payload = build_minimax_payload(
+            text,
+            self.config.voice_id,
+            self.config.speed,
+            self.config.model or MINIMAX_DEFAULT_MODEL,
+        )
+        try:
+            resp = await asyncio.wait_for(
+                self._minimax_post(url, payload, api_key), timeout=SYNTH_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"[TTS] MiniMax 合成超时（{SYNTH_TIMEOUT}s），语音降级为文字")
+            return None
+        except Exception as e:
+            # aiohttp 网络异常 / 非 JSON 响应 / 任何想不到的错，都在这里兜住
+            logger.warning(f"[TTS] MiniMax 合成异常，语音降级为文字: {e}")
+            return None
+
+        audio, why = extract_minimax_audio(resp)
+        if audio is None:
+            logger.warning(f"[TTS] MiniMax 未拿到音频（{why}），语音降级为文字")
+            return None
+
+        out_path = os.path.join(self.out_dir, f"tts_{uuid.uuid4().hex[:12]}.mp3")
+        try:
+            with open(out_path, "wb") as f:
+                f.write(audio)
+        except Exception as e:
+            logger.warning(f"[TTS] MiniMax 音频写盘失败，语音降级为文字: {e}")
+            return None
+        if os.path.getsize(out_path) == 0:
+            logger.warning("[TTS] MiniMax 合成产物为空，语音降级为文字")
+            self.cleanup(out_path)
+            return None
+        logger.info(
+            f"[TTS] 合成成功: provider=minimax voice={self.config.voice_id} "
+            f"speed={self.config.speed} model={payload['model']} "
+            f"chars={len(text)} size={os.path.getsize(out_path)}B "
+            f"| {_minimax_extra_note(resp)}"
+        )
+        return out_path
+
+    async def _minimax_post(
+        self, url: str, payload: Dict[str, Any], api_key: str
+    ) -> Dict[str, Any]:
+        """真正发 HTTP 的那一层（单独拆出来：单测可用替身注入、超时在外面包死）
+
+        aiohttp 走项目既有依赖，不引新包；读取响应体后交给 json 解析，
+        非 JSON（网关 502 之类）会抛 ValueError，由调用方统一降级。
+        """
+        import aiohttp  # noqa: PLC0415 - 与 edge 的延迟 import 同款，本地依赖
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        timeout = aiohttp.ClientTimeout(total=SYNTH_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                raw = await resp.text()
+                status = resp.status
+        resp_obj = json.loads(raw)
+        if status != 200:
+            # HTTP 层不 200（401/429/5xx）：把响应体带进错误里，日志里能直接看出病因
+            raise RuntimeError(f"HTTP {status}: {str(raw)[:200]}")
+        return resp_obj
 
     @staticmethod
     def cleanup(path: Optional[str]) -> None:

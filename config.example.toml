@@ -95,12 +95,24 @@ typing_max = 25.0                     # "正在输入"最长展示（秒）
 enabled = true
 model_dir = "data/models/sensevoice"
 
-# 语音回复（FIXES22 阶段 A）——**默认关**，建议等文字层稳定后再手动开
+# 语音回复（FIXES22 阶段 A + 阶段 B 海螺适配）——**默认关**，建议等文字层稳定后再手动开
 # 整个段删掉也能跑：代码默认值兜底，结果一样是"装着但关着"
 [tts]
 enabled = false                    # ← 要开启改这里（默认 false = 新功能先装死）
-voice = "zh-CN-XiaoxiaoNeural"     # 预置音色；想更年轻一点可换 zh-CN-XiaoyiNeural
-rate = "-8%"                       # 语速微调；+10%~+20% 会更活泼（默认略压播音腔）
+provider = "edge"                  # 合成引擎："edge"=微软 edge-tts（零成本，默认，阶段 A 路径保留）
+                                   #           "minimax"=海螺 MiniMax（音色更好，走会员套餐额度）
+
+# ── 下面两行只在 provider = "edge" 时生效 ──
+voice = "zh-CN-XiaoxiaoNeural"     # edge 预置音色（晓晓被所有者亲耳否决，仅留作回退用）
+rate = "-8%"                       # edge 语速微调；+10%~+20% 会更活泼
+
+# ── 下面四行只在 provider = "minimax" 时生效（默认即定稿值，一般不用改）──
+# 鉴权 key 不在这里填：复用现有 [models.minimax].api_key（t2a_v2 实测不需要 GroupId）
+voice_id = "Chinese (Mandarin)_Gentle_Senior"   # 海螺音色：温柔学姐（所有者盲听 5 个候选后亲选）
+speed = 1.0                        # 海螺语速：1.0 原速（0.9 慢速版已被淘汰）
+model = "speech-2.8-hd"            # 海螺 t2a_v2 模型，只能填官方枚举（…-hd 或 …-turbo）
+group_id = ""                      # 留空即可：t2a_v2 不需要 GroupId（那是老接口的查询参数）
+
 daily_limit = 3                    # 每日语音条数上限（低频动作，别当复读机）
 max_chars = 60                     # 单条字数上限（≈20 秒；NapCat 超过 35s 有失败报告）
 

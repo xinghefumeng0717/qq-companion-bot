@@ -165,7 +165,11 @@ class CompanionBot:
         self.voice_processor = VoiceProcessor(config.voice)
         # FIXES22：语音回复（阶段 A，默认关）。与语音输入并列成一个独立开关，
         # 语音输入关了不影响她说话，语音输出关了也不影响她听。
-        self.tts = TTSManager(config.tts, self.db)
+        # 阶段 B：provider="minimax" 时鉴权复用现有 [models.minimax] 档案
+        # （不新增密钥字段；档案不存在就是 None，合成层报缺 key 后降级为文字）。
+        self.tts = TTSManager(
+            config.tts, self.db, minimax_preset=config.llm.presets.get("minimax")
+        )
 
         self.proactive = ProactiveScheduler(
             config=config.proactive,

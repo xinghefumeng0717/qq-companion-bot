@@ -276,16 +276,30 @@ class VoiceConfig:
 
 @dataclass
 class TTSConfig:
-    """语音回复（FIXES22 阶段 A）——**默认全关**，上线后由所有者手动开
+    """语音回复（FIXES22 阶段 A / 阶段 B provider 适配）——**默认全关**，上线后由所有者手动开
 
     全部字段都有代码默认值兜底：服务器 config.toml **零改动**也能起，
-    `[tts]` 段不存在时就是"装着但关着"的状态。
+    `[tts]` 段不存在、或存在但不带 provider/minimax 字段时，就是
+    "装着但关着、且走 edge 老路"的状态。
+
+    provider 两档：
+      · `"edge"`（默认）——阶段 A 的 edge-tts 预置音色，零成本、保留可用；
+      · `"minimax"`——海螺（MiniMax）t2a_v2 预置音色。所有者盲听 5 个候选后
+        亲选 `Chinese (Mandarin)_Gentle_Senior`（温柔学姐）、语速 1.0 原速。
+        key 复用现有 `[models.minimax]` 档案，不新增密钥字段。
     """
 
     enabled: bool = False                 # 拍板：新功能一律先装死后激活
-    voice: str = "zh-CN-XiaoxiaoNeural"    # 调研结论：预置音色里最贴 19 岁女大学生
-    # 备选音色：zh-CN-XiaoyiNeural（更年轻、语速更跳）——想换改这一行即可
-    rate: str = "-8%"                     # 压一点播音腔；+10%~+20% 会更活泼
+    provider: str = "edge"                # edge（阶段 A，默认）/ minimax（阶段 B）
+    # ── edge 侧 ──
+    voice: str = "zh-CN-XiaoxiaoNeural"    # 预置音色（所有者已否决晓晓，仅作默认占位）
+    rate: str = "-8%"                     # 语速微调；+10%~+20% 会更活泼
+    # ── minimax 侧（默认即所有者定稿值）──
+    voice_id: str = "Chinese (Mandarin)_Gentle_Senior"   # 温柔学姐（所有者盲选定案）
+    speed: float = 1.0                    # 语速 1.0 原速（0.9 慢速被淘汰）
+    model: str = "speech-2.8-hd"          # t2a_v2 模型；接口只认官方枚举
+    group_id: str = ""                    # 可选；t2a_v2 实测**不需要**（老接口才要）
+    # ── 公共闸门 ──
     daily_limit: int = 3                  # 每日语音条数上限（低频动作）
     max_chars: int = 60                   # 单条字数上限（≈20 秒，NapCat >35s 有失败报告）
 
@@ -451,11 +465,18 @@ class Config:
             model_dir=str(voice_data.get("model_dir", "data/models/sensevoice")),
         )
         # FIXES22：tts 段整体可缺省（服务器 config.toml 零改动也能起，默认全关）
+        # 阶段 B：provider / minimax 字段同样可缺省——缺了就是 edge + 关着，
+        # 老配置一个字不改也安全。
         tts_data = data.get("tts", {})
         tts = TTSConfig(
             enabled=bool(tts_data.get("enabled", False)),
+            provider=str(tts_data.get("provider", "edge")),
             voice=str(tts_data.get("voice", "zh-CN-XiaoxiaoNeural")),
             rate=str(tts_data.get("rate", "-8%")),
+            voice_id=str(tts_data.get("voice_id", "Chinese (Mandarin)_Gentle_Senior")),
+            speed=float(tts_data.get("speed", 1.0)),
+            model=str(tts_data.get("model", "speech-2.8-hd")),
+            group_id=str(tts_data.get("group_id", "")),
             daily_limit=int(tts_data.get("daily_limit", 3)),
             max_chars=int(tts_data.get("max_chars", 60)),
         )

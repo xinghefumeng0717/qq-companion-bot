@@ -54,7 +54,12 @@ from companion.mood import MoodEngine
 from companion.observer import Observer
 from companion.persona import Persona
 from companion.proactive import ProactiveScheduler
-from companion.replier import FACE_MAX_PER_TURN, Replier, is_silence_output
+from companion.replier import (
+    FACE_MAX_PER_TURN,
+    VOICE_RECORD_PREFIX,
+    Replier,
+    is_silence_output,
+)
 from companion.stickers import StickerManager
 from companion.turn_handler import TurnHandler
 
@@ -769,8 +774,13 @@ def collect_sent_chunks(chunks: Sequence[Dict[str, Any]]) -> Dict[str, List[str]
     transcript 里却查无此话，指标全部偏空。**测量工具漏采比不测更坏**，
     所以这里统一收口，主聊与主动消息两条路都走这一个函数。
 
+    阶段 B 修 B-1 时按同一条纪律补了 **voice 段**：它是带正文的段型
+    （`（语音消息）正文`），老代码同样只认 text/combo，会让"她说了一段语音"
+    在 transcript 里完全消失。语音也算一条气泡，只是形态是声音。
+
     气泡文字用"人看的形态"：combo 摊成 `你真棒[doge]`，纯脸摊成 `[流泪][流泪]`
-    （裸方括号，与机主真实发法一致，transcript 一眼能读）。
+    （裸方括号，与机主真实发法一致，transcript 一眼能读）；语音用落库同款
+    `（语音消息）正文`，与 observer/日记看到的一致。
     表情标签同时另计一份，供 face 使用统计用。
     """
     bubbles: List[str] = []
@@ -794,6 +804,10 @@ def collect_sent_chunks(chunks: Sequence[Dict[str, Any]]) -> Dict[str, List[str]
             shown = f"{text}{''.join(f'[{t}]' for t in tags)}"
             if shown.strip():
                 bubbles.append(shown)
+        elif ctype == "voice":
+            content = (c.get("content") or "").strip()
+            if content:
+                bubbles.append(f"{VOICE_RECORD_PREFIX}{content}")
     return {"bubbles": bubbles, "stickers": stickers, "faces": faces}
 
 

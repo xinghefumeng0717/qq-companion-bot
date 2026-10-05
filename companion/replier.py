@@ -412,26 +412,30 @@ def chunk_text_sentences(text: str, max_chunks: int = 5) -> List[str]:
 
 
 def fit_chunks(chunks: List[Dict[str, Any]], max_chunks: int) -> List[Dict[str, Any]]:
-    """把段列表压到 max_chunks 以内：优先保留表情包段与QQ表情段，先丢普通文本段。
+    """把段列表压到 max_chunks 以内：优先保留表情包段、QQ表情段、语音段，先丢普通文本段。
 
     表情包是模型明确要求的整条内容，静默丢掉会改变回复的语义与态度；
     QQ 表情同理（它是她语气的一部分，丢了就变成"干巴巴一句话"，正是本次要治的病）；
+    语音段（FIXES22 阶段 B，教训 10 的同族病）**也是她明确要说的一句话**，
+    只是以声音形态发出——按老口径它落进"普通文本段"配额、超编时被当填充句挤掉，
+    症状是"她说了话、屏幕上没有"，与 B-1 同一类内容丢失。故与表情类同列优先保。
     文字段少发一句只损失信息，不影响表达。保留的段维持原有先后顺序。
     """
     if max_chunks <= 0 or len(chunks) <= max_chunks:
         return chunks
 
-    # 表情类段（表情包 / QQ 表情 / 混排气泡）优先保
-    rich = [c for c in chunks if c["type"] in ("sticker", "face", "combo")]
+    # 内容类段（表情包 / QQ 表情 / 混排气泡 / 语音）优先保
+    rich_types = ("sticker", "face", "combo", "voice")
+    rich = [c for c in chunks if c["type"] in rich_types]
     if len(rich) >= max_chunks:
-        # 表情类自身就超限：只能按顺序取前 max_chunks 个，文字段全部让位
+        # 内容类自身就超限：只能按顺序取前 max_chunks 个，文字段全部让位
         return rich[:max_chunks]
 
     text_quota = max_chunks - len(rich)
     kept: List[Dict[str, Any]] = []
     text_used = 0
     for c in chunks:
-        if c["type"] in ("sticker", "face", "combo"):
+        if c["type"] in rich_types:
             kept.append(c)
         elif text_used < text_quota:
             kept.append(c)
@@ -588,6 +592,15 @@ def merge_face_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     引用段不参与 face 合并：它还没并进任何消息，等下一步 merge_quote_into_next
     把它贴到紧随的那条消息头部（这样 "[quote:3][face:吃瓜]" 是一条 reply+face 消息，
     而不是 face 被吸进一个还没有正文的壳子里、把引用弄丢）。
+
+    **语音段（voice）同样永不合并**（DEEP_AUDIT B-1，P1→开 TTS 即 P0）：
+    voice 是**唯一带正文、又不参与 combo** 的段型，而下面的 `else` 分支假定
+    "非 text/face 的前段已经是 combo"，于是 `[voice:晚安[/voice][face:doge]`
+    这种同行写法会走 else 分支、用一个只含脸的新 combo **覆盖掉 voice 段**——
+    她说的那句话既没发出去、也没进落库记录（observer/日记读到的记录里她
+    "什么都没说"）。修复只需把 voice 补进这里的不合并名单：语音与脸各占一条气泡，
+    内容零丢失。**是否要把"语音后面挂个脸"合成同一条消息**是产品问题
+    （那要给 combo 加 voice part，三个消费方都要跟着长），不在本轮口径内。
     """
     out: List[Dict[str, Any]] = []
     for c in chunks:
@@ -597,8 +610,8 @@ def merge_face_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         prev = out[-1]
         prev_type = prev.get("type")
-        # sticker 永不合并；跨行也不合并（行号不相等即视为不同气泡）
-        if prev_type in ("sticker", "quote") or prev.get("_end_line") != c.get("_line"):
+        # sticker 永不合并；voice 永不合并（B-1）；跨行也不合并（行号不等即不同气泡）
+        if prev_type in ("sticker", "quote", "voice") or prev.get("_end_line") != c.get("_line"):
             out.append(c)
             continue
         if prev_type == "face":
@@ -1027,7 +1040,7 @@ class Replier:
            超限额的脸整段丢弃（它是标记、没有正文可留，DEEP_AUDIT B-5）
         8. QQ 表情并进紧邻文字段（混排合并成同一个气泡）
         9. 引用并进紧随其后的第一条消息（_quote 头）
-        10. 压到 max_chunks 以内（优先保表情包/表情/混排段）
+        10. 压到 max_chunks 以内（优先保表情包/表情/混排/语音段）
         返回: (发送消息段列表, 纯文本记录)
 
         source 只用于占位符兜底的 INFO 日志标注（"reply" 主聊 / "proactive" 主动消息），
@@ -1300,13 +1313,15 @@ class Replier:
         #    必须在 fit_chunks **之前**：max_chunks 限的是"几条气泡"，
         #    "你真棒[doge]"合并后是 1 条气泡、合并前却是 2 段——
         #    先 fit 会把并进去的那条文字当成超编挤掉（实战里被挤掉的是"在呢"这种收尾句）。
+        #    voice 不参与合并（DEEP_AUDIT B-1）：它带正文又不进 combo，
+        #    被当成"前一段"会被只含脸的新 combo 覆盖掉整句。
         final_chunks = merge_face_chunks(final_chunks)
 
         # 8.5 FIXES21：引用并进紧随其后的第一条消息（_quote 头）。
         #     也在 fit_chunks **之前**：引用不是一条独立气泡，不该占 max_chunks 的名额。
         final_chunks = merge_quote_into_next(final_chunks)
 
-        # 9. 总量控制：超限先丢普通文本段，表情包/表情/混排气泡优先保留
+        # 9. 总量控制：超限先丢普通文本段，表情包/表情/混排/语音段优先保留
         final_chunks = fit_chunks(final_chunks, self.config.max_chunks)
 
         # 10. 记录与实发一致：每段一条，段间用换行对齐 QQ 上的多条气泡
