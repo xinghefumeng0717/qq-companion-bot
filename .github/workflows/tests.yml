@@ -11,9 +11,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unittest:
+  list:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    outputs:
+      files: ${{ steps.set.outputs.files }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set
+        run: echo "files=$(ls tests/test_*.py | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+
+  # 每个测试文件一个并行 job：哪个文件挂死，对应 job 超时可疑，
+  # 从 jobs 列表页/API 直接看得出来，不用下载日志
+  unittest:
+    needs: list
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ${{ fromJSON(needs.list.outputs.files) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,8 +37,7 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run tests
-        # -v：逐条打印测试名——若有测试在 CI 上挂死，日志最后一行就是凶手
-        run: python -m unittest discover -s tests -v
-        # 无卡里布环境下测试自动回落到 characters/example（见 README 开发者小节）；
-        # duo_sim 相关 27 条 skip 属预期（缺私有画像简报）。
+      - name: Run ${{ matrix.file }}
+        run: python -m unittest discover -s tests -p "$(basename '${{ matrix.file }}')"
+        # 无卡环境下测试自动回落到 characters/example（见 README 开发者小节）；
+        # duo_sim 相关 skip 属预期（缺私有画像简报）。
