@@ -227,6 +227,8 @@ class CompanionBot:
             voice_processor=self.voice_processor,
             # FIXES23：对方输入状态直连聚合器（同步回调，见 OneBotClient 注释）
             on_typing_callback=self.aggregator.notify_peer_typing,
+            # 撤回消息从聚合缓冲里摘掉（同步回调，同上）
+            on_recall_callback=self.aggregator.remove_message,
         )
 
         self.admin = AdminServer(

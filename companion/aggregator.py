@@ -217,6 +217,76 @@ class MessageAggregator:
             f"[Aggregator] 他已停手，重新起静默窗 {wait_time:.1f}s（本轮已等 {elapsed:.1f}s）"
         )
 
+    def remove_message(self, message_id: Any) -> None:
+        """撤回联动：把机主刚撤回的那条从本轮缓冲里摘掉。
+
+        只认**还挂在缓冲里**的那条（本轮还没 flush）。已经进队列、已经落库的不追——
+        真人也是"撤回前看到就看到了"，回头改记录只会让历史与现实对不上。
+
+        `_batch` 与 `_text_buffer` 是平行结构（`push_message` 里两者同步 append），
+        分别删必然错位；所以只动 `_batch`，删完整体重建 `_text_buffer`。
+        删中间条后编号要重新连续排，否则模型看到的 [1][3] 与 message_id 的
+        一一对应就断了（引用会指到错的那条消息上）。
+
+        纯同步（不 await）：与 `notify_peer_typing` 同理，撤回事件在读循环里就地
+        处理，抢在静默计时器 flush 之前把消息摘走。
+        """
+        if message_id is None:
+            logger.debug("[Aggregator] 撤回事件没带 message_id，忽略")
+            return
+
+        target = None
+        for item in self._batch:
+            if item.get("message_id") == message_id:
+                target = item
+                break
+        if target is None:
+            logger.debug(
+                f"[Aggregator] 撤回的 message_id={message_id!r} 不在本轮缓冲里"
+                f"（已 flush 或不属于本轮），忽略"
+            )
+            return
+
+        old_index = target.get("index")
+        self._batch.remove(target)
+        # 平行结构只重建这一处：文本与编号永远跟着 _batch 走
+        self._text_buffer = [item.get("text", "") for item in self._batch]
+
+        # 重新编号（从 1 连续），保持"编号 ↔ message_id"一一对应
+        for i, item in enumerate(self._batch, start=1):
+            item["index"] = i
+
+        if not self._batch:
+            # 这一轮的消息全被撤回了：当没发生过，她不该开口
+            if self._debounce_task and not self._debounce_task.done():
+                self._debounce_task.cancel()
+            self._debounce_task = None
+            self._first_msg_time = 0.0
+            self._peer_typing = False
+            self._image_buffer = None
+            self._image_index = None
+            logger.info(
+                f"[Aggregator] 机主撤回了第 {old_index} 条，本轮缓冲已空，撤销计时器"
+            )
+            return
+
+        # 被撤的正是那条带图的：图一起没；否则按剩下的重排图片编号
+        # （`_image_buffer` 存的是"最后一张"，所以取最后一条带图的，与 push_message 同口径）
+        if old_index == self._image_index:
+            self._image_buffer = None
+            self._image_index = None
+        elif self._image_index is not None:
+            last_image = None
+            for item in self._batch:
+                if item.get("has_image"):
+                    last_image = item
+            self._image_index = last_image["index"] if last_image else None
+
+        logger.info(
+            f"[Aggregator] 机主撤回了第 {old_index} 条，从本轮缓冲移除"
+            f"（剩 {len(self._batch)} 条）"
+        )
+
     async def _wait_typing_until_deadline(self, deadline: float) -> None:
         """他一直在打字：睡到绝对上限就 flush，谁还在打字都不好使。
 

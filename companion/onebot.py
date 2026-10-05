@@ -54,6 +54,18 @@ INPUT_STATUS_TYPE_OFF = 0
 # 没有这道自愈，"他其实早停了"会让她一直傻等到 30 秒绝对上限才开口。
 INPUT_STATUS_STALE_LIMIT = 15.0
 
+# ---------------------------------------------------------------------------
+# 私聊撤回事件（OneBot v11）
+#
+#   post_type = 'notice'; notice_type = 'friend_recall';
+#   user_id（好友 QQ = 撤回者）、message_id（被撤回的那条）
+#
+# 群撤回是 `group_recall`（带 group_id / operator_id），本项目只跑私聊，一律忽略。
+# 生产实锤（2026-10-04 18:01）：机主打错字后撤回重发，撤回事件过去没人接，
+# 被撤回的那句照常留在聚合缓冲里送给了模型——她对着一句"不存在的话"回话。
+# ---------------------------------------------------------------------------
+RECALL_NOTICE_TYPE = "friend_recall"
+
 
 def parse_input_status_event(data: Dict[str, Any]) -> Optional[bool]:
     """把一条 OneBot 报文解析成"他在不在打字"。
@@ -183,6 +195,7 @@ class OneBotClient:
         image_save_dir: str = "data/images",
         voice_processor: Optional[Any] = None,
         on_typing_callback: Optional[Callable[[bool], None]] = None,
+        on_recall_callback: Optional[Callable[[Any], None]] = None,
     ):
         self.config = config
         self.allowed_user_id = allowed_user_id
@@ -193,6 +206,8 @@ class OneBotClient:
         # 这条是抢时间的信号，聚合器要在静默计时器到期前把它撤掉，
         # 走 _message_queue 排队就等于白排。回调内部只做取消/重挂计时器，不 await。
         self.on_typing_callback = on_typing_callback
+        # 私聊撤回回调：同样是同步的，要在静默窗 flush 之前把撤回的消息摘出缓冲。
+        self.on_recall_callback = on_recall_callback
         self._peer_typing = False
         self._typing_watchdog: Optional[asyncio.Task] = None
         os.makedirs(self.image_save_dir, exist_ok=True)
@@ -308,8 +323,11 @@ class OneBotClient:
                 self._dispatch_message_event(data.get("message"), data.get("message_id"))
 
         # 4. 对方输入状态（FIXES23）：他手指停没停，聚合窗要"看得见"
+        #    私聊撤回（本批）：被撤回的消息要从聚合缓冲里摘掉，别让她对着一句
+        #    "不存在的话"回话。两者都是 notice，各自内部再判 notice_type。
         if post_type == "notice":
             self._handle_input_status_event(data)
+            self._handle_recall_event(data)
 
     def _handle_input_status_event(self, data: Dict[str, Any]) -> None:
         """处理 NapCat 的"对方正在输入"通知（FIXES23）。
@@ -355,6 +373,37 @@ class OneBotClient:
             logger.warning(
                 f"[OneBot] 输入状态回调异常（{'开' if is_typing else '关'}），静默忽略: {e}"
             )
+
+    def _handle_recall_event(self, data: Dict[str, Any]) -> None:
+        """处理私聊撤回通知：把被撤回的 message_id 交给聚合器摘掉。
+
+        只认机主本人的私聊撤回（`friend_recall` + user_id == allowed_user_id）；
+        群撤回（`group_recall`）与别人的撤回一律忽略——本项目只跑私聊。
+        没带 message_id 的畸形事件也忽略（猜不得）。
+        """
+        if not self._running:
+            # stop() 之后仍可能收到在途帧：直接丢弃（与 _handle_input_status_event 同理）
+            return
+        if data.get("notice_type") != RECALL_NOTICE_TYPE:
+            return
+        if data.get("user_id") != self.allowed_user_id:
+            return
+        message_id = data.get("message_id")
+        if message_id is None:
+            return
+
+        logger.info(f"[OneBot] 机主撤回了一条消息 message_id={message_id}，通知聚合器移除")
+        self._emit_recall(message_id)
+
+    def _emit_recall(self, message_id: Any) -> None:
+        """把撤回交给聚合器。回调异常一律吞掉——摘不掉最坏是"按老样子回"，
+        绝不能因为聚合器一时出错把消息链带崩。"""
+        if not self.on_recall_callback:
+            return
+        try:
+            self.on_recall_callback(message_id)
+        except Exception as e:
+            logger.warning(f"[OneBot] 撤回回调异常，静默忽略: {e}")
 
     async def _typing_watchdog_wait(self) -> None:
         """开始输入后 INPUT_STATUS_STALE_LIMIT 秒没等到结束事件 → 当作已结束。

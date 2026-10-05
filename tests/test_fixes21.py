@@ -422,7 +422,10 @@ class TestQuoteParsing(unittest.TestCase):
         )
         self.assertEqual(len(_quotes(chunks)), 1)
         self.assertEqual(_quotes(chunks)[0]["index"], 1)
-        self.assertIn("[quote:2]", record, "多余那条按文字降级，不丢弃")
+        # 2026-10-04 口径修正：多余的引用段直接丢弃，不再降级成字面 "[quote:2]"
+        # 发上屏（标记不是内容，她会说的话在后面的 text 段里）
+        self.assertNotIn("[quote:2]", record, "多余的引用标记不得原样发上屏")
+        self.assertIn("乙", record, "引用丢了，那句话本身要留下")
 
     def test_引用后面没有正文则丢弃(self):
         """模型只输出了 [quote:2]：不空发。"""
@@ -510,7 +513,9 @@ class TestQuoteHelpers(unittest.TestCase):
             {"type": "quote", "index": 2, "message_id": 2},
         ])
         self.assertEqual(len([c for c in out if c["type"] == "quote"]), 1)
-        self.assertEqual(out[2]["content"], "[quote:2]")
+        # 多余的引用段被丢弃（不再是降级成 "[quote:2]" 的文字段）
+        self.assertTrue(all(c.get("content") != "[quote:2]" for c in out))
+        self.assertEqual([c for c in out if c["type"] == "text"], [{"type": "text", "content": "甲"}])
 
     def test_merge_quote_into_next(self):
         out = merge_quote_into_next([

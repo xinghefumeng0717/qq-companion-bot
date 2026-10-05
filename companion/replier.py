@@ -732,13 +732,19 @@ def quote_chunk(index: int, quote_targets: Optional[List[Dict[str, Any]]]) -> Op
 
 
 def keep_first_quote(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """整轮只保留第一个引用段，多余的**按普通文字降级**（FIXES21 任务2 第3条）。
+    """整轮只保留第一个引用段，多余的**直接丢弃**（FIXES21 任务2 第3条）。
 
     引用是低频高精度动作：一轮里连着引两条既没意义（她只回一条消息），
-    也会把 5 段预算吃光。降级而不是丢弃，与 face 超限同一口径。
+    也会把 5 段预算吃光。
+
+    为什么丢弃而不是像 face 那样降级成文字：`[quote:N]` 标记本身不是内容，
+    她要说的话在后面的 text 段里，标丢了零损失；把标记原样当文字发上屏，
+    机主看到的就是一串乱码（2026-10-04 生产实锤：两条引用被降级，
+    `[quote:3]` 原样发到了 QQ 上）。内容型标记（face/sticker/voice）降级是
+    "保住要说的话"，引用标记没有"话"可保，降级只会制造脏文字。
     """
     used = False
-    downgraded: List[int] = []
+    dropped: List[int] = []
     out: List[Dict[str, Any]] = []
     for c in chunks:
         if c.get("type") != "quote":
@@ -748,13 +754,11 @@ def keep_first_quote(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             used = True
             out.append(c)
             continue
-        marker = f"[quote:{c.get('index', '')}]"
-        downgraded.append(c.get("index"))
-        out.append({"type": "text", "content": marker})
-    if downgraded:
+        dropped.append(c.get("index"))
+    if dropped:
         logger.info(
-            f"[Replier] 引用硬上限：整轮只保留 1 条，多余 {len(downgraded)} 条按文字降级: "
-            f"{downgraded}"
+            f"[Replier] 引用硬上限：整轮只保留 1 条，多余 {len(dropped)} 条直接丢弃: "
+            f"{dropped}"
         )
     return out
 
