@@ -45,6 +45,11 @@ def file_uri_to_path(uri: str) -> str:
     # Windows 盘符：file:///D:/x -> /D:/x -> D:/x
     if re.match(r"^/[A-Za-z]:", path):
         path = path[1:]
+    # POSIX 绝对路径的多余斜杠塌陷：file:////opt/x 这类四斜杠写法（或手滑多打）
+    # 还原成 //opt/x 后，POSIX 的 abspath 会保留双斜杠——/opt/x 与 //opt/x 是同一个
+    # 文件但字符串不等，下游对账会炸（Linux CI 实测抓到，Windows 的 abspath 会
+    # 归一化所以本机从来不红）
+    path = re.sub(r"^/{2,}(?!/)", "/", path)
     return path
 
 

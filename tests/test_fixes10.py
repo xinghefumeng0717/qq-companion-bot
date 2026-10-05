@@ -325,7 +325,7 @@ class TestProcessVoiceFileUri(unittest.IsolatedAsyncioTestCase):
         silk = os.path.abspath(os.path.join(self.TEST_DIR, "input.silk"))
         with open(silk, "wb") as f:
             f.write(b"dummy silk content")
-        uri = "file:///" + silk.replace("\\", "/")
+        uri = "file://" + silk.replace("\\", "/")
 
         def mock_transcode(in_file, out_file):
             self.assertEqual(os.path.abspath(in_file), silk, "必须剥掉 scheme 传给 ffmpeg")
