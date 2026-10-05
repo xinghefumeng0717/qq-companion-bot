@@ -54,6 +54,9 @@ logger = logging.getLogger("companion")
 
 # 停机时单个组件允许占用的最长时间：组件卡死不能拖死整个进程（systemd 会 SIGKILL）
 ADMIN_STOP_TIMEOUT = 5.0
+# 后台任务取消的有界等待：真机实测（2026-10-05）出现过某任务拒收取消、
+# gather 永不返回、systemd 30 秒 SIGKILL。超时就放弃它、点名留证、继续停机。
+TASK_CANCEL_TIMEOUT = 10.0
 
 # 库文件路径唯一来源（构造时可注入，测试/多环境不必改代码）
 DEFAULT_DB_PATH = "data/companion.db"
@@ -403,7 +406,19 @@ class CompanionBot:
         for t in pending:
             t.cancel()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            # 不能用 wait_for(gather(...))：超时后 wait_for 会先取消 gather 并**等它收尾**，
+            # 而 gather 收尾要等子任务退出——遇到拒收取消的任务，wait_for 自己也会挂死。
+            # asyncio.wait 超时只返回不取消，才是真有界。
+            _, stubborn = await asyncio.wait(pending, timeout=TASK_CANCEL_TIMEOUT)
+            if stubborn:
+                names = [
+                    getattr(t.get_coro(), "__qualname__", repr(t))
+                    for t in stubborn
+                ]
+                logger.warning(
+                    f"[Bot] {len(names)} 个后台任务拒收取消（{TASK_CANCEL_TIMEOUT}s 未退出），"
+                    f"放弃等待继续停机: {names}"
+                )
 
     async def close(self) -> None:
         if self._closed:

@@ -629,6 +629,36 @@ class TestShutdownSequence(unittest.IsolatedAsyncioTestCase):
         await bot.close()
         self.assertEqual(events, first)
 
+    async def test_stubborn_task_cannot_block_shutdown(self):
+        """真机实测（2026-10-05）：某后台任务拒收取消，gather 永不返回，
+        systemd 30 秒 SIGKILL。取消等待必须有界，超时就点名放弃、继续停机。"""
+        events = []
+        bot, _ = self._build_bot(events, with_bg_task=False)
+
+        release = asyncio.Event()
+
+        async def stubborn():
+            while not release.is_set():
+                try:
+                    await asyncio.sleep(0.05)
+                except asyncio.CancelledError:
+                    continue  # 拒收取消，模拟卡死任务
+
+        task = asyncio.create_task(stubborn())
+        await asyncio.sleep(0.05)
+
+        with patch("companion.main.TASK_CANCEL_TIMEOUT", 0.1):
+            with self.assertLogs("companion", level="WARNING") as captured:
+                await asyncio.wait_for(bot.close(), timeout=5.0)
+
+        self.assertIn("db.close", events, "任务拒死不得拖死停机")
+        log_text = "\n".join(captured.output)
+        self.assertIn("拒收取消", log_text)
+        self.assertIn("stubborn", log_text, "点名要写出拒死任务的身份，下次直接抓现行")
+
+        release.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
 
 # ==========================================================
 # 修复 10：screenshot_helper 演示库隔离
