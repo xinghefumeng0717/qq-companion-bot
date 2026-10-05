@@ -344,6 +344,8 @@ powershell -ExecutionPolicy Bypass -File ".\launcher\创建桌面快捷方式.ps
 - **重启服务**：向服务端发出重启请求，进程将在 5 秒后安全退出，由 Linux systemd 守护进程 (`Restart=always`) 重新自动拉起，实现代码与配置即时热生效；
 - **重置数据 (高危)**：清空所有关系好感与对话记忆，恢复到初始相识阶段。**执行前强制要求手敲输入大写 `YES` 校验**，且会自动在 `data/backup/daily/` 生成一份完整前置快照，表情包资产与调用计费记录默认安全保留。
 
+> **安全提示**：以上三个写操作默认只靠"仅监听 `127.0.0.1` + `confirm=YES`"防护。若把 `[admin].host` 改成非回环地址（如 `0.0.0.0`、内网 IP），**必须同时在 `[admin].token` 设一个令牌**——届时所有写操作都要带请求头 `X-Admin-Token` 或 `token` 字段，否则一律 403。token 留空时行为与旧版完全一致（仅本机/SSH 隧道信任模式）。
+
 ---
 
 ## 11. 应用内每日自动备份 (`companion/backup`)
@@ -353,3 +355,62 @@ powershell -ExecutionPolicy Bypass -File ".\launcher\创建桌面快捷方式.ps
 - **启动补备**：进程启动时会自动检测当天是否已有备份，若尚未备份则立刻补做一次；
 - **自动轮转淘汰**：保留最近 **14 份**历史每日备份，更早的旧备份自动淘汰清理；
 - **固定同步镜像**：每次备份完成后同步覆盖 `data/backup/daily/latest.db`，方便桌面控制台及外部工具固定路径拉取。
+
+---
+
+## 12. 开发者：如何跑测试
+
+> 拿到公开 clone（没有私有角色卡、没有 `config.toml`、没有 `data/`）时先看这一节。
+
+### 12.1 运行整套单元测试
+
+本机（Windows，PowerShell/CMD 或 Git Bash 均可，在项目根目录执行）：
+
+```bash
+./venv/Scripts/python.exe -m unittest discover -s tests
+```
+
+服务器（Linux）：
+
+```bash
+./venv/bin/python -m unittest discover -s tests
+```
+
+全部用例本地构造、**零真实网络与真实 API 调用**，正常几分钟内跑完。
+
+### 12.2 角色卡依赖（公开 clone 无需私有卡）
+
+代码仓库只带公开模板卡 `characters/example/`，私有卡（如 `characters/qingzi/`）被 `.gitignore` 排除。测试对角色卡的解析优先级是：
+
+1. 环境变量 `QQC_TEST_CARD`（显式指定要用的卡目录）；
+2. `characters/qingzi/` 若存在则用它（所有者本机保持原有覆盖）；
+3. 回落到仓库自带的 `characters/example/`。
+
+因此公开 clone 直接跑测试就会自动用 `characters/example/`。想显式指定某张卡：
+
+```bash
+# Git Bash
+QQC_TEST_CARD=characters/example ./venv/Scripts/python.exe -m unittest discover -s tests
+```
+
+```powershell
+# PowerShell
+$env:QQC_TEST_CARD="characters/example"; ./venv/Scripts/python.exe -m unittest discover -s tests
+```
+
+少数需要核对"阶段名 / 作息文案"的用例不依赖任何真实卡，而是当场在临时目录里写一张最小夹具卡（`tests/helpers.py` 的 `make_fixture_card()`），所以换卡、无卡都不会再牵动它们。
+
+### 12.3 为什么会看到一批 skip（跳过）
+
+公开 clone 里通常会有约二三十条用例显示 `skipped`，原因只有一个：**对聊仿真器（duo_sim / final_rehearsal）依赖私有画像简报** `data/duo_sim/user_persona_brief.md`。该简报由私有 QQ 语料经下面的脚本生成，落在被 `.gitignore` 排除的 `data/` 下，**不会入库**：
+
+```bash
+./venv/Scripts/python.exe scripts/sim/duo_sim_persona.py --export "导出文件路径"
+```
+
+生成简报后这些用例会真正执行；没生成时它们统一 skip，而不是 FAIL/ERROR——这是刻意设计，避免公开 clone 一开箱就是红。
+
+### 12.4 `scripts/smoke/` 是真实 API 冒烟，别随手跑
+
+`scripts/smoke/` 下的脚本会调用**真实**的 LLM / TTS 接口，产生真实费用，请勿在无预期时批量运行。需要验证提示词人设或端到端管线时，优先用零成本的仿真沙箱 `companion.chat`（见 8.1）与上面的单元测试。
+
