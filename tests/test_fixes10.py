@@ -596,7 +596,10 @@ class TestShutdownSequence(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)  # 让结算任务真正跑起来
         self.assertIn("settle.start", events)
 
-        await asyncio.wait_for(bot.close(), timeout=5.0)
+        # 不许用 wait_for 包 close()：Python ≤3.11 的 wait_for 会把被等协程包成
+        # 独立 task，close() 的取消波会把**调用方的 task** 也扫进去反杀自己
+        # （CI 3.11 实测 ERROR；3.12+ wait_for 改用 asyncio.timeout 同事执行才没事）
+        await bot.close()
 
         self.assertIn("settle.cancelled", events, "未跟踪的写库任务也必须被取消")
         self.assertTrue(settle_task.done())
@@ -647,17 +650,23 @@ class TestShutdownSequence(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(stubborn())
         await asyncio.sleep(0.05)
 
-        with patch("companion.main.TASK_CANCEL_TIMEOUT", 0.1):
-            with self.assertLogs("companion", level="WARNING") as captured:
-                await asyncio.wait_for(bot.close(), timeout=5.0)
+        try:
+            with patch("companion.main.TASK_CANCEL_TIMEOUT", 0.1):
+                with self.assertLogs("companion", level="WARNING") as captured:
+                    # 不许用 wait_for 包 close()：Python ≤3.11 的 wait_for 会把被等协程
+                    # 包成独立 task，close() 的取消波会反杀调用方 task（CI 3.11 实测
+                    # ERROR；3.12+ wait_for 改用 asyncio.timeout 同 task 执行才没事）
+                    await bot.close()
 
-        self.assertIn("db.close", events, "任务拒死不得拖死停机")
-        log_text = "\n".join(captured.output)
-        self.assertIn("拒收取消", log_text)
-        self.assertIn("stubborn", log_text, "点名要写出拒死任务的身份，下次直接抓现行")
-
-        release.set()
-        await asyncio.wait_for(task, timeout=2.0)
+            self.assertIn("db.close", events, "任务拒死不得拖死停机")
+            log_text = "\n".join(captured.output)
+            self.assertIn("拒收取消", log_text)
+            self.assertIn("stubborn", log_text, "点名要写出拒死任务的身份，下次直接抓现行")
+        finally:
+            # 无论断言是否炸掉都必须放出 stubborn——否则它吞取消永生，
+            # IsolatedAsyncioTestCase 收尾时被它吊死（CI 3.11 实测卡死 15 分钟）
+            release.set()
+            await asyncio.wait_for(task, timeout=2.0)
 
 
 # ==========================================================
