@@ -9,6 +9,7 @@ venv/
 config.toml
 data/
 local_env.md
+STATUS.md
 
 # Private characters (keep example only)
 characters/*
