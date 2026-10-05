@@ -330,6 +330,7 @@ class TestNumberedBlock(unittest.TestCase):
         self.assertIn("[quote:3]", QUOTE_USAGE_EXAMPLES)
         self.assertIn("主动给他发消息", QUOTE_USAGE_RULES, "主动消息没有可引用对象，得写明")
 
+class TestNumberedBlockAssembler(unittest.IsolatedAsyncioTestCase):
     async def test_单条消息时提示词与改动前一致(self):
         """无批次时不能多出任何编号块。"""
         sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
