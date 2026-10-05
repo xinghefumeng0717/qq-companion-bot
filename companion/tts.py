@@ -200,7 +200,8 @@ def truncate_for_voice(text: str, max_chars: int) -> str:
     """把语音文本截到 max_chars 以内（宁可短不可长）。
 
     切在最近的句读上（。！？，、；…～），找不到就在硬截断点前留个省略号。
-    任务书定 60 字 ≈ 20 秒（NapCat >35s 有失败报告，QQ 上限 60s，离边界远）。
+    现定为 90 字 ≈ 30 秒（所有者 2026-10-05 二次拍板从 60 字上调；
+    NapCat >35s 有失败报告，QQ 上限 60s，90 字仍离失败区有一段距离，别再加）。
     """
     text = (text or "").strip()
     if not text:

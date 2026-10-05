@@ -74,9 +74,10 @@ class TestDefaultOff(unittest.TestCase):
     def test_默认配置是关的(self):
         cfg = TTSConfig()
         self.assertFalse(cfg.enabled)
-        # 日上限 3→8：所有者 2026-10-05 拍板（上限是防模型抖动的保险丝，随阶段 B 落地）
-        self.assertEqual(cfg.daily_limit, 8)
-        self.assertEqual(cfg.max_chars, 60)
+        # 日上限 3→8→30：所有者 2026-10-05 二次拍板（30 ≈ 感觉不到存在，保险丝保留）
+        self.assertEqual(cfg.daily_limit, 30)
+        # 60→90：≈30 秒，仍低于 NapCat >35s 失败区
+        self.assertEqual(cfg.max_chars, 90)
         self.assertEqual(cfg.voice, "zh-CN-XiaoxiaoNeural")
 
     def test_现网config_tomll不带tts段也是关的(self):
@@ -703,7 +704,9 @@ class TestVoicePrompt(unittest.TestCase):
         self.assertIn("{voice_block}", SYSTEM_PROMPT_TEMPLATE)
 
     def test_纪律句含三个要点(self):
-        for kw in ("一小段", "一天最多", "不是把整段回复念出来"):
+        # 2026-10-05 所有者二次拍板：日上限 8→30，"一天最多几条"从提示词撤下
+        # （与放宽后的上限矛盾），次数纪律改由机制层 daily_limit 单独承担
+        for kw in ("一小段", "适合说话的时候", "不是把整段回复念出来"):
             with self.subTest(kw=kw):
                 self.assertIn(kw, VOICE_USAGE_RULES)
 
@@ -741,7 +744,7 @@ class TestVoicePrompt(unittest.TestCase):
 
         prompt = asyncio.run(run())
         self.assertIn("[voice:", prompt)
-        self.assertIn("一天最多", prompt)
+        self.assertIn("适合说话的时候", prompt)
 
     def test_她此刻仍独立成行(self):
         """FIXES21 踩过：【她此刻】被插进来的块挤到行中间，既有守卫报过一次。"""

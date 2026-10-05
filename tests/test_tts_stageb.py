@@ -196,8 +196,8 @@ class TestProviderConfig(unittest.TestCase):
         self.assertEqual(cfg.speed, 1.0)
         self.assertEqual(cfg.model, "speech-2.8-hd")
         self.assertEqual(cfg.group_id, "")
-        # 所有者 2026-10-05 拍板：日上限 3→8（随阶段 B 部署落地）
-        self.assertEqual(cfg.daily_limit, 8)
+        # 所有者 2026-10-05 二次拍板：日上限 3→8→30（≈感觉不到存在，保险丝保留）
+        self.assertEqual(cfg.daily_limit, 30)
 
     def test_manager归一化provider(self):
         self.assertEqual(TTSManager(TTSConfig(provider="minimax")).provider, "minimax")

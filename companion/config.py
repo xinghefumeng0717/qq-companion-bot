@@ -300,8 +300,9 @@ class TTSConfig:
     model: str = "speech-2.8-hd"          # t2a_v2 模型；接口只认官方枚举
     group_id: str = ""                    # 可选；t2a_v2 实测**不需要**（老接口才要）
     # ── 公共闸门 ──
-    daily_limit: int = 8                  # 每日语音条数上限（所有者 2026-10-05 拍板 8 条，从 3 上调）
-    max_chars: int = 60                   # 单条字数上限（≈20 秒，NapCat >35s 有失败报告）
+    daily_limit: int = 30                 # 每日语音条数上限（所有者 2026-10-05 二次拍板：30 条≈感觉不到
+                                          # 存在，但保留保险丝防模型抖动连发；不设无限）
+    max_chars: int = 90                   # 单条字数上限（≈30 秒；NapCat >35s 有失败报告，别再加）
 
 
 @dataclass
