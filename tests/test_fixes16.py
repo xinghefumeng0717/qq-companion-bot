@@ -590,12 +590,12 @@ class TestPromptBlock(ArcsTestBase):
                 ("读书报告", "选题没定", _d(-2, base), "交上了",
                  base.strftime(TIME_FORMAT), (base - timedelta(days=1)).strftime(TIME_FORMAT)),
             )
-        block = await self.arcs.build_prompt_block()
-        self.assertIn("（临近）乐团节目审查", block)
-        self.assertIn("紧张，低音部那段还没合齐", block)
-        self.assertIn("（有结果）读书报告", block)
-        self.assertNotIn("下个月体测", block, "upcoming 还没到她心里，不该注入")
-        self.assertEqual(block.count("【她最近的生活】"), 1)
+            block = await self.arcs.build_prompt_block()
+            self.assertIn("（临近）乐团节目审查", block)
+            self.assertIn("紧张，低音部那段还没合齐", block)
+            self.assertIn("（有结果）读书报告", block)
+            self.assertNotIn("下个月体测", block, "upcoming 还没到她心里，不该注入")
+            self.assertEqual(block.count("【她最近的生活】"), 1)
 
     async def test_stale_resolved_over_2d_not_injected(self):
         with patch("companion.arcs.datetime", _FrozenDatetime):
