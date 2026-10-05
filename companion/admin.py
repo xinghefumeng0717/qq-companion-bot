@@ -41,6 +41,29 @@ from companion.admin_render import (
     html_shell,
 )
 
+# 管理页写操作鉴权（外部评审）：token 为空时保持 localhost 信任模式，
+# 行为与旧版逐字节一致；token 非空时所有写操作必须携带匹配的 token。
+ADMIN_TOKEN_HEADER = "X-Admin-Token"
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def warn_if_admin_exposed_without_token(config: AdminConfig) -> None:
+    """host 绑到非回环地址却没设 token 时，打一条醒目的"裸奔"警告。
+
+    写操作（/admin/backup、/admin/restart、/admin/reset）一旦离开 localhost，
+    confirm=YES 这类前端校验完全挡不住直接 POST，必须有 token 兜底。
+    """
+    if config.token:
+        return
+    if config.host not in _LOOPBACK_HOSTS:
+        logger.warning(
+            "[Admin] ⚠ 安全警告：管理页 host=%s 已绑定到非回环地址，但 [admin].token 为空——"
+            "/admin/reset、/admin/restart、/admin/backup 等写操作将对同网段完全裸奔。"
+            "请先在 config.toml 的 [admin] 段设好 token 再对外开放。",
+            config.host,
+        )
+
+
 __all__ = [
     "AdminServer",
     "HTML_STYLE",
@@ -104,6 +127,7 @@ class AdminServer:
         return float(row_today["cost_today"] or 0.0) if row_today else 0.0
 
     async def start(self) -> None:
+        warn_if_admin_exposed_without_token(self.config)
         app = web.Application()
         app.router.add_get("/", self.handle_overview)
         app.router.add_get("/api/status", self.handle_api_status)
@@ -127,6 +151,63 @@ class AdminServer:
     async def stop(self) -> None:
         if self._runner:
             await self._runner.cleanup()
+
+    # ==========================================
+    # 写操作鉴权
+    # ==========================================
+    async def _write_authorized(self, request: web.Request) -> bool:
+        """写操作鉴权。
+
+        token 为空 = 仅 localhost 信任模式，直接放行（与改动前行为逐字节一致）；
+        token 非空时，要求请求头 X-Admin-Token 或表单/JSON 字段 token 与之相等。
+        """
+        expected = self.config.token
+        if not expected:
+            return True
+        provided = request.headers.get(ADMIN_TOKEN_HEADER, "")
+        if not provided:
+            provided = await self._token_from_body(request)
+        return provided == expected
+
+    async def _token_from_body(self, request: web.Request) -> str:
+        """从 JSON 或表单体里取 token 字段；读不出来一律当空串。"""
+        try:
+            if request.content_type == "application/json":
+                body = await request.json()
+                if isinstance(body, dict):
+                    return str(body.get("token", ""))
+                return ""
+        except Exception:
+            return ""
+        try:
+            data = await request.post()
+            return str(data.get("token", ""))
+        except Exception:
+            return ""
+
+    def _unauthorized_response(self, request: web.Request) -> web.Response:
+        logger.warning("[AdminAction] 鉴权失败：缺少或错误的 admin token，已拒绝写操作")
+        if (
+            "application/json" in request.headers.get("Accept", "")
+            or request.content_type == "application/json"
+        ):
+            return web.json_response(
+                {"status": "error", "error": "未授权：缺少或错误的 admin token"},
+                status=403,
+            )
+        content = """
+        <div class="card">
+          <h3 style="color:var(--cinnabar);">未授权</h3>
+          <p>管理写操作需要正确的 admin token。请在请求头携带 <code>X-Admin-Token</code>，
+          或在表单里附带 <code>token</code> 字段。</p>
+          <p><a href="/admin">返回管理面板</a></p>
+        </div>
+        """
+        return web.Response(
+            text=html_shell("未授权", "/admin", content),
+            content_type="text/html",
+            status=403,
+        )
 
     # ==========================================
     # 1. / 总览 (Overview)
@@ -767,6 +848,11 @@ class AdminServer:
     # ==========================================
     async def handle_admin(self, request: web.Request) -> web.Response:
         last_backup = get_last_backup_time(self.backup_dir) or "暂无备份"
+        # token 为空时 token_field 也是空串，页面 HTML 与改动前逐字节一致。
+        token_field = ""
+        if self.config.token:
+            q_token = html.escape(request.query.get("token", ""))
+            token_field = f'<input type="hidden" name="token" value="{q_token}">'
         content = f"""
         <div class="card">
           <h2>管理操作控制台</h2>
@@ -778,7 +864,7 @@ class AdminServer:
             <h3>1. 立即备份数据库</h3>
             <p style="font-size:13px; color:var(--ink-soft);">立即对 <code>{html.escape(self.db_path)}</code> 进行在线备份，生成快照并覆盖 <code>latest.db</code>（保留最新 14 份）。</p>
             <p style="font-size:13px; margin: 12px 0;"><strong>上次备份时间：</strong> <span class="font-num" style="color:var(--celadon);">{html.escape(str(last_backup))}</span></p>
-            <form action="/admin/backup" method="post" onsubmit="return confirm('确定立即备份数据库吗？');">
+            <form action="/admin/backup" method="post" onsubmit="return confirm('确定立即备份数据库吗？');">{token_field}
               <button type="submit" class="btn-action" style="background: var(--celadon); color: #fff;">立即备份</button>
             </form>
           </div>
@@ -787,7 +873,7 @@ class AdminServer:
             <h3>2. 重启伴侣机器人</h3>
             <p style="font-size:13px; color:var(--ink-soft);">用于代码更新或修改配置后重新加载。发出重启指令后进程将在 5 秒后退出，由 systemd 自动拉起。</p>
             <p style="font-size:13px; color:var(--ink-faint); margin: 12px 0;">重启期间静默重启，不打扰机主。</p>
-            <form action="/admin/restart" method="post" onsubmit="return confirm('确定重启机器人服务吗？服务将在 5 秒后退出并由 systemd 自动重新拉起。');">
+            <form action="/admin/restart" method="post" onsubmit="return confirm('确定重启机器人服务吗？服务将在 5 秒后退出并由 systemd 自动重新拉起。');">{token_field}
               <button type="submit" class="btn-action" style="background: var(--gold); color: #fff;">重启服务</button>
             </form>
           </div>
@@ -795,7 +881,7 @@ class AdminServer:
           <div class="card" style="border: 1px solid var(--cinnabar);">
             <h3 style="color:var(--cinnabar);">3. 重置关系数据 (高危)</h3>
             <p style="font-size:13px; color:var(--ink-soft);">清空好感度、心情 PAD、对话历史、语义事实与日记。执行前会自动创建快照备份，表情包与计费明细完整保留。</p>
-            <form action="/admin/reset" method="post" onsubmit="return confirm('警告：此操作将清空所有好感与记忆！确定要重置吗？');">
+            <form action="/admin/reset" method="post" onsubmit="return confirm('警告：此操作将清空所有好感与记忆！确定要重置吗？');">{token_field}
               <div style="margin: 12px 0;">
                 <label style="font-size:13px; color:var(--cinnabar); display:block; margin-bottom:6px;">输入大写 <code>YES</code> 确认执行：</label>
                 <input type="text" name="confirm" placeholder="YES" required style="padding: 6px 10px; background: var(--bg); border: 1px solid var(--cinnabar); color: var(--ink); border-radius: 4px; width: 120px; font-family: monospace;">
@@ -808,6 +894,8 @@ class AdminServer:
         return web.Response(text=html_shell("管理控制台", "/admin", content), content_type="text/html")
 
     async def handle_admin_backup(self, request: web.Request) -> web.Response:
+        if not await self._write_authorized(request):
+            return self._unauthorized_response(request)
         try:
             backup_path = run_daily_backup(self.db_path, self.backup_dir)
             logger.warning(f"[AdminAction] 立即备份成功: {backup_path}")
@@ -836,6 +924,8 @@ class AdminServer:
             return web.Response(text=html_shell("备份失败", "/admin", content), content_type="text/html", status=500)
 
     async def handle_admin_restart(self, request: web.Request) -> web.Response:
+        if not await self._write_authorized(request):
+            return self._unauthorized_response(request)
         logger.warning("[AdminAction] 收到重启服务请求，5 秒后退出进程由 systemd 自动拉起")
 
         async def _delayed_restart() -> None:
@@ -858,6 +948,8 @@ class AdminServer:
         return web.Response(text=html_shell("重启中", "/admin", content), content_type="text/html")
 
     async def handle_admin_reset(self, request: web.Request) -> web.Response:
+        if not await self._write_authorized(request):
+            return self._unauthorized_response(request)
         confirm_val = ""
         if request.content_type == "application/json":
             try:

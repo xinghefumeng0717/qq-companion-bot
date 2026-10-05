@@ -309,6 +309,7 @@ class TTSConfig:
 class AdminConfig:
     host: str = "127.0.0.1"
     port: int = 8080
+    token: str = ""      # 管理页写操作鉴权令牌；空 = 仅 localhost 信任模式（向后兼容）
 
 
 @dataclass
@@ -489,6 +490,7 @@ class Config:
         admin = AdminConfig(
             host=str(admin_data.get("host", "127.0.0.1")),
             port=int(admin_data.get("port", 8080)),
+            token=str(admin_data.get("token", "")),
         )
 
         return cls(

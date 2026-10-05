@@ -119,3 +119,9 @@ max_chars = 90                     # 单条字数上限（≈30 秒；NapCat 超
 [admin]
 host = "127.0.0.1"
 port = 8080
+# 管理页写操作（/admin/backup、/admin/restart、/admin/reset）的鉴权令牌。
+# 留空 = 仅 localhost 信任模式（默认现状：只有本机/SSH 隧道能访问，不额外校验）。
+# ⚠ 若把 host 改成非回环地址（如 0.0.0.0、内网 IP），必须先在这里设一个 token：
+#   届时所有写操作都要带请求头 X-Admin-Token 或表单/JSON 字段 token，否则一律 403。
+#   浏览器里可访问 http://<host>:<port>/admin?token=你的token 让表单自动带上。
+token = ""
