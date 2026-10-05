@@ -13,6 +13,7 @@ import math
 import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 from aiohttp import web
 
 from companion.affection import AffectionEngine, STAGE_THRESHOLDS
@@ -41,25 +42,29 @@ from companion.admin_render import (
     html_shell,
 )
 
-# 管理页写操作鉴权（外部评审）：token 为空时保持 localhost 信任模式，
-# 行为与旧版逐字节一致；token 非空时所有写操作必须携带匹配的 token。
+# 管理页鉴权（外部评审）：token 为空时保持 localhost 信任模式，行为与旧版逐字节一致；
+# token 非空时，**写操作**必须携带匹配的 token（请求头 X-Admin-Token 或表单/JSON 字段），
+# **读页面**（9 条 GET 路由）同样要求 token（URL query ?token= 或同一个请求头）——
+# 读侧泄漏的是记忆、日志、计费与关系状态，把 host 绑到非回环时不能只挡写不挡读。
 ADMIN_TOKEN_HEADER = "X-Admin-Token"
+ADMIN_TOKEN_QUERY = "token"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
 def warn_if_admin_exposed_without_token(config: AdminConfig) -> None:
     """host 绑到非回环地址却没设 token 时，打一条醒目的"裸奔"警告。
 
-    写操作（/admin/backup、/admin/restart、/admin/reset）一旦离开 localhost，
-    confirm=YES 这类前端校验完全挡不住直接 POST，必须有 token 兜底。
+    token 为空 = 完全信任同网段：写操作（/admin/reset、/admin/restart、/admin/backup）
+    一个 POST 就能打掉服务，读页面（/、/memory、/debug、/costs、/logs 等）会把记忆、
+    日志与计费摊开给人看——confirm=YES 这类前端校验完全挡不住直接请求。
     """
     if config.token:
         return
     if config.host not in _LOOPBACK_HOSTS:
         logger.warning(
             "[Admin] ⚠ 安全警告：管理页 host=%s 已绑定到非回环地址，但 [admin].token 为空——"
-            "/admin/reset、/admin/restart、/admin/backup 等写操作将对同网段完全裸奔。"
-            "请先在 config.toml 的 [admin] 段设好 token 再对外开放。",
+            "/admin/reset、/admin/restart、/admin/backup 等写操作与 /memory、/logs、/costs "
+            "等读页面对同网段完全裸奔。请先在 config.toml 的 [admin] 段设好 token 再对外开放。",
             config.host,
         )
 
@@ -109,9 +114,9 @@ class AdminServer:
 
     def _current_activity(self, now_dt: datetime) -> str:
         """看板"她此刻"的活动文案：节假日段长与聊天主链路同一数据源
-        （assembler.get_holidays）。长假期间她回绍兴老家，看板不许显示
-        "在学校上课"（生产实测 2026-10-05 国庆穿帮：聊天说对了绍兴，
-        看板却在教学区上专业必修）。"""
+        （assembler.get_holidays）。长假期间她不在学校，看板不许显示
+        "在学校上课"（生产实测 2026-10-05 国庆穿帮：聊天主链路已按长假口径，
+        看板却在显示在校作息）。"""
         span = holiday_span(now_dt.strftime("%Y-%m-%d"), self.assembler.get_holidays())
         return self.persona.get_current_activity(
             now_dt.hour, now_dt.weekday(), holiday_span=span
@@ -185,6 +190,56 @@ class AdminServer:
         except Exception:
             return ""
 
+    # ==========================================
+    # 读页面鉴权（GET）
+    # ==========================================
+    def _read_authorized(self, request: web.Request) -> bool:
+        """读页面鉴权。
+
+        token 为空 = 仅 localhost 信任模式，直接放行（与改动前逐字节一致）；
+        token 非空时，要求 URL query ?token= 或请求头 X-Admin-Token 与之相等。
+        query 优先于请求头：浏览器地址栏点链接只能带 query（这也是页面内链接
+        必须把 token 带上的原因，见 _token_query / _link）。
+        """
+        expected = self.config.token
+        if not expected:
+            return True
+        provided = request.query.get(ADMIN_TOKEN_QUERY, "") or request.headers.get(
+            ADMIN_TOKEN_HEADER, ""
+        )
+        return provided == expected
+
+    def _token_query(self) -> str:
+        """"?token=xxx"（token 为空时是空串，此时页面输出与旧版逐字节一致）。"""
+        if not self.config.token:
+            return ""
+        return f"?{ADMIN_TOKEN_QUERY}={quote(self.config.token, safe='')}"
+
+    def _link(self, path: str) -> str:
+        """页面内链接：带上 token，保证点一下不会掉线。token 为空时原样返回。"""
+        return f"{path}{self._token_query()}"
+
+    def _read_forbidden_response(self, request: web.Request) -> web.Response:
+        """读页面鉴权失败：不回显 token，不泄漏任何页面内容。"""
+        logger.warning("[AdminPage] 鉴权失败：缺少或错误的 admin token，已拒绝读取仪表盘页面")
+        if "application/json" in request.headers.get("Accept", ""):
+            return web.json_response(
+                {"status": "error", "error": "未授权：缺少或错误的 admin token"},
+                status=403,
+            )
+        content = """
+        <div class="card">
+          <h3 style="color:var(--cinnabar);">未授权</h3>
+          <p>读取仪表盘页面需要正确的 admin token。请在 URL 上带 <code>?token=</code>，
+          或在请求头携带 <code>X-Admin-Token</code>。</p>
+        </div>
+        """
+        return web.Response(
+            text=html_shell("未授权", "", content),
+            content_type="text/html",
+            status=403,
+        )
+
     def _unauthorized_response(self, request: web.Request) -> web.Response:
         logger.warning("[AdminAction] 鉴权失败：缺少或错误的 admin token，已拒绝写操作")
         if (
@@ -213,6 +268,8 @@ class AdminServer:
     # 1. / 总览 (Overview)
     # ==========================================
     async def handle_overview(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         aff_state = await self.affection.get_state()
         dims = aff_state.get("dims", {})
         composite = float(aff_state.get("composite", 30.0))
@@ -246,7 +303,7 @@ class AdminServer:
         date_str = f"{month_cn}{day_cn}，{weekday_cn}。"
 
         # 节假日段长与聊天主链路同一数据源（assembler.get_holidays）——
-        # 长假期间她回绍兴老家，看板不许显示"在学校上课"（生产实测 10-05 国庆穿帮）
+        # 长假期间她不在学校，看板不许显示"在学校上课"（生产实测 10-05 国庆穿帮）
         activity = self._current_activity(now_dt)
         if activity.startswith("正在"):
             act_phrase = activity
@@ -484,12 +541,17 @@ class AdminServer:
           </div>
         </div>
         """
-        return web.Response(text=html_shell("总览", "/", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("总览", "/", content, self._token_query()),
+            content_type="text/html",
+        )
 
     # ==========================================
     # 2. /memory 记忆 (手账时间轴)
     # ==========================================
     async def handle_memory(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         rows = await self.db.fetchall(
             """
             SELECT id, content, importance, sentiment, recall_count, created_at, last_recall_at
@@ -582,12 +644,17 @@ class AdminServer:
           </table>
         </div>
         """
-        return web.Response(text=html_shell("记忆系统", "/memory", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("记忆系统", "/memory", content, self._token_query()),
+            content_type="text/html",
+        )
 
     # ==========================================
     # 3. /debug 调试
     # ==========================================
     async def handle_debug(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         system_prompt = self.assembler.last_assembled_prompt or "（尚未组装过提示词）"
 
         observer_blocks = []
@@ -644,12 +711,17 @@ class AdminServer:
           {"".join(observer_blocks)}
         </div>
         """
-        return web.Response(text=html_shell("调试信息", "/debug", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("调试信息", "/debug", content, self._token_query()),
+            content_type="text/html",
+        )
 
     # ==========================================
     # 4. /costs 计费
     # ==========================================
     async def handle_costs(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         total_row = await self.db.fetchone(
             "SELECT COUNT(*) as calls, SUM(cost_estimate) as total_cost, SUM(prompt_tokens) as p_tokens, SUM(completion_tokens) as c_tokens FROM llm_calls"
         )
@@ -759,19 +831,24 @@ class AdminServer:
           </table>
         </div>
         """
-        return web.Response(text=html_shell("计费统计", "/costs", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("计费统计", "/costs", content, self._token_query()),
+            content_type="text/html",
+        )
 
     # ==========================================
     # 5. /stickers 表情包
     # ==========================================
     async def handle_stickers(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         self.stickers.load_index()
         items = []
         for name, data in self.stickers._index.items():
             desc = data.get("desc", "")
             items.append(
                 f"""<div class="sticker-item">
-                  <img src="/stickers/img/{html.escape(name)}" class="sticker-img" alt="{html.escape(name)}">
+                  <img src="{self._link(f'/stickers/img/{html.escape(name)}')}" class="sticker-img" alt="{html.escape(name)}">
                   <div style="font-weight:600; font-size:13px; margin-top:6px; color:var(--ink);">{html.escape(name)}</div>
                   <div style="color:var(--ink-soft); font-size:12px; margin-top:2px;">{html.escape(desc)}</div>
                 </div>"""
@@ -783,9 +860,14 @@ class AdminServer:
           <div class="sticker-grid">{"".join(items) if items else "<p style='color:var(--ink-faint);'>暂无表情包</p>"}</div>
         </div>
         """
-        return web.Response(text=html_shell("表情包库", "/stickers", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("表情包库", "/stickers", content, self._token_query()),
+            content_type="text/html",
+        )
 
     async def handle_sticker_image(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         name = request.match_info.get("name", "")
         if name in self.stickers._index:
             rel_file = self.stickers._index[name].get("file", "")
@@ -798,6 +880,8 @@ class AdminServer:
     # 6. /logs 日志 (纸面小票风日志窗)
     # ==========================================
     async def handle_logs(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         log_path = "data/logs/bot.log"
         if os.path.exists(log_path):
             try:
@@ -815,12 +899,21 @@ class AdminServer:
           <pre class="log-window">{html.escape(log_content)}</pre>
         </div>
         """
-        return web.Response(text=html_shell("运行日志", "/logs", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("运行日志", "/logs", content, self._token_query()),
+            content_type="text/html",
+        )
 
     # ==========================================
     # 7. /api/status 状态 API (JSON)
     # ==========================================
     async def handle_api_status(self, request: web.Request) -> web.Response:
+        # 读页面鉴权一并覆盖 /api/status：它不只是"活着没"的健康检查，
+        # 还带着 stage_name / composite / today_cost——关系状态与开销。
+        # 统一规则更好审计，也让"token 非空 = 什么都读不到"这句话成立；
+        # 监控脚本改用 ?token= 或 X-Admin-Token 即可（token 为空时行为不变）。
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         aff_state = await self.affection.get_state()
         composite = float(aff_state.get("composite", 30.0))
         stage_idx = int(aff_state.get("stage", 0))
@@ -847,12 +940,17 @@ class AdminServer:
     # 8. /admin 管理控制台
     # ==========================================
     async def handle_admin(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
         last_backup = get_last_backup_time(self.backup_dir) or "暂无备份"
         # token 为空时 token_field 也是空串，页面 HTML 与改动前逐字节一致。
+        # token 非空时回填配置里的 token（而不是请求里带的那个）：表单是 POST，
+        # 靠这个隐藏域过 _write_authorized；用请求 token 会让"走请求头进来的人"点表单就 403。
         token_field = ""
         if self.config.token:
-            q_token = html.escape(request.query.get("token", ""))
-            token_field = f'<input type="hidden" name="token" value="{q_token}">'
+            token_field = (
+                f'<input type="hidden" name="token" value="{html.escape(self.config.token)}">'
+            )
         content = f"""
         <div class="card">
           <h2>管理操作控制台</h2>
@@ -891,7 +989,10 @@ class AdminServer:
           </div>
         </div>
         """
-        return web.Response(text=html_shell("管理控制台", "/admin", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("管理控制台", "/admin", content, self._token_query()),
+            content_type="text/html",
+        )
 
     async def handle_admin_backup(self, request: web.Request) -> web.Response:
         if not await self._write_authorized(request):
@@ -906,10 +1007,13 @@ class AdminServer:
               <h3 style="color:var(--celadon);">备份成功</h3>
               <p>备份文件已生成：<code>{html.escape(backup_path)}</code></p>
               <p>已同步更新最新备份：<code>{html.escape(os.path.join(self.backup_dir, 'latest.db'))}</code></p>
-              <p><a href="/admin">返回管理面板</a> | <a href="/">返回总览</a></p>
+              <p><a href="{self._link('/admin')}">返回管理面板</a> | <a href="{self._link('/')}">返回总览</a></p>
             </div>
             """
-            return web.Response(text=html_shell("备份结果", "/admin", content), content_type="text/html")
+            return web.Response(
+                text=html_shell("备份结果", "/admin", content, self._token_query()),
+                content_type="text/html",
+            )
         except Exception as e:
             logger.warning(f"[AdminAction] 立即备份失败: {e}")
             if "application/json" in request.headers.get("Accept", ""):
@@ -918,10 +1022,14 @@ class AdminServer:
             <div class="card">
               <h3 style="color:var(--cinnabar);">备份失败</h3>
               <p>异常信息：{html.escape(str(e))}</p>
-              <p><a href="/admin">返回管理面板</a></p>
+              <p><a href="{self._link('/admin')}">返回管理面板</a></p>
             </div>
             """
-            return web.Response(text=html_shell("备份失败", "/admin", content), content_type="text/html", status=500)
+            return web.Response(
+                text=html_shell("备份失败", "/admin", content, self._token_query()),
+                content_type="text/html",
+                status=500,
+            )
 
     async def handle_admin_restart(self, request: web.Request) -> web.Response:
         if not await self._write_authorized(request):
@@ -938,14 +1046,17 @@ class AdminServer:
         if "application/json" in request.headers.get("Accept", ""):
             return web.json_response({"status": "ok", "message": "已收到，5 秒后重启"})
 
-        content = """
+        content = f"""
         <div class="card">
           <h3 style="color:var(--gold);">已收到重启请求</h3>
           <p>机器人进程将在 <strong>5 秒后</strong> 退出，并由 systemd 守护进程 (Restart=always) 自动拉起。</p>
-          <p>请等待约 10 秒后刷新总览页面：<a href="/">返回总览</a></p>
+          <p>请等待约 10 秒后刷新总览页面：<a href="{self._link('/')}">返回总览</a></p>
         </div>
         """
-        return web.Response(text=html_shell("重启中", "/admin", content), content_type="text/html")
+        return web.Response(
+            text=html_shell("重启中", "/admin", content, self._token_query()),
+            content_type="text/html",
+        )
 
     async def handle_admin_reset(self, request: web.Request) -> web.Response:
         if not await self._write_authorized(request):
@@ -968,14 +1079,18 @@ class AdminServer:
             logger.warning(f"[AdminAction] 重置数据请求拒绝: 缺少 confirm=YES (实际为 '{confirm_val}')")
             if "application/json" in request.headers.get("Accept", "") or request.content_type == "application/json":
                 return web.json_response({"status": "error", "error": "缺少 confirm=YES，拒绝重置"}, status=400)
-            content = """
+            content = f"""
             <div class="card">
               <h3 style="color:var(--cinnabar);">重置已拒绝</h3>
               <p>必须准确输入大写 <code>YES</code> 方可重置数据。数据库未被更改。</p>
-              <p><a href="/admin">返回管理面板</a></p>
+              <p><a href="{self._link('/admin')}">返回管理面板</a></p>
             </div>
             """
-            return web.Response(text=html_shell("重置被拒绝", "/admin", content), content_type="text/html", status=400)
+            return web.Response(
+                text=html_shell("重置被拒绝", "/admin", content, self._token_query()),
+                content_type="text/html",
+                status=400,
+            )
 
         try:
             res = reset_database(
@@ -994,10 +1109,13 @@ class AdminServer:
               <p>各表清除详情：</p>
               <ul>{counts_html}</ul>
               <p>表情包资产 (stickers) 与计费明细 (llm_calls) 已按策略完整保留。</p>
-              <p><a href="/">查看总览</a> | <a href="/admin">返回管理面板</a></p>
+              <p><a href="{self._link('/')}">查看总览</a> | <a href="{self._link('/admin')}">返回管理面板</a></p>
             </div>
             """
-            return web.Response(text=html_shell("重置完成", "/admin", content), content_type="text/html")
+            return web.Response(
+                text=html_shell("重置完成", "/admin", content, self._token_query()),
+                content_type="text/html",
+            )
         except Exception as e:
             logger.warning(f"[AdminAction] 数据重置执行异常: {e}")
             if "application/json" in request.headers.get("Accept", "") or request.content_type == "application/json":
@@ -1006,7 +1124,11 @@ class AdminServer:
             <div class="card">
               <h3 style="color:var(--cinnabar);">重置执行失败</h3>
               <p>异常信息：{html.escape(str(e))}</p>
-              <p><a href="/admin">返回管理面板</a></p>
+              <p><a href="{self._link('/admin')}">返回管理面板</a></p>
             </div>
             """
-            return web.Response(text=html_shell("重置失败", "/admin", content), content_type="text/html", status=500)
+            return web.Response(
+                text=html_shell("重置失败", "/admin", content, self._token_query()),
+                content_type="text/html",
+                status=500,
+            )

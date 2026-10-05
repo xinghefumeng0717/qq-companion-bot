@@ -18,52 +18,75 @@ logger = logging.getLogger(__name__)
 HOLIDAY_WEEKDAY = 5
 
 # 连续假期段长达到该值即视为"长假"（FIXES14 任务1 / 生产证据 E10）。
-# 语义来源是 V3 角色卡 core_description 的锚点："国庆、寒暑假长假她回绍兴老家，
-# 长假期间银泉、临湖、琴房等校园场景一律不出现"。反过来，3 天以内的小长假她留校，
-# 校园场景合理，继续走周六作息即可。故阈值取 4 天。
+# 3 天以内的小长假她留校，校园场景合理，继续走周六作息；长假（国庆/寒暑假级）
+# 她不在学校，校园场景一律不出现。故阈值取 4 天。
 LONG_HOLIDAY_MIN_SPAN = 4
 
-# 长假当天的固定作息文案（与 V3 卡锚点逐字一致）。
-# 长假**不匹配任何 daily_routine**，直接返回这句——按周六作息塞"在琴房练琴"会与角色卡打架。
-LONG_HOLIDAY_ACTIVITY = "放长假中，回绍兴老家陪父母，不在学校"
+# 长假当天的活动文案：**角色卡字段 long_holiday_activity 的兜底默认值**（不带任何具体学校名）。
+# 卡里填了自己的长假口径就用卡里那句；卡里没填时用这句，任何角色都能用。
+# 长假**不匹配任何 daily_routine**：卡里的作息写的是在校生活，长假套上去会自相矛盾。
+DEFAULT_LONG_HOLIDAY_ACTIVITY = "放长假中，回老家，不在学校"
 
 # 作息表覆盖不到时的回退文案：她"在度过属于自己的时间"，人是在闲的（FIXES15 忙/闲判定）
 FREE_ACTIVITY_FALLBACK = "在度过属于自己的时间"
 
+# calendar_anchors 成员必须写成 MM-DD；写成 YYYY-MM-DD 之类会永远查不中（静默的死锚点）
+_MMDD_RE = re.compile(r"^\d{2}-\d{2}$")
 
-# FIXES16 生活主线生成器的学期节奏锚点：示例大学校历硬事实，来源 docs/ZJU_LIFE_MATERIALS.md 第一节
-# （2025-2026 学年校历；人设 2024 级，该学年正好读大二）。每项 (起, 止, 一句话锚点)，
-# 止<起 表示跨年（12-31~01-06）。全年无缺口，生成主线时注入"当前锚点 + 下一个锚点"，
-# 让她编出来的事踩在真实校历上，而不是凭空冒出个"下周答辩"。
-# 口径说明：只取与"她本人"有关的节点（新生报到军训与她无关，未收录）。
-# 年份漂移风险：这里是 2025-2026 的月日锚点，跨年后逐年会与实际校历有几天出入，
-# 属"氛围级"误差（她不会说错考试是几号，只是可能差两三天），不在本轮做逐年会推。
-ZJU_CALENDAR_ANCHORS: List[Tuple[str, str, str]] = [
-    ("09-12", "09-15", "老生报到注册（9-12），秋学期正式上课（9-15），课外锻炼打卡也是这天开始"),
-    ("09-16", "10-07", "秋学期刚开课没几周，读书报告和小组 pre 陆续压上来，DDL 总堆在周末"),
-    ("10-08", "10-23", "秋学期上半段，课程论文和 pre 交叉赶工"),
-    ("10-24", "10-26", "秋季校运动会，10-24 当天停课"),
-    ("10-27", "11-07", "秋学期最后一波课，下周就进考试周了"),
-    ("11-08", "11-09", "秋学期考试第一块（两天）"),
-    ("11-10", "11-14", "冬学期紧跟着开学，中间几乎没有喘息"),
-    ("11-15", "11-16", "秋学期考试第二块（两天）"),
-    ("11-17", "12-12", "冬学期上半段，体测从 11 月中开始要提前预约"),
-    ("12-13", "12-30", "四六级笔试（12-13）"),
-    ("12-31", "01-06", "示例大学学生节（12-31），元旦前后校园里都是人"),
-    ("01-07", "01-16", "冬学期期末考周，全校停课考试"),
-    ("01-17", "02-26", "放寒假（1-17 起），2-17 春节"),
-    ("02-27", "03-01", "学生报到注册（2-27）"),
-    ("03-02", "04-17", "春学期开课，课程和 pre 重新开始"),
-    ("04-18", "04-19", "春季校运动会"),
-    ("04-20", "04-24", "春学期上半段的尾巴"),
-    ("04-25", "04-26", "春夏学期考试第一块（两天）"),
-    ("04-27", "05-08", "夏学期开课（4-27）"),
-    ("05-09", "05-10", "春夏学期考试第二块（两天）"),
-    ("05-11", "05-20", "夏学期上半段"),
-    ("05-21", "06-24", "校庆日（5-21），夏学期下半段"),
-    ("06-25", "07-04", "夏学期期末考，6-25 起停课考试"),
-    ("07-05", "09-11", "放暑假（7-05 起），她回绍兴老家不在学校；老生 9-12 才报到注册"),
-]
+
+def parse_calendar_anchors(raw: Any) -> List[Tuple[str, str, str]]:
+    """解析角色卡 calendar_anchors 字段：[["起", "止", "一句话锚点"], ...]。
+
+    锚点语义（FIXES16 生活主线生成器）：每项 (起, 止, 一句话)，止 < 起 表示跨年区间
+    （如 12-31~01-06）；生成主线时注入"当前锚点 + 下一个锚点"，让她编出来的事踩在
+    真实校历/日历上。**锚点内容属于角色卡，代码只负责结构校验**。
+
+    畸形成员（不是三元组、字段不是字符串、不是 MM-DD、文本为空）逐条跳过并告警：
+    某一条写坏了不该让整张卡加载失败，也不该静默变成永不命中。
+    """
+    out: List[Tuple[str, str, str]] = []
+    if raw is None:
+        return out
+    if not isinstance(raw, (list, tuple)):
+        logger.warning(f"[Persona] calendar_anchors 不是列表，按'无锚点'处理: {type(raw).__name__}")
+        return out
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            logger.warning(f"[Persona] calendar_anchors 成员不是三元组，已跳过: {item!r}")
+            continue
+        start, end, note = item
+        if not all(isinstance(x, str) for x in (start, end, note)):
+            logger.warning(f"[Persona] calendar_anchors 成员含非字符串字段，已跳过: {item!r}")
+            continue
+        if not (_MMDD_RE.match(start) and _MMDD_RE.match(end)) or not note.strip():
+            logger.warning(
+                f"[Persona] calendar_anchors 成员格式不合法（需 MM-DD / MM-DD / 非空文本），已跳过: {item!r}"
+            )
+            continue
+        out.append((start, end, note))
+    return out
+
+
+def parse_life_arc_seed_pool(raw: Any) -> str:
+    """解析角色卡 life_arc_seed_pool 字段：整段字符串，或字符串数组（按行拼接）。
+
+    数组形态只是卡作者写起来方便（JSON 没有多行字符串），落地一律拼成一段文本
+    交给提示词。非字符串成员逐条跳过并告警；整体类型不认识时按空池处理
+    （空池 = 主线生成整条跳过，见 arcs.ensure_arcs）。
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        lines = [x for x in raw if isinstance(x, str)]
+        if len(lines) != len(raw):
+            logger.warning(
+                f"[Persona] life_arc_seed_pool 含 {len(raw) - len(lines)} 条非字符串成员，已跳过"
+            )
+        return "\n".join(lines)
+    logger.warning(f"[Persona] life_arc_seed_pool 类型不认识（{type(raw).__name__}），按空池处理")
+    return ""
 
 
 def _mmdd(date_str: str) -> str:
@@ -86,17 +109,22 @@ def _anchor_contains(start: str, end: str, mmdd: str) -> bool:
     return start <= mmdd <= end
 
 
-def calendar_anchor_note(date_str: str, lookahead: int = 1) -> str:
+def calendar_anchor_note(
+    date_str: str,
+    anchors: Optional[List[Tuple[str, str, str]]],
+    lookahead: int = 1,
+) -> str:
     """取"当前日期所在锚点 + 后面 lookahead 个锚点"的节奏提示文本。
 
-    查不到当前锚点时（日期格式异常）返回空串，调用方据此不注入——
-    节奏锚点是氛围加成，不该因为查不到就让主线生成整条链失败。
+    anchors 由调用方从角色卡取（Persona.calendar_anchors）；空表 = 这张卡没有锚点功能，
+    直接返回空串。查不到当前锚点时（日期格式异常 / 日期不落在任何区间）同样返回空串，
+    调用方据此不注入——节奏锚点是氛围加成，不该因为查不到就让主线生成整条链失败。
     """
     mmdd = _mmdd(date_str)
-    if not mmdd:
+    if not mmdd or not anchors:
         return ""
 
-    ordered = sorted(ZJU_CALENDAR_ANCHORS, key=lambda a: a[0])
+    ordered = sorted(anchors, key=lambda a: a[0])
     idx = next(
         (i for i, (s, e, _n) in enumerate(ordered) if _anchor_contains(s, e, mmdd)),
         None,
@@ -207,6 +235,13 @@ class Persona:
     habits: List[str]
     stickers_dir: str
     base_dir: str
+    # ---- 以下是角色卡可选字段（卡里没有就用默认值，行为对旧卡 = 功能关掉） ----
+    # 长假（连续假期段长 >= LONG_HOLIDAY_MIN_SPAN）当天的活动文案；卡里没填用通用默认。
+    long_holiday_activity: str = DEFAULT_LONG_HOLIDAY_ACTIVITY
+    # 生活主线生成器的日历/校历锚点：[[起, 止, 一句话], ...]；空表 = 无锚点功能。
+    calendar_anchors: List[Tuple[str, str, str]] = field(default_factory=list)
+    # 生活主线生成器的取材范围（整段文本）；空串 = 无素材，主线生成整条跳过（见 arcs.py）。
+    life_arc_seed_pool: str = ""
 
     @classmethod
     def load(cls, char_dir: str) -> Persona:
@@ -263,6 +298,13 @@ class Persona:
         habits = list(data.get("habits", []))
         stickers_dir = str(data.get("stickers_dir", "stickers"))
 
+        # 可选字段：卡里没填就落到"功能关掉"的默认值（旧卡零改动、行为不炸）。
+        long_holiday_activity = str(
+            data.get("long_holiday_activity", "") or DEFAULT_LONG_HOLIDAY_ACTIVITY
+        ).strip() or DEFAULT_LONG_HOLIDAY_ACTIVITY
+        calendar_anchors = parse_calendar_anchors(data.get("calendar_anchors"))
+        life_arc_seed_pool = parse_life_arc_seed_pool(data.get("life_arc_seed_pool"))
+
         initial_dims = {
             "warmth": float(data.get("initial_dims", {}).get("warmth", 40.0)),
             "trust": float(data.get("initial_dims", {}).get("trust", 50.0)),
@@ -284,7 +326,14 @@ class Persona:
             habits=habits,
             stickers_dir=stickers_dir,
             base_dir=char_dir,
+            long_holiday_activity=long_holiday_activity,
+            calendar_anchors=calendar_anchors,
+            life_arc_seed_pool=life_arc_seed_pool,
         )
+
+    def calendar_anchor_note(self, date_str: str, lookahead: int = 1) -> str:
+        """本卡 calendar_anchors 的节奏提示（卡里无锚点时返回空串）。"""
+        return calendar_anchor_note(date_str, self.calendar_anchors, lookahead)
 
     def get_stage(self, stage_idx: int) -> Stage:
         """获取对应关系阶段（0~9），超出范围 clamp"""
@@ -305,7 +354,8 @@ class Persona:
           - 1~3（短假，3 天以内）：先按周六作息匹配——假期不上课，节奏≈周末，留校的
             校园场景合理；周六作息也覆盖不到时再回落到 weekday 的现有逻辑（FIXES11 行为，保持不变）；
           - >=4（长假，国庆/春节/寒暑假级）：**不匹配任何 daily_routine**，直接返回
-            LONG_HOLIDAY_ACTIVITY（FIXES14 任务1 / 证据 E10）。
+            角色卡的 long_holiday_activity（卡里没填时用 DEFAULT_LONG_HOLIDAY_ACTIVITY）
+            （FIXES14 任务1 / 证据 E10）。
 
         is_holiday 是 FIXES11 旧调用方式的兼容垫片：True 等价 holiday_span=1（短假），
         已有调用方（benchmark_v4.py）与既有测试不需要改，行为与改动前逐格一致。
@@ -339,7 +389,7 @@ class Persona:
             span = 1
 
         if span >= LONG_HOLIDAY_MIN_SPAN:
-            return LONG_HOLIDAY_ACTIVITY, False
+            return self.long_holiday_activity, False
 
         if span > 0:
             for item in self.daily_routine:

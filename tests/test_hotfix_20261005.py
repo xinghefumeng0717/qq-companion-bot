@@ -6,8 +6,8 @@
    修复双管齐下：提示词明说"（语音消息）是存档格式不许自己写" +
    replier 兜底把行首（语音消息）翻译回 [voice:] 标记（语音可用）或剥前缀留正文。
 2. **看板"她此刻"没接节假日信号**：admin 调 get_current_activity 不传
-   holiday_span，国庆第五天看板显示"在教学区上专业必修"（聊天主链路是对的，
-   她答"绍兴"）。修复：看板与主链路共用 assembler.get_holidays 同一数据源。
+   holiday_span，长假期间看板显示的是在校作息（聊天主链路是对的，
+   卡里的长假口径已经生效）。修复：看板与主链路共用 assembler.get_holidays 同一数据源。
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ if os.path.join(_REPO_ROOT, "tests") not in sys.path:
 import companion.main as companion_main
 from companion.admin import AdminServer
 from companion.config import ReplyConfig
-from companion.persona import LONG_HOLIDAY_ACTIVITY, Persona
+from companion.persona import Persona
 from companion.prompts import VOICE_USAGE_RULES
 from companion.replier import Replier, rewrite_voice_record_prefix
 from helpers import card_path
@@ -108,19 +108,19 @@ class TestAdminActivityHoliday(unittest.TestCase):
         dash.assembler = _StubAssembler(holidays)
         return dash
 
-    def test_长假显示回绍兴而不是在上课(self):
+    def test_长假显示卡里的长假文案而不是在校作息(self):
         today = datetime.now()
         holidays = [
             (today + timedelta(days=d)).strftime("%Y-%m-%d") for d in range(-2, 3)
         ]
         dash = self._dashboard(holidays)
         activity = dash._current_activity(today)
-        self.assertEqual(activity, LONG_HOLIDAY_ACTIVITY)
+        self.assertEqual(activity, dash.persona.long_holiday_activity)
 
     def test_非节假日照旧走作息表(self):
         dash = self._dashboard([])
         activity = dash._current_activity(datetime.now())
-        self.assertNotEqual(activity, LONG_HOLIDAY_ACTIVITY)
+        self.assertNotEqual(activity, dash.persona.long_holiday_activity)
         self.assertTrue(activity)
 
     def test_与主链路同一数据源(self):

@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock
 from companion.db import parse_dt
 from companion.observer import FACT_DICT_KEYS, Observer
 from companion.persona import (
-    LONG_HOLIDAY_ACTIVITY,
+    DEFAULT_LONG_HOLIDAY_ACTIVITY,
     LONG_HOLIDAY_MIN_SPAN,
     ChatStyle,
     Persona,
@@ -37,7 +37,15 @@ from companion.prompts import (
     holiday_prompt_note,
 )
 from companion.config import ProactiveConfig, ReplyConfig
-from helpers import card_path, close_db, make_db, make_engine_stack, make_fixture_card, make_mock_gateway
+from helpers import (
+    FIXTURE_LONG_HOLIDAY_ACTIVITY,
+    card_path,
+    close_db,
+    make_db,
+    make_engine_stack,
+    make_fixture_card,
+    make_mock_gateway,
+)
 
 # 校园场景词：来自夹具卡的周六作息（见下方 TestLongHolidayNoCampusRoutine）
 CAMPUS_WORDS = ("银泉", "临湖", "琴房", "玉泉", "校车")
@@ -157,7 +165,7 @@ class TestGetCurrentActivityHolidaySpan(unittest.TestCase):
         for span in (LONG_HOLIDAY_MIN_SPAN, 5, 8):
             self.assertEqual(
                 self.persona.get_current_activity(10, 3, holiday_span=span),
-                LONG_HOLIDAY_ACTIVITY,
+                DEFAULT_LONG_HOLIDAY_ACTIVITY,
                 f"段长 {span} 属长假，必须直接回固定文案",
             )
 
@@ -170,7 +178,9 @@ class TestGetCurrentActivityHolidaySpan(unittest.TestCase):
             ]
         )
         persona = _persona(spy)
-        self.assertEqual(persona.get_current_activity(10, 3, holiday_span=8), LONG_HOLIDAY_ACTIVITY)
+        self.assertEqual(
+            persona.get_current_activity(10, 3, holiday_span=8), DEFAULT_LONG_HOLIDAY_ACTIVITY
+        )
         self.assertEqual(spy.iterations, 0, "长假路径一次都不许遍历作息表")
 
     def test_short_holiday_keeps_saturday_routine(self):
@@ -222,12 +232,14 @@ class TestLongHolidayNoCampusRoutine(unittest.TestCase):
 
     不依赖任何真实角色卡——本类断言的是"作息文案里有校园词"这一结构，
     夹具卡自己提供该结构即可，公开 clone 无需私有卡也能跑到同一条路径。
+    长假文案同样由夹具卡自带的 FIXTURE_LONG_HOLIDAY_ACTIVITY 提供，
+    钉住"长假那句取自卡里、代码里没有卡内容"。
     """
 
     def setUp(self):
         self._card_dir = tempfile.mkdtemp(prefix="qqc_fixture_card_")
         self.addCleanup(shutil.rmtree, self._card_dir, True)
-        make_fixture_card(self._card_dir)
+        make_fixture_card(self._card_dir, long_holiday_activity=FIXTURE_LONG_HOLIDAY_ACTIVITY)
         self.persona = Persona.load(self._card_dir)
 
     def test_short_holiday_would_leak_campus_words(self):
@@ -246,7 +258,7 @@ class TestLongHolidayNoCampusRoutine(unittest.TestCase):
         for hour in range(24):
             for span in (4, 8):
                 activity = self.persona.get_current_activity(hour, 3, holiday_span=span)
-                self.assertEqual(activity, LONG_HOLIDAY_ACTIVITY)
+                self.assertEqual(activity, FIXTURE_LONG_HOLIDAY_ACTIVITY)
                 for word in CAMPUS_WORDS:
                     self.assertNotIn(
                         word, activity, f"长假 {span} 天 {hour} 点泄漏校园词 {word}: {activity}"
@@ -295,6 +307,14 @@ class TestTask1AssemblerAndProactiveLongHoliday(unittest.IsolatedAsyncioTestCase
     async def asyncTearDown(self):
         await close_db(self.db)
 
+    def _long_holiday_text(self) -> str:
+        """长假文案的唯一事实源：当前这张卡自己的 long_holiday_activity。
+
+        本类用 card_path()（所有者本机是私有卡，公开 clone 回落 example 卡），
+        断言一律对着 persona 取值——换卡、卡里改文案都不会牵动这些用例。
+        """
+        return self.stack.persona.long_holiday_activity
+
     def _today(self):
         return datetime.now().strftime("%Y-%m-%d")
 
@@ -322,7 +342,7 @@ class TestTask1AssemblerAndProactiveLongHoliday(unittest.IsolatedAsyncioTestCase
         self.assertNotIn(SHORT_HOLIDAY_PROMPT_NOTE, prompt, "长假不许再注入短假附注")
 
         her_line = self._her_line(prompt)
-        self.assertIn(LONG_HOLIDAY_ACTIVITY, her_line, "【她此刻】必须是长假固定文案")
+        self.assertIn(self._long_holiday_text(), her_line, "【她此刻】必须是卡里的长假文案")
         for word in CAMPUS_WORDS:
             self.assertNotIn(
                 word, her_line, f"【她此刻】泄漏校园作息词 {word}: {her_line}"
@@ -334,13 +354,13 @@ class TestTask1AssemblerAndProactiveLongHoliday(unittest.IsolatedAsyncioTestCase
 
         self.assertIn(SHORT_HOLIDAY_PROMPT_NOTE, self._fact_line(prompt))
         self.assertNotIn(LONG_HOLIDAY_PROMPT_NOTE, prompt)
-        self.assertNotIn(LONG_HOLIDAY_ACTIVITY, prompt, "短假不得套长假文案")
+        self.assertNotIn(self._long_holiday_text(), prompt, "短假不得套长假文案")
 
     async def test_system_prompt_without_holiday_unchanged(self):
         self.assembler._holidays_provider = lambda: []
         prompt = await self.assembler.assemble_system_prompt("在吗")
         self.assertNotIn("法定节假日", prompt)
-        self.assertNotIn(LONG_HOLIDAY_ACTIVITY, prompt)
+        self.assertNotIn(self._long_holiday_text(), prompt)
 
     async def test_proactive_decision_prompt_long_holiday(self):
         await self.db.execute(
@@ -356,14 +376,14 @@ class TestTask1AssemblerAndProactiveLongHoliday(unittest.IsolatedAsyncioTestCase
         decision_prompt = self.gateway.chat.call_args_list[0].kwargs["messages"][-1]["content"]
         self.assertIn(LONG_HOLIDAY_PROMPT_NOTE, decision_prompt, "决策层时间行必须注入长假附注")
         self.assertNotIn(SHORT_HOLIDAY_PROMPT_NOTE, decision_prompt)
-        self.assertIn(LONG_HOLIDAY_ACTIVITY, decision_prompt, "决策层看到的作息必须是长假文案")
+        self.assertIn(self._long_holiday_text(), decision_prompt, "决策层看到的作息必须是卡里的长假文案")
         for word in CAMPUS_WORDS:
             self.assertNotIn(word, decision_prompt, f"决策层泄漏校园词 {word}")
 
     async def test_proactive_topic_material_long_holiday(self):
         self.proactive._holidays_provider = self._long_holidays
         material = await self.proactive._select_topic_material()
-        self.assertIn(LONG_HOLIDAY_ACTIVITY, material)
+        self.assertIn(self._long_holiday_text(), material)
         for word in CAMPUS_WORDS:
             self.assertNotIn(word, material, f"话题切入点泄漏校园词 {word}: {material}")
 

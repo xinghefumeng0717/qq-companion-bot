@@ -36,11 +36,10 @@ from companion.db import (
     parse_dt,
 )
 from companion.gateway import LLMGateway
-from companion.persona import Persona, calendar_anchor_note
+from companion.persona import Persona
 from companion.prompts import (
     LIFE_ARC_GENERATE_PROMPT,
     LIFE_ARC_RESOLUTION_PROMPT,
-    LIFE_ARC_SEED_POOL,
 )
 
 logger = logging.getLogger(__name__)
@@ -201,18 +200,26 @@ class LifeArcManager:
 
     async def _generate_raw(self) -> List[Dict[str, str]]:
         """调 flash 生成 1~2 条主线（不做上限/去重校验，那是调用方的活）。"""
+        # 无素材池 = 无取材范围：调用方（ensure_arcs）会先拦掉，这里再兜一层，
+        # 保证任何调用路径下都不会把"取材只能从这里出"配一个空池子送进模型。
+        seed_pool = (self.persona.life_arc_seed_pool or "").strip()
+        if not seed_pool:
+            logger.info("[Arcs] 角色卡未提供 life_arc_seed_pool，跳过主线生成")
+            return []
+
         now = datetime.now()
         recent = await self._recent_titles()
-        anchor_note = calendar_anchor_note(now.strftime("%Y-%m-%d"), lookahead=1)
+        anchor_note = self.persona.calendar_anchor_note(now.strftime("%Y-%m-%d"), lookahead=1)
         if not anchor_note:
-            # 查不到锚点不是致命的：留空让模型只靠"现在几月"判断，仍比没有强
+            # 查不到锚点（卡里没配锚点 / 当天不在任何区间）不是致命的：
+            # 留空让模型只靠"现在几月"判断，仍比没有强
             anchor_note = "（本条校历锚点缺失，请只按当前月份的一般节奏来定）"
 
         user_prompt = LIFE_ARC_GENERATE_PROMPT.format(
             character_core=self.persona.core_description or "（角色卡未提供）",
             current_date=now.strftime("%Y-%m-%d 星期") + "一二三四五六日"[now.weekday()],
             calendar_note=anchor_note,
-            seed_pool=LIFE_ARC_SEED_POOL,
+            seed_pool=seed_pool,
             recent_titles="\n".join(recent) if recent else "（无）",
             date_min=(now + timedelta(days=KEY_DATE_MIN_DAYS)).strftime("%Y-%m-%d"),
             date_max=(now + timedelta(days=KEY_DATE_MAX_DAYS)).strftime("%Y-%m-%d"),
@@ -263,10 +270,16 @@ class LifeArcManager:
         """补主线到 min_active 条为止。返回本轮实际新增条数。
 
         三个硬闸门（顺序即优先级，宁可少不可滥）：
+        0. 角色卡没有 life_arc_seed_pool（取材范围为空）→ **整条跳过生成**：
+           宁可这张卡没有生活主线，也不让模型凭空编卡里不存在的课程/地点/活动；
         1. 活跃已 ≥ MAX_ACTIVE_ARCS → 本轮生成结果**全部丢弃**（拍板决策 1）
         2. 距上次生成尝试不足 GENERATE_COOLDOWN_MINUTES → 直接跳过（防连烧 API）
         3. 单条 key_date 不在 3~14 天内 / 与近 30 天主线 Jaccard ≥ 0.5 → 丢弃
         """
+        if not (self.persona.life_arc_seed_pool or "").strip():
+            logger.info("[Arcs] 角色卡未提供 life_arc_seed_pool（无取材范围），跳过本轮补线")
+            return 0
+
         try:
             active = await self.count_active()
         except Exception as e:

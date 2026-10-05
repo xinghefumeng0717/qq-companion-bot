@@ -284,12 +284,12 @@ class ProactiveScheduler:
             await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (sup_row["id"],))
             return f"之前想对他说但忍住的话题：{sup_row['content']}"
 
-        # ③ 作息活动 + 当前时间（短假按周六作息留校；长假直接回绍兴老家）
+        # ③ 作息活动 + 当前时间（短假按周六作息留校；长假直接回卡里的长假文案）
         current_activity = self.persona.get_current_activity(
             now_dt.hour, now_dt.weekday(), holiday_span=span
         )
         if current_activity:
-            # 长假只附短假那句会漏掉"不在学校"的关键信息，但那句文案本身已写明回绍兴老家，
+            # 长假只附短假那句会漏掉"不在学校"的关键信息，但那句文案本身已写明不在学校，
             # 叠上去就是同一件事说两遍，所以长假不再附注
             if 0 < span < LONG_HOLIDAY_MIN_SPAN:
                 current_activity += holiday_prompt_note(span)

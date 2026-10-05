@@ -106,6 +106,12 @@ scp -r "/d/qq-companion/characters/qingzi" ubuntu@服务器IP:/opt/qq-companion/
 # 服务器：
 sudo apt update
 
+# 时区（必做，第一条就做）：云服务器默认时区多为 UTC，不改的话
+# 作息表（早八/熄灯）、法定节假日判定、主动消息免打扰时段会整体偏 8 小时
+# ——北京时间凌晨她当傍晚（该静的时候发消息），白天她当清晨。
+sudo timedatectl set-timezone Asia/Shanghai
+timedatectl    # 应显示 Time zone: Asia/Shanghai (CST, +0800)
+
 # Ubuntu 22.04 自带 Python 3.10，本项目需要 3.11+（tomllib），用 deadsnakes 源安装：
 sudo apt install -y software-properties-common
 sudo add-apt-repository -y ppa:deadsnakes/ppa
@@ -116,6 +122,7 @@ sudo apt install -y python3.11 python3.11-venv ffmpeg docker.io
 python3.11 --version    # 应显示 3.11.x
 ffmpeg -version | head -1
 docker --version
+date    # 应显示北京时间（CST）
 ```
 
 ## 第 4 步：Python 环境
@@ -127,9 +134,23 @@ python3.11 -m venv venv
 ./venv/bin/pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 ```
 
-> sherpa-onnx 包较大（含 ONNX 运行时），下载耐心等待。
+> `requirements.txt` 里四个依赖都钉了 `==` 版本（可复现优先：本项目是 7×24 长跑服务，
+> 不能让 pip 静默升到新大版本）。**已经在跑的服务器**若只是想拿某次代码改动，
+> 不必重跑这条命令；只有要顺带升级依赖时才重跑，跑完必须
+> `sudo systemctl restart qq-companion` 并确认日志无异常。
+>
+> sherpa-onnx 包较大（含 ONNX 运行时），下载耐心等待。它只服务语音输入。
 
-## 第 5 步：语音识别模型（SenseVoice，约 200MB）
+## 第 5 步：语音识别模型（SenseVoice，约 200MB，**不会自动下载**）
+
+> **必须手动下载**：代码里没有"首次运行自动下载模型"的逻辑（`companion/voice.py` 只按
+> `[voice].model_dir` 去读本地文件）。文件不在时语音消息降级成占位符
+> `[对方发来一条语音，但没能听清]`，并在 `data/logs/bot.log` 留一条警告，**不会报错崩掉**。
+>
+> 语音输入依赖两样手工资产：
+> 1. 系统工具 **ffmpeg**（第 3 步 `apt install` 已装）：把 QQ 语音（SILK）转成 16000Hz 单声道 wav；缺了它一律降级占位符；
+> 2. **sherpa-onnx SenseVoice int8 模型**（下面这段）：含 `model.int8.onnx` 与 `tokens.txt`
+>    两个文件，缺任一个都降级占位符；识别在本机 CPU 上跑（`asyncio.to_thread`，不阻塞事件循环），不联网、不额外收费。
 
 ```bash
 # 服务器：
@@ -148,9 +169,13 @@ ls    # 应看到 model.int8.onnx 和 tokens.txt
 scp sherpa-onnx-sense-voice-*.tar.bz2 ubuntu@服务器IP:/home/ubuntu/
 # 服务器：
 tar xjf /home/ubuntu/sherpa-onnx-sense-voice-*.tar.bz2 -C /opt/qq-companion/data/models/sensevoice --strip-components=1
+ls /opt/qq-companion/data/models/sensevoice   # 应看到 model.int8.onnx 和 tokens.txt
 ```
 
 > 不用语音功能可跳过本步，并在 config.toml 设 `[voice] enabled = false`。
+> 装完想验证：用大号发一条语音，`tail -f /opt/qq-companion/data/logs/bot.log` 里应出现
+> `[Voice] SenseVoice ASR 识别器加载成功`；若看到"模型文件未找到"，多半是上面 `ls` 里的
+> 两个文件没落在 `data/models/sensevoice/` 根下（解压多套了一层目录）。
 
 ## 第 6 步：NapCat 协议端
 
@@ -327,6 +352,12 @@ ssh -L 8080:127.0.0.1:8080 ubuntu@服务器IP
 
 五个页面：总览（好感度六维/情绪/阶段）、记忆（日记+衰减强度）、调试（最近完整提示词）、计费（缓存命中率/今日费用）、表情包库。
 
+> 若你在 `[admin].token` 设了令牌（只建议在把 `[admin].host` 改成非回环地址时设），
+> 那么**读写所有页面**都要凭令牌：浏览器访问 `http://localhost:8080/?token=你的令牌`
+> 即可，页面内链接会自动带上令牌；命令行取健康数据用
+> `curl -s "http://127.0.0.1:8080/api/status?token=你的令牌"`。令牌留空（默认）时
+> 一切照旧，无需任何参数。
+
 **以后更新代码：**
 
 ```bash
@@ -349,6 +380,9 @@ cd /opt/qq-companion && git pull && sudo systemctl restart qq-companion
 | 语音回复"没能听清" | 第 5 步模型没装好：确认 `data/models/sensevoice/` 下有 `model.int8.onnx` 和 `tokens.txt`；`ffmpeg -version` 正常 |
 | 识图没反应/说看不到 | config.toml 的 `vision_model` 被留空了，应填 `deepseek-flash` |
 | 仪表盘打不开 | 隧道命令里的 8080 两端都要写；机器人进程必须在运行 |
+| 仪表盘所有页面都 403「未授权」 | 你在 `[admin].token` 设了令牌：访问时要在地址后加 `?token=你的令牌`（页面内链接会自动带上）；`/api/status` 同理 |
+| 作息/免打扰时段整体偏 8 小时（凌晨来消息） | 服务器时区不是北京时间：`sudo timedatectl set-timezone Asia/Shanghai` 后重启服务（见第 3 步） |
+| 日志里 `模型文件未在 ... 找到` | 第 5 步模型没装好：`data/models/sensevoice/` 根下应有 `model.int8.onnx` 与 `tokens.txt` |
 
 ## 验收
 

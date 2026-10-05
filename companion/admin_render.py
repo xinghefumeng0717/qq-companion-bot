@@ -439,7 +439,12 @@ def render_radar_svg(dims: Dict[str, float]) -> str:
     </svg>"""
 
 
-def render_nav(current_path: str) -> str:
+def render_nav(current_path: str, token_query: str = "") -> str:
+    """导航条。token_query 是形如 "?token=xxx" 的查询串（token 为空时是空串）：
+
+    页面内链接必须把 token 带上，否则在"token 非空"的模式下点一下导航就掉线
+    （每个链接都会 403）。空串时输出与旧版逐字节一致。
+    """
     links = [
         ("/", "总览"),
         ("/memory", "记忆"),
@@ -452,7 +457,7 @@ def render_nav(current_path: str) -> str:
     items = []
     for path, title in links:
         cls = 'class="active"' if current_path == path else ''
-        items.append(f'<a href="{path}" {cls}>{title}</a>')
+        items.append(f'<a href="{path}{token_query}" {cls}>{title}</a>')
     return f"""<div class="nav-bar">
       <div class="nav-inner">
         <div class="nav-links">{"".join(items)}</div>
@@ -463,7 +468,11 @@ def render_nav(current_path: str) -> str:
     </div>"""
 
 
-def html_shell(title: str, current_path: str, body_content: str) -> str:
+def html_shell(
+    title: str, current_path: str, body_content: str, token_query: str = ""
+) -> str:
+    """页面外壳。token_query 只在"token 非空"模式下非空（页面内链接要带 token）；
+    默认空串 = 输出与旧版逐字节一致。"""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -473,7 +482,7 @@ def html_shell(title: str, current_path: str, body_content: str) -> str:
   {HTML_STYLE}
 </head>
 <body>
-  {render_nav(current_path)}
+  {render_nav(current_path, token_query)}
   <div class="container">
     {body_content}
   </div>

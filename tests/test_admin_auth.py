@@ -1,12 +1,18 @@
-"""管理页写操作鉴权测试 (tests/test_admin_auth.py)
+"""管理页鉴权测试 (tests/test_admin_auth.py)
 
 外部评审发现：`/admin/reset`、`/admin/restart`、`/admin/backup` 等 POST 端点
-零鉴权，唯一防线是 host 绑 127.0.0.1 + confirm=YES。本测试集钉住新防线：
+零鉴权，唯一防线是 host 绑 127.0.0.1 + confirm=YES。第二轮审计进一步指出：
+9 条 GET 路由（/、/memory、/debug、/costs、/stickers、/logs 等）在 host 被改成
+非回环时同样裸奔（读侧泄漏记忆/日志/计费/关系状态）。本测试集钉住两条防线：
 
-1. `[admin].token` 非空时，写操作必须带匹配的 `X-Admin-Token` 头或
-   `token` 字段，否则 403（无 token / 错 token 都 403，对 token 200）；
-2. `token` 为空 = 仅 localhost 信任模式，行为与改动前逐字节一致（写操作照常放行，
-   管理页 HTML 不多出任何隐藏域）；
+1. `[admin].token` 非空时：
+   - 写操作必须带匹配的 `X-Admin-Token` 头或 `token` 字段，否则 403；
+   - **读页面（GET）同样要求 token**，URL query `?token=` 或请求头均可，
+     否则 403；页面内导航链接与表情包图片地址都要带上 token（点一下不掉线）；
+   - `/api/status` 一并保护：它带的 stage_name/composite/today_cost 是关系状态与开销，
+     不只是"活着没"的健康检查。
+2. `token` 为空 = 仅 localhost 信任模式，行为与改动前逐字节一致
+   （读写全部照常放行，页面里不多出任何 token 字样与隐藏域）。
 3. host 绑非回环地址且 token 为空时，启动打醒目裸奔警告。
 
 全部本地 mock 请求，零真实网络与真实 API。
@@ -37,7 +43,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 
 class _Req:
-    """最小假请求：只实现鉴权与重置处理器会碰到的属性。"""
+    """最小假请求：只实现鉴权与各处理器会碰到的属性。"""
 
     def __init__(
         self,
@@ -47,12 +53,14 @@ class _Req:
         json_body=None,
         form=None,
         query=None,
+        match_info=None,
     ):
         self.headers = headers or {}
         self.content_type = content_type
         self._json = json_body
         self._form = form
         self.query = query or {}
+        self.match_info = match_info or {}
 
     async def json(self):
         if self._json is None:
@@ -255,6 +263,210 @@ class TestAdminWriteAuthOverHTTP(unittest.IsolatedAsyncioTestCase):
                 json={"token": "s3cret", "confirm": "YES"},
                 headers={"Accept": "application/json"},
             )
+        self.assertEqual(resp.status, 200)
+
+
+class TestAdminReadAuth(unittest.IsolatedAsyncioTestCase):
+    """读页面（GET）鉴权：token 非空时 9 条 GET 路由全部要 token。"""
+
+    TOKEN = "s3cret"
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqc_admin_read_")
+        self.db_path = os.path.join(self.tmp, "companion.db")
+        self.backup_dir = os.path.join(self.tmp, "backup", "daily")
+        self.db = await make_db(self.db_path)
+
+    async def asyncTearDown(self):
+        await close_db(self.db, self.db_path)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _admin(self, token: str):
+        return make_engine_stack(
+            self.db,
+            include_admin=True,
+            admin_config=AdminConfig(host="127.0.0.1", port=8080, token=token),
+            db_path=self.db_path,
+            backup_dir=self.backup_dir,
+        ).admin
+
+    # (路径, 处理器名, 额外 kwargs) —— 覆盖 admin.py 里注册的全部 GET 路由
+    def _get_routes(self, admin):
+        return [
+            ("/", admin.handle_overview, {}),
+            ("/memory", admin.handle_memory, {}),
+            ("/debug", admin.handle_debug, {}),
+            ("/costs", admin.handle_costs, {}),
+            ("/stickers", admin.handle_stickers, {}),
+            ("/logs", admin.handle_logs, {}),
+            ("/admin", admin.handle_admin, {}),
+            ("/api/status", admin.handle_api_status, {"headers": {"Accept": "application/json"}}),
+            ("/stickers/img/x.png", admin.handle_sticker_image, {"match_info": {"name": "x.png"}}),
+        ]
+
+    # ---------------- token 为空：逐字节一致的旧行为 ----------------
+
+    async def test_token为空时读页面全部照常放行(self):
+        admin = self._admin("")
+        for path, handler, kwargs in self._get_routes(admin):
+            with self.subTest(path=path):
+                resp = await handler(_Req(query={}, **kwargs))
+                self.assertNotEqual(resp.status, 403, f"{path} 在 token 为空时不该被拦")
+
+    async def test_token为空时页面里不出现任何token字样(self):
+        admin = self._admin("")
+        for path, handler, _kwargs in self._get_routes(admin):
+            if path in ("/api/status", "/stickers/img/x.png"):
+                continue
+            with self.subTest(path=path):
+                resp = await handler(_Req(query={}))
+                self.assertNotIn("token=", resp.text, f"{path} 不该凭空多出 token 链接")
+
+    async def test_导航渲染默认参数与空串逐字节一致(self):
+        """render_nav/html_shell 的新参数默认空串：老调用方输出一个字节都没变。"""
+        from companion.admin_render import html_shell, render_nav
+
+        self.assertEqual(render_nav("/memory"), render_nav("/memory", ""))
+        self.assertEqual(
+            html_shell("调试信息", "/debug", "BODY"),
+            html_shell("调试信息", "/debug", "BODY", ""),
+        )
+
+    # ---------------- token 非空：读侧必须出示 token ----------------
+
+    async def test_无token读页面一律403(self):
+        admin = self._admin(self.TOKEN)
+        for path, handler, kwargs in self._get_routes(admin):
+            with self.subTest(path=path):
+                resp = await handler(_Req(query={}, **kwargs))
+                self.assertEqual(resp.status, 403, f"{path} 无 token 必须 403")
+
+    async def test_查询串token可读页面(self):
+        admin = self._admin(self.TOKEN)
+        for path, handler, kwargs in self._get_routes(admin):
+            with self.subTest(path=path):
+                kwargs = dict(kwargs)
+                kwargs.pop("headers", None)
+                resp = await handler(_Req(query={"token": self.TOKEN}, **kwargs))
+                self.assertNotEqual(resp.status, 403, f"{path} 带对 token 应当放行")
+
+    async def test_请求头token可读页面(self):
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_overview(
+            _Req(query={}, headers={"X-Admin-Token": self.TOKEN})
+        )
+        self.assertEqual(resp.status, 200)
+
+    async def test_错token读页面403(self):
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_overview(_Req(query={"token": "wrong"}))
+        self.assertEqual(resp.status, 403)
+        resp = await admin.handle_memory(_Req(query={}, headers={"X-Admin-Token": "wrong"}))
+        self.assertEqual(resp.status, 403)
+
+    async def test_被拒页面不回显token(self):
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_overview(_Req(query={"token": "wrong"}))
+        self.assertNotIn(self.TOKEN, resp.text, "403 页面不许把正确 token 写出来")
+
+    async def test_api_status一并受保护(self):
+        """审计给的例外选项里我们选了"一并保护"：/api/status 带关系状态与开销，
+        不是纯健康检查；监控脚本改用 ?token= 即可（token 为空时行为不变）。"""
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_api_status(
+            _Req(query={}, headers={"Accept": "application/json"})
+        )
+        self.assertEqual(resp.status, 403)
+        self.assertEqual(json.loads(resp.text)["status"], "error")
+
+    # ---------------- 页面内链接必须带 token，点了不掉线 ----------------
+
+    async def test_导航链接带上token(self):
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_memory(_Req(query={"token": self.TOKEN}))
+        for path in ("/", "/memory", "/debug", "/costs", "/stickers", "/logs", "/admin"):
+            self.assertIn(
+                f'href="{path}?token={self.TOKEN}"', resp.text, f"导航里的 {path} 必须带 token"
+            )
+
+    async def test_表情包图片地址带上token(self):
+        admin = self._admin(self.TOKEN)
+        admin.stickers.load_index()
+        if not admin.stickers._index:
+            self.skipTest("示例卡没有表情包索引")
+        resp = await admin.handle_stickers(_Req(query={"token": self.TOKEN}))
+        first_name = next(iter(admin.stickers._index))
+        self.assertIn(
+            f'/stickers/img/{first_name}?token={self.TOKEN}', resp.text, "图片不带 token 会 403（图全裂）"
+        )
+
+    async def test_管理页隐藏域回填配置里的token(self):
+        """走请求头进来的人也能直接点表单：隐藏域用配置里的 token，不是请求里的。"""
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_admin(_Req(query={}, headers={"X-Admin-Token": self.TOKEN}))
+        self.assertIn(
+            f'<input type="hidden" name="token" value="{self.TOKEN}">', resp.text
+        )
+
+    async def test_结果页链接也带token(self):
+        admin = self._admin(self.TOKEN)
+        with patch(
+            "companion.admin.reset_database",
+            return_value={"backup_path": "x.db", "cleared_counts": {"turns": 1}},
+        ):
+            resp = await admin.handle_admin_reset(
+                _Req(
+                    headers={"X-Admin-Token": self.TOKEN},
+                    content_type="application/x-www-form-urlencoded",
+                    form={"confirm": "YES"},
+                )
+            )
+        self.assertEqual(resp.status, 200)
+        self.assertIn(f'href="/?token={self.TOKEN}"', resp.text)
+
+
+class TestAdminReadAuthOverHTTP(unittest.IsolatedAsyncioTestCase):
+    """真 aiohttp 请求走一遍读页面：无 token 403、带 token 200。"""
+
+    TOKEN = "s3cret"
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqc_admin_read_http_")
+        self.db_path = os.path.join(self.tmp, "companion.db")
+        self.backup_dir = os.path.join(self.tmp, "backup", "daily")
+        self.db = await make_db(self.db_path)
+        admin = make_engine_stack(
+            self.db,
+            include_admin=True,
+            admin_config=AdminConfig(host="127.0.0.1", port=8080, token=self.TOKEN),
+            db_path=self.db_path,
+            backup_dir=self.backup_dir,
+        ).admin
+        app = web.Application()
+        app.router.add_get("/", admin.handle_overview)
+        app.router.add_get("/memory", admin.handle_memory)
+        app.router.add_get("/api/status", admin.handle_api_status)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await close_db(self.db, self.db_path)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_真实HTTP无token403(self):
+        for path in ("/", "/memory", "/api/status"):
+            with self.subTest(path=path):
+                resp = await self.client.get(path)
+                self.assertEqual(resp.status, 403)
+
+    async def test_真实HTTP查询串token200(self):
+        resp = await self.client.get(f"/?token={self.TOKEN}")
+        self.assertEqual(resp.status, 200)
+        self.assertIn(f'href="/memory?token={self.TOKEN}"', await resp.text())
+
+    async def test_真实HTTP请求头token200(self):
+        resp = await self.client.get("/memory", headers={"X-Admin-Token": self.TOKEN})
         self.assertEqual(resp.status, 200)
 
 

@@ -45,14 +45,20 @@ from companion.backup import DailyBackupScheduler
 from companion.config import ProactiveConfig
 from companion.db import TIME_FORMAT, Database
 from companion.persona import (
-    ZJU_CALENDAR_ANCHORS,
     Persona,
     _anchor_contains,
     calendar_anchor_note,
 )
 from companion.proactive import ProactiveScheduler
 from companion.reset import reset_database
-from helpers import close_db, make_db, make_engine_stack
+from helpers import (
+    FIXTURE_CALENDAR_ANCHORS,
+    FIXTURE_LIFE_ARC_SEED_POOL,
+    close_db,
+    make_db,
+    make_engine_stack,
+    make_fixture_card,
+)
 
 
 # ==========================================
@@ -102,7 +108,12 @@ def _d(offset_days: int, base: Optional[datetime] = None) -> str:
 
 
 class ArcsTestBase(unittest.IsolatedAsyncioTestCase):
-    """带临时库 + 假 gateway 的基类。"""
+    """带临时库 + 假 gateway 的基类。
+
+    角色卡用**夹具卡**（自带 FIXTURE_CALENDAR_ANCHORS + FIXTURE_LIFE_ARC_SEED_POOL）：
+    生活主线的锚点与素材池都来自角色卡，用夹具卡才能既不依赖私有卡、也不把
+    卡内容写进代码里。
+    """
 
     async def asyncSetUp(self):
         self.db = await make_db(":memory:")
@@ -110,7 +121,14 @@ class ArcsTestBase(unittest.IsolatedAsyncioTestCase):
         self.gateway.config.observer_model = "flash"
         self.gateway.config.text_model = "pro"
         self.gateway.chat = AsyncMock(return_value=_arc_json([_arc("占位", _d(7))]))
-        self.persona = Persona.load("characters/example")
+        self.card_dir = tempfile.mkdtemp(prefix="qqc_arcs_card_")
+        self.addCleanup(shutil.rmtree, self.card_dir, True)
+        make_fixture_card(
+            self.card_dir,
+            calendar_anchors=FIXTURE_CALENDAR_ANCHORS,
+            life_arc_seed_pool=FIXTURE_LIFE_ARC_SEED_POOL,
+        )
+        self.persona = Persona.load(self.card_dir)
         self.arcs = LifeArcManager(self.db, self.gateway, self.persona)
         self.calls: List[Dict[str, Any]] = []
         self.gateway.chat = AsyncMock(side_effect=self._record_call)
@@ -192,45 +210,74 @@ class TestTask1Schema(unittest.TestCase):
 
 
 class TestCalendarAnchors(unittest.TestCase):
+    """锚点机制：锚点表来自角色卡，这里用夹具卡自带的 FIXTURE_CALENDAR_ANCHORS
+    （两段覆盖全年，其中 12-31~01-06 是跨年区间）。"""
+
     def test_current_and_next_anchor(self):
-        note = calendar_anchor_note("2026-10-04", lookahead=1)
+        note = calendar_anchor_note("2026-12-30", FIXTURE_CALENDAR_ANCHORS, lookahead=1)
         self.assertIn("眼下", note)
         self.assertIn("接下来", note)
-        # 10-04 落在 09-16~10-07（刚开课），下一段应是 10-08 起的课程论文赶工
-        self.assertIn("秋学期刚开课", note)
-        self.assertIn("课程论文和 pre 交叉赶工", note)
-        # lookahead=2 才够得着运动会
-        self.assertIn("校运动会", calendar_anchor_note("2026-10-04", lookahead=2))
+        # 12-30 落在 01-07~12-30（甲），下一段应是 12-31 起的跨年假期（乙）
+        self.assertIn("测试锚点甲", note)
+        self.assertIn("测试锚点乙", note)
+        # lookahead 到了表尾就没有下一条，只剩"眼下"
+        tail = calendar_anchor_note("2026-12-31", FIXTURE_CALENDAR_ANCHORS, lookahead=2)
+        self.assertIn("眼下", tail)
+        self.assertNotIn("接下来", tail)
 
     def test_year_wrap_anchor(self):
         # 12-31~01-06 跨年，两端都要能命中
         self.assertTrue(_anchor_contains("12-31", "01-06", "12-31"))
         self.assertTrue(_anchor_contains("12-31", "01-06", "01-03"))
         self.assertFalse(_anchor_contains("12-31", "01-06", "01-20"))
-        self.assertIn("学生节", calendar_anchor_note("2026-12-31"))
-        self.assertIn("学生节", calendar_anchor_note("2027-01-02"))
+        self.assertIn("测试锚点乙", calendar_anchor_note("2026-12-31", FIXTURE_CALENDAR_ANCHORS))
+        self.assertIn("测试锚点乙", calendar_anchor_note("2027-01-02", FIXTURE_CALENDAR_ANCHORS))
 
     def test_full_year_has_no_gap(self):
-        """全年 365 天每一天都要能落到某个锚点上——查漏的唯一可靠办法。"""
-        cur = datetime(2026, 1, 1)
+        """全年每一天都要能落到某个锚点上——查漏的唯一可靠办法。
+
+        同时覆盖闰年（2028-02-29 这种多出来的一天最容易漏）。
+        """
         missing = []
-        for i in range(365):
-            d = (cur + timedelta(days=i)).strftime("%Y-%m-%d")
-            if not calendar_anchor_note(d):
-                missing.append(d)
+        for year, days in ((2026, 365), (2028, 366)):
+            cur = datetime(year, 1, 1)
+            for i in range(days):
+                d = (cur + timedelta(days=i)).strftime("%Y-%m-%d")
+                if not calendar_anchor_note(d, FIXTURE_CALENDAR_ANCHORS):
+                    missing.append(d)
         self.assertEqual(missing, [], f"这些日期查不到锚点: {missing[:10]}")
 
     def test_bad_date_returns_empty_not_crash(self):
-        self.assertEqual(calendar_anchor_note(""), "")
-        self.assertEqual(calendar_anchor_note("not-a-date"), "")
-        self.assertEqual(calendar_anchor_note(None), "")
+        self.assertEqual(calendar_anchor_note("", FIXTURE_CALENDAR_ANCHORS), "")
+        self.assertEqual(calendar_anchor_note("not-a-date", FIXTURE_CALENDAR_ANCHORS), "")
+        self.assertEqual(calendar_anchor_note(None, FIXTURE_CALENDAR_ANCHORS), "")
 
-    def test_anchors_sorted_and_non_empty(self):
-        self.assertTrue(ZJU_CALENDAR_ANCHORS)
-        for start, end, note in ZJU_CALENDAR_ANCHORS:
+    def test_no_anchors_means_no_note(self):
+        """卡里没有锚点（空表）= 无锚点功能：任何日期都返回空串，不炸。"""
+        self.assertEqual(calendar_anchor_note("2026-12-30", []), "")
+        self.assertEqual(calendar_anchor_note("2026-12-30", None), "")
+
+    def test_fixture_anchors_well_formed(self):
+        self.assertTrue(FIXTURE_CALENDAR_ANCHORS)
+        for start, end, note in FIXTURE_CALENDAR_ANCHORS:
             self.assertRegex(start, r"^\d{2}-\d{2}$")
             self.assertRegex(end, r"^\d{2}-\d{2}$")
             self.assertTrue(note.strip())
+
+    def test_persona_method_delegates_to_card_anchors(self):
+        """Persona.calendar_anchor_note 用的是**这张卡**的锚点（卡里没锚点就是空串）。"""
+        tmp = tempfile.mkdtemp(prefix="qqc_anchor_card_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        make_fixture_card(tmp, calendar_anchors=FIXTURE_CALENDAR_ANCHORS)
+        persona = Persona.load(tmp)
+        self.assertEqual(len(persona.calendar_anchors), len(FIXTURE_CALENDAR_ANCHORS))
+        self.assertIn("测试锚点甲", persona.calendar_anchor_note("2026-12-30"))
+
+        tmp2 = tempfile.mkdtemp(prefix="qqc_anchor_card2_")
+        self.addCleanup(shutil.rmtree, tmp2, True)
+        make_fixture_card(tmp2)
+        self.assertEqual(Persona.load(tmp2).calendar_anchors, [])
+        self.assertEqual(Persona.load(tmp2).calendar_anchor_note("2026-12-30"), "")
 
 
 # ==========================================
@@ -466,8 +513,8 @@ class TestGeneration(ArcsTestBase):
             "emotional_stake": "怕选题太冷门",
         }
         second_arc = {
-            "title": "教学区琴房预约",
-            "detail": "期末前琴房抢不到位置，她每天刷体艺App",
+            "title": "琴房预约",
+            "detail": "期末前琴房抢不到位置，她每天刷预约 App",
             "key_date": _d(6),
             "emotional_stake": "怕整周都抢不到",
         }
@@ -505,7 +552,7 @@ class TestGeneration(ArcsTestBase):
         self.assertEqual(await self.arcs.ensure_arcs(), 0)
 
     async def test_prompt_carries_seed_pool_and_calendar_anchor(self):
-        """素材池与校历锚点必须真的进了提示词（负面清单第 3 条：禁止自编校园事实）"""
+        """素材池与日历锚点必须真的进了提示词（负面清单第 3 条：禁止自编卡外事实）"""
         self.gateway.chat = AsyncMock(
             side_effect=lambda **kw: (
                 self.calls.append(kw),
@@ -518,9 +565,8 @@ class TestGeneration(ArcsTestBase):
             _FrozenDatetime.set(datetime(2026, 10, 4, 12, 0))
             await self.arcs.ensure_arcs()
         prompt = self.gen_calls()[0]["messages"][0]["content"]
-        self.assertIn("文琴乐团近百人", prompt)      # 素材池第四节
-        self.assertIn("大食堂", prompt)              # 素材池第二节
-        self.assertIn("眼下：", prompt)              # 学期节奏锚点
+        self.assertIn("测试素材甲", prompt)          # 夹具卡的 life_arc_seed_pool
+        self.assertIn("眼下：", prompt)              # 夹具卡的日历锚点
         self.assertIn("接下来：", prompt)
         self.assertIn("2026-10-07", prompt)         # date_min = 今天+3
         self.assertIn("2026-10-18", prompt)         # date_max = 今天+14

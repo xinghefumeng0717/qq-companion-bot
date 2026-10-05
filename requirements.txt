@@ -1,6 +1,10 @@
-aiohttp>=3.9.0
-aiosqlite>=0.19.0
-pillow>=10.0.0
-sherpa-onnx>=1.10.0  # 仅语音输入用
+# 版本策略：本项目是 7×24 长跑服务 + "照抄即可部署"的手册，**可复现优先**——
+# 全部钉 ==（钉在本地测试基线全绿的那一版），不让 pip 静默升到新大版本
+# （aiohttp 4.x / Pillow 大版本都会改 API，半夜静默坏掉最难查）。
+# 升级流程：本地升级 → 跑全套单测 → 改这里的版本号 → 服务器重装依赖并重启服务。
+aiohttp==3.14.3
+aiosqlite==0.22.1
+pillow==12.3.0
+sherpa-onnx==1.13.8  # 仅语音输入用；wheel 与平台/Python 绑定（1.13.8 有 cp311 manylinux x86_64 wheel）
 edge-tts==7.2.8       # 仅语音输出用（FIXES22 阶段 A）；钉版本：接口有改版史，7.x 的 Communicate(text, voice, rate=...) 签名在 7.2.8 实测通过
 # python-docx  # 仅本地表情包审核工具（scripts/audit/build_sticker_review_docx.py）用

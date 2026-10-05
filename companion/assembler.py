@@ -186,7 +186,7 @@ class PromptAssembler:
         weekday_str = WEEKDAYS[now_dt.weekday()]
         current_time_str = f"{now_dt.strftime(TIME_FORMAT)} 星期{weekday_str}"
 
-        # 法定节假日：短假学校放假不上课，长假她回绍兴老家（FIXES11 任务2 / FIXES14 任务1）
+        # 法定节假日：短假学校放假不上课，长假她不在学校（FIXES11 任务2 / FIXES14 任务1）
         holidays = self.get_holidays()
         span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
         if span:

@@ -186,17 +186,40 @@ FIXTURE_DAILY_ROUTINE = [
     {"start": 18, "end": 24, "activity": "在宿舍看书休息"},
 ]
 
+# 夹具卡的日历锚点：两段就该覆盖全年（12-31~01-06 是跨年区间），
+# 供 test_fixes16 验证"当前锚点 + 下一锚点"与全年无缺口；内容纯测试虚构。
+FIXTURE_CALENDAR_ANCHORS = [
+    ["01-07", "12-30", "测试锚点甲：学期里的平常节奏"],
+    ["12-31", "01-06", "测试锚点乙：跨年假期"],
+]
+
+# 夹具卡的素材池：内容纯测试虚构，只用于断言"素材池真的进了提示词"。
+FIXTURE_LIFE_ARC_SEED_POOL = [
+    "【测试素材】",
+    "1. 测试素材甲：只用于单元测试的虚构条目",
+    "2. 测试素材乙：同样是虚构条目",
+]
+
+# 夹具卡的长假文案：故意带一个夹具自己的标记词，用来钉住"长假文案取自卡里"。
+FIXTURE_LONG_HOLIDAY_ACTIVITY = "放长假中，在测试老家，不在学校"
+
 
 def make_fixture_card(
     base_dir: str,
     stage_names: Optional[List[str]] = None,
     daily_routine: Optional[List[Dict[str, Any]]] = None,
+    long_holiday_activity: Optional[str] = None,
+    calendar_anchors: Optional[List[List[str]]] = None,
+    life_arc_seed_pool: Optional[Any] = None,
 ) -> str:
     """在 base_dir 里写一张最小可用的测试夹具卡（结构化虚构内容，零私有影子）。
 
     只填被测内容需要的字段：恰好 10 个阶段（默认含「知己」「微酸」）、
     覆盖全天的 daily_routine（默认含一段周六校园作息）。返回 base_dir。
     需要独立临时目录时由调用方自备（如 tempfile.mkdtemp + addCleanup）。
+
+    三个可选字段（long_holiday_activity / calendar_anchors / life_arc_seed_pool）
+    **传了才写进卡**：不传 = 卡里没有该字段，走的正是"旧卡零改动"的那条路。
     """
     os.makedirs(base_dir, exist_ok=True)
 
@@ -232,6 +255,12 @@ def make_fixture_card(
         "habits": [],
         "stickers_dir": "stickers",
     }
+    if long_holiday_activity is not None:
+        card["long_holiday_activity"] = long_holiday_activity
+    if calendar_anchors is not None:
+        card["calendar_anchors"] = [list(a) for a in calendar_anchors]
+    if life_arc_seed_pool is not None:
+        card["life_arc_seed_pool"] = life_arc_seed_pool
 
     with open(os.path.join(base_dir, "character.json"), "w", encoding="utf-8") as f:
         json.dump(card, f, ensure_ascii=False, indent=2)

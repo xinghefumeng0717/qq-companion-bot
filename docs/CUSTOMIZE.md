@@ -36,7 +36,8 @@ cp -r characters/example characters/my_character
 - **`good_examples` / `plain_examples` / `bad_examples`**：**最重要、最花时间的部分**。bad_examples 请收集你真实聊天里 AI 腔的翻车原句钉进去——抽象规则没用，具体错例有用；
 - **`stages`**：恰好 10 个关系阶段，每个阶段给语气示范和禁区（比如早期阶段禁亲昵词）；
 - **`daily_routine`**：覆盖全天 24 小时的作息表。它驱动"她此刻在干嘛"、回复延迟、语音闸门；
-- **`initial_dims`**：开局六维好感度（决定开局在哪个阶段）。
+- **`initial_dims`**：开局六维好感度（决定开局在哪个阶段）；
+- **`long_holiday_activity` / `calendar_anchors` / `life_arc_seed_pool`**（可选）：长假文案、日历锚点、生活主线取材范围。不填分别是"通用默认 / 无锚点 / 不做生活主线"；想让"她的生活有连续性"，至少填 `life_arc_seed_pool`，写法见 README 第 5.1.1 节与示例卡。
 
 **改卡后必须做的事**：跑 `python -m companion.chat` 进沙箱试聊（不碰 QQ、不碰生产数据），觉得不对就改卡再来。别直接上线试错。
 
@@ -51,7 +52,8 @@ cp -r characters/example characters/my_character
 | 她主动找你的频率 | `[proactive]` 段的唤醒间隔与闸门 |
 | 语音回复 | `[tts]` 段（默认关；开之前读 config 注释） |
 | 好感度涨速/阶段刻度 | `companion/affection.py` 的阈值表（动之前先读 FIXES8 文档，这是有仿真实测校准过的） |
-| 作息/长假行为 | 卡里的 `daily_routine` + `[llm.pricing].holidays` 填法定节假日 |
+| 作息/长假行为 | 卡里的 `daily_routine`（日常）+ `long_holiday_activity`（长假那句）+ `[llm.pricing].holidays` 填法定节假日 |
+| 她的生活主线取材 | 卡里的 `life_arc_seed_pool`（必填才会生成）+ `calendar_anchors` |
 
 ## 第 5 步：上线前自检清单
 

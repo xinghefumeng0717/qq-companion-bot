@@ -34,8 +34,8 @@ from companion.config import (
 )
 from companion.db import TIME_FORMAT
 from companion.persona import (
+    DEFAULT_LONG_HOLIDAY_ACTIVITY,
     FREE_ACTIVITY_FALLBACK,
-    LONG_HOLIDAY_ACTIVITY,
     LONG_HOLIDAY_MIN_SPAN,
     ChatStyle,
     Persona,
@@ -228,10 +228,10 @@ class TestBusyIdleDetection(unittest.TestCase):
         self.assertFalse(is_busy, '回退文案"在度过属于自己的时间" = 她人在闲')
 
     def test_long_holiday_is_free(self):
-        """任务书明写：LONG_HOLIDAY_ACTIVITY 是回退类，长假=闲"""
+        """任务书明写：长假文案是回退类，长假=闲"""
         for span in (LONG_HOLIDAY_MIN_SPAN, 5, 8):
             activity, is_busy = self.persona.get_current_activity_detail(10, 0, holiday_span=span)
-            self.assertEqual(activity, LONG_HOLIDAY_ACTIVITY)
+            self.assertEqual(activity, DEFAULT_LONG_HOLIDAY_ACTIVITY)
             self.assertFalse(is_busy, f"段长 {span} 属长假，应归为闲")
 
     def test_short_holiday_keeps_saturday_routine_and_busy_flag(self):

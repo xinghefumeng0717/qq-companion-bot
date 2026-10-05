@@ -119,9 +119,13 @@ max_chars = 90                     # 单条字数上限（≈30 秒；NapCat 超
 [admin]
 host = "127.0.0.1"
 port = 8080
-# 管理页写操作（/admin/backup、/admin/restart、/admin/reset）的鉴权令牌。
-# 留空 = 仅 localhost 信任模式（默认现状：只有本机/SSH 隧道能访问，不额外校验）。
+# 管理页鉴权令牌（**读写都算**：/admin/backup|restart|reset 三个写操作 +
+# /、/memory、/debug、/costs、/stickers、/logs、/admin 与 /api/status 全部读页面）。
+# 留空 = 仅 localhost 信任模式（默认现状：只有本机/SSH 隧道能访问，不额外校验，
+# 行为与旧版逐字一致，日常隧道访问零打扰）。
 # ⚠ 若把 host 改成非回环地址（如 0.0.0.0、内网 IP），必须先在这里设一个 token：
-#   届时所有写操作都要带请求头 X-Admin-Token 或表单/JSON 字段 token，否则一律 403。
-#   浏览器里可访问 http://<host>:<port>/admin?token=你的token 让表单自动带上。
+#   届时写操作要带请求头 X-Admin-Token 或表单/JSON 字段 token；读页面要带
+#   URL 查询串 ?token= 或同一个请求头；否则一律 403（读侧泄漏的是记忆/日志/计费，
+#   所以不能只挡写不挡读）。浏览器访问 http://<host>:<port>/?token=你的token 即可，
+#   页面内链接与表情包图片会自动带上令牌；监控脚本用 /api/status?token=你的token。
 token = ""

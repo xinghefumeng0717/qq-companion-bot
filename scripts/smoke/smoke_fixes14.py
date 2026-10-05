@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from companion.chat import ChatSession
 from companion.config import ProactiveConfig, ReplyConfig
 from companion.db import TIME_FORMAT, parse_dt
-from companion.persona import LONG_HOLIDAY_ACTIVITY, holiday_span
+from companion.persona import holiday_span
 from companion.proactive import ProactiveScheduler, format_recent_chat
 from companion.prompts import PROACTIVE_GENERATE_PROMPT
 from companion.replier import Replier
@@ -267,7 +267,7 @@ async def run_smoke_test() -> dict:
             print("        不能当作本段通过证据——这正是 FIXES12 记过的坑，真实产出证据改由 [1b] 提供")
 
         # [1b] 真实产出（不依赖决策层自由意志）：拿生产真实会用的话题材料
-        #      （长假下的 _select_topic_material()，即"放长假中，回绍兴老家陪父母"）
+        #      （长假下的 _select_topic_material()，即角色卡里的长假文案）
         #      直调生成层。这是本次修的注入链在真实 API 上的产出证据。
         print("  [1b] 真实产出：长假话题材料直调生成层（绕过决策层的自由意志）")
         with patch("companion.proactive.datetime", _FakeDatetime):
@@ -354,7 +354,7 @@ async def run_smoke_test() -> dict:
                 "fact_line_long": fact_long,
                 "campus_words_short": short_hits,
                 "campus_words_long": long_hits,
-                "long_activity_placeholder": LONG_HOLIDAY_ACTIVITY,
+                "long_activity_placeholder": session.persona.long_holiday_activity,
                 "pass": control_ok,
             },
             "attempts": attempts,

@@ -309,7 +309,7 @@ system 之后接**工作记忆**（最近 10 轮，user/assistant 交替），�
 
 1. OneBot 收到 `record` 消息段 → 用 `data.url` 下载 `.silk` 文件到 `data/voice/`；
 2. 调系统 **ffmpeg** 转码：`ffmpeg -y -i input.silk -ar 16000 -ac 1 output.wav`（ffmpeg 通过 apt 安装，属系统工具不算项目组件；若 ffmpeg 缺失或转码失败，降级为文字占位符 `[对方发来一条语音，但没能听清]`）；
-3. **本地 ASR**：`sherpa-onnx` + SenseVoice int8 模型（模型文件 ~200MB，首次运行从官方源下载到 `data/models/sensevoice/`，含 `model.int8.onnx` 与 `tokens.txt`），纯 CPU 推理，短语音 1~2 秒出结果；识别在 `asyncio.to_thread` 中执行，不阻塞事件循环；
+3. **本地 ASR**：`sherpa-onnx` + SenseVoice int8 模型（模型文件 ~200MB，**不自动下载**，需手动下载解压到 `data/models/sensevoice/`，见 `DEPLOY.md` 第 5 步；该目录下须有 `model.int8.onnx` 与 `tokens.txt`，缺任一文件时语音降级为占位符），纯 CPU 推理，短语音 1~2 秒出结果；识别在 `asyncio.to_thread` 中执行，不阻塞事件循环；
 4. 识别文本作为本轮用户输入进入聚合器（走正常的 3 秒静默聚合），并在传给 LLM 时附加前缀提示"（语音消息）"；识别结果为空/置信度过低时按降级占位符处理；
 5. 配置开关 `[voice] enabled = true`、`model_dir = "data/models/sensevoice"`；关闭时语音消息一律按降级占位符处理；
 6. 提示词补充一句：她知道这是语音消息，可以自然地对"他在发语音"这件事做出反应；

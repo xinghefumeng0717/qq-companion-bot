@@ -389,7 +389,7 @@ def chunk_text_sentences(text: str, max_chunks: int = 5) -> List[str]:
     """
     chunks: List[str] = []
 
-    # 逐行独立成条：换行不再参与相邻合并，避免 "刚出琴房教学区的灯亮了" 这种黏句
+    # 逐行独立成条：换行不再参与相邻合并，避免两句话被黏成 "刚出琴房灯就亮了一大片" 这种黏句
     for line in text.split("\n"):
         if not line.strip():
             continue
