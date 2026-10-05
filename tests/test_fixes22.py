@@ -87,6 +87,30 @@ class TestDefaultOff(unittest.TestCase):
         cfg = Config.load("config.example.toml")
         self.assertFalse(cfg.tts.enabled)
 
+    def test_缺字段的tts段读到类默认值(self):
+        """2026-10-05 实测 bug：服务器 [tts] 段只有 enabled/provider 两行，
+        解析器的兜底字面量（8/60）与类默认值（30/90）漂移，改类默认不生效。
+        修复后解析兜底必须取自 TTSConfig 本身——缺字段 = 类默认值。"""
+        import tempfile
+
+        from companion.config import Config, TTSConfig
+
+        minimal = "[account]\nallowed_user_id = 12345\n\n[tts]\nenabled = true\nprovider = \"minimax\"\n"
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".toml", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(minimal)
+            path = f.name
+        try:
+            cfg = Config.load(path)
+            d = TTSConfig()
+            self.assertTrue(cfg.tts.enabled)
+            self.assertEqual(cfg.tts.daily_limit, d.daily_limit)
+            self.assertEqual(cfg.tts.max_chars, d.max_chars)
+            self.assertEqual(cfg.tts.voice_id, d.voice_id)
+        finally:
+            os.unlink(path)
+
     def test_parse_reply默认voice_allowed为False(self):
         """旧调用方不传这个参数 = 语音一律降级，不改一个字符也安全。"""
         chunks, record = _replier().parse_reply("在呢[voice:睡啦[/voice]")

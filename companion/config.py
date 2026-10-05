@@ -469,17 +469,21 @@ class Config:
         # 阶段 B：provider / minimax 字段同样可缺省——缺了就是 edge + 关着，
         # 老配置一个字不改也安全。
         tts_data = data.get("tts", {})
+        # 兜底值一律取自 TTSConfig 本身，不在这里抄第二遍——
+        # 2026-10-05 实测：两处默认值漂移（类默认 30 / 这里写 8），
+        # 服务器缺字段时读到的永远是这里抄的旧值（输出刻度 vs 输入预期错位又一例）。
+        _tts_d = TTSConfig()
         tts = TTSConfig(
-            enabled=bool(tts_data.get("enabled", False)),
-            provider=str(tts_data.get("provider", "edge")),
-            voice=str(tts_data.get("voice", "zh-CN-XiaoxiaoNeural")),
-            rate=str(tts_data.get("rate", "-8%")),
-            voice_id=str(tts_data.get("voice_id", "Chinese (Mandarin)_Gentle_Senior")),
-            speed=float(tts_data.get("speed", 1.0)),
-            model=str(tts_data.get("model", "speech-2.8-hd")),
-            group_id=str(tts_data.get("group_id", "")),
-            daily_limit=int(tts_data.get("daily_limit", 8)),
-            max_chars=int(tts_data.get("max_chars", 60)),
+            enabled=bool(tts_data.get("enabled", _tts_d.enabled)),
+            provider=str(tts_data.get("provider", _tts_d.provider)),
+            voice=str(tts_data.get("voice", _tts_d.voice)),
+            rate=str(tts_data.get("rate", _tts_d.rate)),
+            voice_id=str(tts_data.get("voice_id", _tts_d.voice_id)),
+            speed=float(tts_data.get("speed", _tts_d.speed)),
+            model=str(tts_data.get("model", _tts_d.model)),
+            group_id=str(tts_data.get("group_id", _tts_d.group_id)),
+            daily_limit=int(tts_data.get("daily_limit", _tts_d.daily_limit)),
+            max_chars=int(tts_data.get("max_chars", _tts_d.max_chars)),
         )
         admin_data = data.get("admin", {})
         admin = AdminConfig(
