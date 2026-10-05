@@ -608,11 +608,11 @@ class TestPromptBlock(ArcsTestBase):
                  datetime(2026, 10, 3).strftime(TIME_FORMAT),
                  datetime(2026, 10, 3, 19, 0).strftime(TIME_FORMAT)),
             )
-        block = await self.arcs.build_prompt_block()
-        self.assertIn("【她最近的生活】", block)
-        self.assertIn("（有结果）", block)
-        self.assertIn("交上了，老师说选题有意思", block)
-        self.assertNotIn("（临近）", block)
+            block = await self.arcs.build_prompt_block()
+            self.assertIn("【她最近的生活】", block)
+            self.assertIn("（有结果）", block)
+            self.assertIn("交上了，老师说选题有意思", block)
+            self.assertNotIn("（临近）", block)
 
     async def test_mixed_shape_and_upcoming_excluded(self):
         with patch("companion.arcs.datetime", _FrozenDatetime):
