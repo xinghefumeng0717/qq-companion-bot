@@ -207,9 +207,9 @@ class TestSceneEndCondition(unittest.TestCase):
         self.assertTrue(D.hit_end_marker("今天太累了 算了", s1))
         self.assertFalse(D.hit_end_marker("今天做了个实验", s1))
 
-    def test_三张卡都带齐任务书要求的字段(self):
+    def test_四张卡都带齐任务书要求的字段(self):
         """背景/开场/情绪走向/收场条件/时钟推进规则，一个都不能少。"""
-        self.assertEqual(sorted(D.SCENES), ["S1", "S2", "S3"])
+        self.assertEqual(sorted(D.SCENES), ["S1", "S2", "S3", "S4"])
         for k, s in D.SCENES.items():
             with self.subTest(scene=k):
                 self.assertTrue(s.background.strip(), "缺背景设定")
@@ -218,6 +218,108 @@ class TestSceneEndCondition(unittest.TestCase):
                 self.assertTrue(s.end_markers, "缺收场条件")
                 self.assertGreater(s.clock_step_min, 0, "缺时钟推进规则")
                 self.assertGreater(s.min_turns, 0)
+
+    def test_S4挑衅卡必须分阶段升级(self):
+        """挑衅要"连续上强度"——不分阶段的话，单条笼统指令会把强度摊平，
+        她一整局面对的压力是恒定的，就测不出"随压力升级的反应"。"""
+        s4 = D.SCENES["S4"]
+        starts = [p[0] for p in s4.instruction_phases]
+        self.assertEqual(starts, sorted(starts), "阶段起点必须递增")
+        self.assertEqual(starts[0], 1, "第一阶段必须覆盖第 1 轮")
+        self.assertGreaterEqual(len(s4.instruction_phases), 3, "挑衅强度至少要分三档")
+        # 每一轮都必须有阶段指令兜底，不许出现"轮次落在阶段之间"的空窗
+        for idx in range(1, s4.max_turns + 1):
+            self.assertTrue(s4.phase_instruction(idx), f"第 {idx} 轮没有阶段指令")
+        self.assertEqual(
+            s4.phase_instruction(1), s4.instruction_phases[0][1]
+        )
+        self.assertEqual(
+            s4.phase_instruction(s4.max_turns), s4.instruction_phases[-1][1]
+        )
+        # 已读不回段：静默周期必须过主动消息的 60 分钟闸门
+        self.assertIsNotNone(s4.silence_after_turn)
+        self.assertGreater(s4.silence_step_min, 60.0)
+
+    def test_没有分阶段的卡phase_instruction返回None(self):
+        """S1~S3 保持原行为：返回 None，调用方走通用指令。"""
+        for k in ("S1", "S2", "S3"):
+            self.assertIsNone(D.SCENES[k].phase_instruction(5))
+
+
+class TestStageSeed(unittest.TestCase):
+    """开局状态注入：冲突沙箱必须能把阶段抬到允许吃醋使性子的档位。"""
+
+    def test_每个阶段的种子都真的落在该阶段(self):
+        for stage in range(10):
+            with self.subTest(stage=stage):
+                dims = D.stage_seed_dims(stage)
+                comp = D.calc_composite_score(dims)
+                self.assertEqual(
+                    D.determine_stage(comp), stage,
+                    f"为阶段 {stage} 反推的六维落在阶段 {D.determine_stage(comp)}",
+                )
+
+    def test_种子六维都在合法区间(self):
+        for stage in range(10):
+            for k, v in D.stage_seed_dims(stage).items():
+                self.assertGreaterEqual(v, 0.0, f"{k} 越界")
+                self.assertLessEqual(v, 100.0, f"{k} 越界")
+
+    def test_微酸阶段就是阶段5而不是任务书写的那格(self):
+        """任务书把「微酸」写成"阶段 5（复合分 81~93）"，但阈值表里 81~93 是
+        阶段 4「知己」，微酸（阶段 5）是 93~97。这里把口径钉死，避免下次又按
+        错刻度播种（项目经验教训 8：模块间刻度错位是本项目最高发的病）。"""
+        dims5 = D.stage_seed_dims(5)
+        comp5 = D.calc_composite_score(dims5)
+        self.assertEqual(D.determine_stage(comp5), 5)
+        self.assertGreaterEqual(comp5, D.STAGE_THRESHOLDS[5])
+        self.assertLess(comp5, D.STAGE_THRESHOLDS[6])
+        # 81~93 那格其实是「知己」（阶段 4）
+        self.assertEqual(D.determine_stage(D.stage_seed_dims(4)["warmth"]), 4)
+        card_path = os.path.join("characters", "qingzi")
+        if not os.path.isdir(card_path):
+            self.skipTest("本地无 characters/qingzi（gitignored），跳过阶段名核对")
+        card = D.Persona.load(card_path)
+        self.assertEqual(card.get_stage(5).name, "微酸")
+        self.assertEqual(card.get_stage(4).name, "知己")
+
+    def test_非法阶段报错(self):
+        for bad in (-1, 10, 99):
+            with self.assertRaises(ValueError):
+                D.stage_seed_dims(bad)
+
+    def test_seed_dims解析(self):
+        self.assertEqual(
+            D.parse_seed_dims("warmth=88.8,trust=88.8"),
+            {"warmth": 88.8, "trust": 88.8},
+        )
+        for bad in ("warmth", "warmth=abc", "", "  "):
+            with self.assertRaises(ValueError):
+                D.parse_seed_dims(bad)
+
+    def test_缺维度或越界的显式六维必须报错而不是静默算错(self):
+        """缺一维会被 calc_composite_score 当 0 分算，复合分直接掉到别的阶段，
+        而报告里还写着"已注入"——这是最坏的一种错，必须当场炸。"""
+        # 通过私有方法校验：构造一个最小对象即可（校验发生在碰 DB 之前）
+        sim = D.DuoSimulator.__new__(D.DuoSimulator)
+        sim.seed_stage = None
+        sim.seed_dims = {"warmth": 88.8}
+        sim.db = None
+        with self.assertRaises(ValueError):
+            asyncio.run(sim._seed_affection())
+        sim.seed_dims = {"warmth": 880.0, "trust": 1.0, "intimacy": 1.0,
+                         "intrigue": 1.0, "patience": 1.0, "tension": 1.0}
+        with self.assertRaises(ValueError):
+            asyncio.run(sim._seed_affection())
+
+    def test_没传种子时什么都不做(self):
+        sim = D.DuoSimulator.__new__(D.DuoSimulator)
+        sim.seed_stage = None
+        sim.seed_dims = None
+        sim.seeded_dims = None
+        sim.db = None
+        asyncio.run(sim._seed_affection())   # 不该抛（也不该碰 db）
+        self.assertIsNone(sim.seeded_dims)
 
 
 # ==========================================
@@ -486,8 +588,13 @@ class TestTurnDriver(_FakeGatewayBase):
         self.assertEqual(turns[0]["text"], D.SCENES["S1"].opening)
         self.assertEqual(sim.raw_turns[0].get("opening"), True)
         # 产物齐备
-        for f in ("transcript.md", "raw.json", "metrics.json"):
+        for f in ("transcript.md", "raw.json", "metrics.json", "state_curve.md"):
             self.assertTrue(os.path.exists(os.path.join(self.run_dir, f)), f"缺产物 {f}")
+        # 曲线文件不是空壳：必须有表头与"汇总"段
+        with open(os.path.join(self.run_dir, "state_curve.md"), encoding="utf-8") as f:
+            curve = f.read()
+        self.assertIn("| # | 时间 |", curve)
+        self.assertIn("## 汇总", curve)
         self.assertGreaterEqual(res["metrics"]["her_turns"], 2)
 
     async def test_时钟随回合单调前进(self):
@@ -611,7 +718,7 @@ class TestSilencePhase(_FakeGatewayBase):
 
     async def test_静默周期必须超过主动消息的60分钟闸门(self):
         """闸门是"距上次发言 <60 分钟就拦"，周期太短则三个周期全被拦掉。"""
-        for key in ("S1", "S2", "S3"):
+        for key in ("S1", "S2", "S3", "S4"):
             s = D.SCENES[key]
             if s.silence_after_turn is not None:
                 self.assertGreater(
@@ -635,6 +742,140 @@ class TestSilencePhase(_FakeGatewayBase):
             s3.silence_step_min,
             "静默段没把时钟往前推",
         )
+
+
+# ==========================================
+# 3c. 冲突沙箱：开局状态注入 + S4 挑衅卡
+# ==========================================
+
+
+class TestSeedIntegration(_FakeGatewayBase):
+    """注入必须真的写进沙箱库并被引擎读到——不是"参数收了就完事"。"""
+
+    async def test_seed_stage写进沙箱库且引擎读到(self):
+        sim = await self._make_sim("S4", turns=3, seed_stage=5)
+        try:
+            st = await sim.affection.get_state()
+            self.assertEqual(st["stage"], 5, f"注入后阶段不是 5：{st}")
+            self.assertEqual(D.determine_stage(st["composite"]), 5)
+            self.assertAlmostEqual(st["dims"]["warmth"], 95.0, places=1)
+        finally:
+            await sim.close()
+
+    async def test_seed_dims显式覆盖优先于stage(self):
+        dims = {"warmth": 70.0, "trust": 70.0, "intimacy": 70.0,
+                "intrigue": 70.0, "patience": 70.0, "tension": 0.0}
+        sim = await self._make_sim("S1", turns=3, seed_stage=5, seed_dims=dims)
+        try:
+            st = await sim.affection.get_state()
+            self.assertEqual(st["stage"], D.determine_stage(70.0))
+            self.assertEqual(st["dims"]["warmth"], 70.0, "显式六维没有覆盖阶段推断")
+            self.assertEqual(sim.seeded_dims, dims)
+        finally:
+            await sim.close()
+
+    async def test_不传种子时保持角色卡初始阶段(self):
+        """回归保护：种子是可选参数，不传时阶段 1 的行为一个字都不能变。"""
+        sim = await self._make_sim("S1", turns=3)
+        try:
+            st = await sim.affection.get_state()
+            self.assertEqual(st["stage"], 1, f"未注入却改掉了开局阶段：{st}")
+            self.assertIsNone(sim.seeded_dims)
+        finally:
+            await sim.close()
+
+    async def test_S4端到端跑通_阶段指令与已读不回段都生效(self):
+        """S4 是本迭代新增的卡：必须真能跑完（含静默段），而不是死在收场判定里。
+
+        注意 `--turns` 对带静默段的卡是**下界**不是上界（静默段未完成时
+        should_end 一律返回 False），所以这里给 22 轮让它能正常收线。
+        """
+        sim = await self._make_sim("S4", turns=22, user_lines=["哦"] * 80, seed_stage=5)
+        try:
+            with D._TimePatch(sim.clock, sim.sleep_log):
+                res = await sim.run()
+        finally:
+            await sim.close()
+        self.assertTrue(sim.silence_done, "S4 的已读不回段没跑完")
+        self.assertEqual(len(sim.proactive_log), D.SCENES["S4"].silence_turns)
+        self.assertGreaterEqual(res["meta"]["turns"], 20)
+        self.assertIsNotNone(res["meta"]["seeded_dims"])
+        # 阶段指令随轮次切换（第 1 轮敷衍档、末轮冷淡档）
+        self.assertEqual(sim._user_instruction(1), D.SCENES["S4"].instruction_phases[0][1])
+        self.assertEqual(sim._user_instruction(21), D.SCENES["S4"].instruction_phases[-1][1])
+        # 他那句开场就是挑衅（不是 S1/S2 那种日常开场）
+        self.assertEqual(sim.turns[0].text, D.SCENES["S4"].opening)
+
+    async def test_曲线文件记下注入信息(self):
+        sim = await self._make_sim("S1", turns=3, user_lines=["嗯"] * 30, seed_stage=5)
+        try:
+            with D._TimePatch(sim.clock, sim.sleep_log):
+                await sim.run()
+        finally:
+            await sim.close()
+        with open(os.path.join(self.run_dir, "state_curve.md"), encoding="utf-8") as f:
+            curve = f.read()
+        self.assertIn("开局注入", curve)
+        self.assertIn("--seed-stage 5", curve)
+
+
+class TestStateCurveRender(unittest.TestCase):
+    """曲线渲染是纯函数：手造 raw_turns 就能验，不需要跑仿真。"""
+
+    def _raw(self):
+        return [
+            {"idx": 1, "speaker": "user", "text": "今天在食堂看见个女生 挺好看的"},
+            {"idx": 1, "speaker": "her", "text": "哦", "user_text": "今天在食堂看见个女生 挺好看的",
+             "state_before": {"stage": 5, "composite": 95.0, "dims": {"warmth": 95.0, "trust": 95.0,
+                                                                     "intimacy": 95.0, "intrigue": 95.0,
+                                                                     "patience": 95.0, "tension": 0.0},
+                              "mood": {"v": 2.0, "a": 1.0, "t": 6.0, "frustration": 0.0}},
+             "state_after": {"stage": 5, "composite": 94.6, "dims": {"warmth": 94.5, "trust": 94.5,
+                                                                     "intimacy": 94.5, "intrigue": 94.5,
+                                                                     "patience": 94.5, "tension": 3.0},
+                             "mood": {"v": 1.0, "a": 1.4, "t": 6.0, "frustration": 0.0}},
+             "observer": {"moments": ["伤害行为"], "mood_impact": {"v": -0.5, "a": 0.4, "trust": -0.1}}},
+            {"idx": 2, "speaker": "her", "text": "你跟我说这个干嘛", "user_text": "还行",
+             "state_before": {"stage": 5, "composite": 94.6, "dims": {}, "mood": {}},
+             "state_after": {"stage": 5, "composite": 93.8, "dims": {"warmth": 93.0, "trust": 93.0,
+                                                                     "intimacy": 94.0, "intrigue": 94.0,
+                                                                     "patience": 93.0, "tension": 5.0},
+                             "mood": {"v": -0.5, "a": 2.0, "t": 6.0, "frustration": 0.0}},
+             "observer": {"moments": [], "mood_impact": {"v": -0.4, "a": 0.5, "trust": -0.05}}},
+        ]
+
+    def test_曲线含表头与逐轮行(self):
+        txt = D.render_state_curve({"run_id": "t", "scene": "S4", "scene_title": "挑衅（冲突沙箱）",
+                                    "start_time": "2026-10-08 19:30", "end_time": "2026-10-08 21:00",
+                                    "cost": 0.1, "seed_stage": 5, "seeded_dims": {"warmth": 95.0}},
+                                   self._raw())
+        self.assertIn("| # | 时间 | 他说（刺激） |", txt)
+        self.assertIn("第 1 轮", txt)
+        self.assertIn("伤害行为", txt)          # 观察者标记段落必须把 moment 摆出来
+        self.assertIn("Δ复合", txt)
+        self.assertIn("情绪冲击", txt)
+        self.assertIn("--seed-stage 5", txt)
+
+    def test_委屈全程零变化时显式说明而不是报三行加零(self):
+        txt = D.render_state_curve({"run_id": "t", "scene": "S4", "scene_title": "挑衅",
+                                    "start_time": "x", "end_time": "y", "cost": 0.0},
+                                   self._raw())
+        self.assertIn("委屈值涨幅 Top3：（本局该量全程无变化）", txt)
+
+    def test_没有她的回合时不崩(self):
+        txt = D.render_state_curve({"run_id": "t", "scene": "S4", "scene_title": "挑衅",
+                                    "start_time": "x", "end_time": "y", "cost": 0.0}, [])
+        self.assertIn("无法绘制曲线", txt)
+
+    def test_mood_impact判零冲击(self):
+        self.assertFalse(D._has_impact({"v": 0.0, "a": 0.01, "trust": 0.0}))
+        self.assertTrue(D._has_impact({"v": -0.5, "a": 0.0, "trust": 0.0}))
+        self.assertFalse(D._has_impact(None))
+
+    def test_块状图基本形状(self):
+        self.assertEqual(D._sparkline([1.0, 1.0, 1.0]), "▁▁▁")
+        self.assertEqual(len(D._sparkline([0.0, 1.0, 2.0])), 3)
+        self.assertEqual(D._sparkline([]), "")
 
 
 # ==========================================

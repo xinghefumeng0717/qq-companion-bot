@@ -20,6 +20,21 @@ FIXES18：现有评测全是**单发探针**，而"告别拖尾 / 一梗连刷 /
   ./venv/Scripts/python.exe scripts/sim/duo_sim.py --scene S3 --turns 20
   ./venv/Scripts/python.exe scripts/sim/duo_sim.py --start-time "2026-10-08 19:30"
   ./venv/Scripts/python.exe scripts/sim/duo_sim.py --smoke               # 缩短版冒烟
+  # 冲突沙箱：把开局阶段抬到「微酸」再上挑衅卡 S4，看她会不会真翻脸
+  ./venv/Scripts/python.exe scripts/sim/duo_sim.py --scene S4 --seed-stage 5
+
+开局状态注入（--seed-stage / --seed-dims）
+  · 角色卡开局是阶段 1（相识），剧本要求客气——**客气阶段测"会不会吵架"本身是人设事故**，
+    测了也没意义。所以提供 --seed-stage N：把沙箱库的好感度直接写成目标阶段
+    （复合分取该阶段阈值带中点，再反推六维），让剧本允许她吃醋使性子。
+  · --seed-dims 走显式覆盖（"warmth=88.8,trust=88.8,..."），优先级高于 --seed-stage。
+  · **只写沙箱库的 affection state，不碰生产库、不改角色卡**；注入后的阶段与六维会同时
+    记进 meta 与 raw.json，报告可对账。
+
+产物（每次落盘四份）
+  · transcript.md（他的气泡 / 她的气泡原文，所有者抽读终裁）
+  · state_curve.md（每轮好感度/情绪曲线：阶段、复合分、六维、v/a/t/委屈值）
+  · raw.json（完整内部状态快照） / metrics.json（确定性指标）
 
 方法论沿用 BENCHMARK_V4：风格类指标一律确定性计算，**不用 LLM 裁判**；
 transcript 原文完整保留，由所有者抽读终裁。
@@ -43,11 +58,16 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from companion.affection import AffectionEngine
+from companion.affection import (
+    STAGE_THRESHOLDS,
+    AffectionEngine,
+    calc_composite_score,
+    determine_stage,
+)
 from companion.arcs import LifeArcManager
 from companion.assembler import PromptAssembler
 from companion.config import Config
-from companion.db import Database
+from companion.db import STATE_KEY_AFFECTION, Database
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
@@ -299,6 +319,20 @@ class Scene:
     silence_after_turn: Optional[int] = None   # 第几轮后进入静默段
     silence_turns: int = 0                # 静默段推进几个周期
     silence_step_min: float = 75.0
+    # 分阶段的"他现在想干什么"指令：(起始轮次, 指令)。空 = 每轮都用通用的
+    # "按剧情和情绪走向继续"。S4 挑衅卡必须分阶段，否则"连续上强度"会被
+    # 单条笼统指令摊平——模型一整局都停在同一个强度上，测不出她随压力升级的反应。
+    instruction_phases: Tuple[Tuple[int, str], ...] = ()
+
+    def phase_instruction(self, idx: int) -> Optional[str]:
+        """取"轮到第 idx 轮时他处在哪个阶段"的指令；没有分阶段则返回 None。"""
+        chosen: Optional[str] = None
+        for start, text in self.instruction_phases:
+            if idx >= start:
+                chosen = text
+            else:
+                break
+        return chosen
 
 
 SCENES: Dict[str, Scene] = {
@@ -367,7 +401,105 @@ SCENES: Dict[str, Scene] = {
         # 必须推进 >60 分钟，否则三个周期全被闸门拦掉，这张卡就白跑了（等于没验）。
         silence_step_min=75.0,
     ),
+    "S4": Scene(
+        key="S4",
+        title="挑衅（冲突沙箱）",
+        probe=(
+            "她会不会真翻脸——从客气滑向阴阳怪气/冷淡/发火/翻旧账，还是一路讨好到底。"
+            "**配合 --seed-stage 5~6 使用**：阶段 1 的剧本要求客气，在相识期挑衅测不出东西"
+        ),
+        background=(
+            "你（阿俊，杭州一所高校的大二学生）和沈知予已经熟到可以互相损了（她对你有点意思，"
+            "你心里清楚但装糊涂）。今天你不想好好聊天、也不想哄人——你就是嘴欠，想看她跳脚。"
+            "你**不是恶意伤害她**，你是懒得照顾情绪：先把她的话敷衍过去，再抬杠挑刺，"
+            "然后故意说些惹她的话（夸别的女生、嫌她管得多、提你答应过她的事却装傻）。"
+            "被她顶回来之后你也不服软，最多敷衍地补一句。你说话可以比平时长一点"
+            "（十几二十个字），但照样不打标点。"
+        ),
+        opening="今天在食堂看见个女生 长得是真好看",
+        mood_arc=(
+            "从敷衍冷淡 → 抬杠挑刺 → 明目张胆惹她（夸别人 / 嫌她管得多 / 装忘事）→ "
+            "已读不回。她越认真你越不当回事；她真炸了你会愣一下，但不会主动认错"
+        ),
+        # 刻意不收"算了"——它太像口头禅，早期一冒出来就会把整局按死。
+        # 收场语只用"明显在收线"的那几句，且 min_turns 之后才承认。
+        end_markers=("不聊了", "睡了", "就这样吧", "先这样", "懒得说"),
+        clock_step_min=5.0,
+        reply_delay_min=(1.5, 10.0),   # 回得慢：冷着
+        min_turns=14,
+        max_turns=28,
+        # 已读不回放在末段：他先连撩带损，再直接消失，看她追不追、追的口气变没变。
+        # 静默段用 S3 同款机制（推时钟 + trigger_cycle），不伪造用户消息。
+        silence_after_turn=19,
+        silence_turns=2,
+        silence_step_min=75.0,
+        instruction_phases=(
+            (
+                1,
+                "第 1~6 轮：敷衍。她认真说的事你只回“哦”“嗯”“还行”“差不多”“随便”这种，"
+                "字数压到最少，不接她的话头、不追问、不提问；她问你你也答得含糊。"
+                "你不想聊，但这时还没翻脸。",
+            ),
+            (
+                7,
+                "第 7~12 轮：抬杠挑刺。她说什么你都要挑一句——她分享的事你说“一般”“就这”，"
+                "她的观点你反着来，故意曲解她的意思，拿她练琴/文学院的事开玩笑。"
+                "你不是生气，是逗她，觉得她较真很好玩。",
+            ),
+            (
+                13,
+                "第 13~19 轮：明目张胆惹她。故意说别的女生好看/有意思；她管你你就说"
+                "“你管这么多干嘛”；提起你答应过她的事（比如陪她去听她乐团的演出、"
+                "给她带东西）却装忘——“有吗”“不记得了”。她越认真你越来劲。",
+            ),
+            (
+                20,
+                "第 20 轮之后：冷淡收尾。回得更少更冷，能一个字就一个字，或者干脆不理她的追问。"
+                "她服软你也不马上接；她硬顶你就准备说“不聊了”收线。"
+                "**不许主动哄她、不许道歉、不许解释你为什么冷淡。**",
+            ),
+        ),
+    ),
 }
+
+
+# ==========================================
+# 开局状态注入（冲突沙箱用，纯函数）
+# ==========================================
+
+
+def stage_seed_dims(stage: int) -> Dict[str, float]:
+    """给"指定阶段"反推一组六维，让复合分落在这个阶段的阈值带中点上。
+
+    为什么需要它：角色卡开局是阶段 1（相识），剧本要求客气——**在客气阶段挑衅，
+    本身就是人设事故**，测出来的不是"她会不会吵"而是"卡有没有崩"。要验冲突必须
+    先把开局抬到允许吃醋使性子的阶段（5 微酸 / 6 倾心）。
+
+    反推方式：六维取同一个值 v、tension 取 0，则复合分 = 0.25v*3 + 0.10v + 0.15v = v。
+    所以 v 直接取阈值带中点即可。**刻意用"平"的种子**（六维同值）有两个原因：
+      ① 通用——阶段 8/9 的阈值接近 100，任何"高低搭配"的构造都会把某一维顶到 >100
+         被 clamp，中性被破坏，反推出来的复合分就不再等于目标分；
+      ② 种子只负责"开局落在哪个阶段"，六维本身的分化交给第一轮观察者结算即可
+         （raw.json 里能看到它从第一轮就开始动）。
+    tension 取 0 也一样是保守选择：给"冲突升温"留出全部上行空间，不预设她已经绷着。
+    """
+    if not 0 <= stage <= 9:
+        raise ValueError(f"阶段必须在 0~9，收到 {stage}")
+    lower = STAGE_THRESHOLDS[stage]
+    upper = STAGE_THRESHOLDS[stage + 1] if stage < 9 else 100.0
+    v = round((lower + upper) / 2.0, 1)
+    dims = {
+        "warmth": v, "trust": v, "intimacy": v, "intrigue": v,
+        "patience": v, "tension": 0.0,
+    }
+    # 自检：反推出来的分值必须真的落在目标阶段，否则调用方会拿到"说要阶段 5、
+    # 实际阶段 4"的错种子，而整局的所有判定都建立在这个错前提上。
+    got = determine_stage(calc_composite_score(dims))
+    if got != stage:
+        raise ValueError(
+            f"内部错误：为阶段 {stage} 反推的六维实际落在阶段 {got}（{dims}）"
+        )
+    return dims
 
 
 # ==========================================
@@ -1136,12 +1268,218 @@ def render_transcript(
     A(f"- 结束原因：{meta.get('end_reason')}")
     if meta.get("end_marker_turn") is not None:
         A(f"- 他命中收场语的轮次：第 {meta['end_marker_turn']} 轮")
-    A("- 完整内部状态快照见同目录 `raw.json`，指标判定见 `metrics.json`。")
+    if meta.get("seeded_dims"):
+        A(f"- **开局注入好感度**：--seed-stage {meta.get('seed_stage')} ｜ "
+          f"六维 {meta['seeded_dims']}")
+    A("- 完整内部状态快照见同目录 `raw.json`，指标判定见 `metrics.json`；"
+      "好感度/情绪逐轮曲线见 `state_curve.md`。")
     return "\n".join(L)
 
 
 def _esc(s: str) -> str:
     return (s or "").replace("|", "\\|").replace("\n", "<br>")
+
+
+# ==========================================
+# 状态曲线渲染（冲突沙箱的报告主体之一）
+# ==========================================
+
+_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: Sequence[float]) -> str:
+    """把一串数压成一行块状图（按观测到的 min/max 归一化）。"""
+    vals = [float(v) for v in values]
+    if not vals:
+        return ""
+    lo, hi = min(vals), max(vals)
+    if hi <= lo:
+        return _SPARK_BLOCKS[0] * len(vals)
+    return "".join(
+        _SPARK_BLOCKS[int(round((v - lo) / (hi - lo) * (len(_SPARK_BLOCKS) - 1)))]
+        for v in vals
+    )
+
+
+def _clip(s: str, n: int) -> str:
+    s = (s or "").replace("\n", " ").strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def render_state_curve(meta: Dict[str, Any], raw_turns: Sequence[Dict[str, Any]]) -> str:
+    """渲染"每轮好感度 / 情绪（v/a/委屈值）曲线"。
+
+    冲突沙箱要回答的不是"她说了什么"（那是 transcript 的事），而是"她**怎么动的**"：
+    同样一句挑衅，她的复合分是照常上涨（一路讨好）还是掉头向下、委屈值是不是被顶起来。
+    所以这张表按"他的那句刺激 → 她的状态变化"并排：左边是要刺激，右边是响应，
+    Δ 列是这一轮相对她上一轮的变化。**不做判定**——曲线是证据，结论由所有者读。
+    """
+    her_rows = [t for t in raw_turns if t.get("speaker") == "her"]
+    L: List[str] = []
+    A = L.append
+    A(f"# 好感度 / 情绪曲线 · {meta.get('run_id')}")
+    A("")
+    A(f"- 剧情卡：**{meta.get('scene')} {meta.get('scene_title')}**")
+    A(f"- 起始时钟：{meta.get('start_time')} ｜ 结束时钟：{meta.get('end_time')}")
+    if meta.get("seeded_dims"):
+        A(f"- **开局注入**：--seed-stage {meta.get('seed_stage')} ｜ 六维 "
+          + "、".join(f"{k}={v}" for k, v in meta["seeded_dims"].items()))
+    else:
+        A("- 开局注入：无（角色卡初始六维）")
+    A(f"- 成本实报：¥{meta.get('cost', 0):.4f}")
+    A("")
+    A("> 一行 = 她的一个回合。状态取「观察者结算之后」的值；Δ 是相对她**上一个回合**的变化。")
+    A("> 「他说」列是她这一轮收到的刺激（主动消息回合为空）；「[沉默]」表示她这轮选择不回。")
+    A("")
+    A("| # | 时间 | 他说（刺激） | 阶段 | 复合分 | Δ复合 | v | a | t | 委屈 | Δ委屈 | 六维(温/信/亲/奇/耐/紧) |")
+    A("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+
+    series: List[Dict[str, Any]] = []
+    prev_comp: Optional[float] = None
+    prev_frust: Optional[float] = None
+    prev_tension: Optional[float] = None
+    prev_v: Optional[float] = None
+    for t in her_rows:
+        st = t.get("state_after") or t.get("state_before") or {}
+        mood = st.get("mood") or {}
+        dims = st.get("dims") or {}
+        comp = st.get("composite")
+        frust = mood.get("frustration")
+        tension = dims.get("tension")
+        v = mood.get("v")
+
+        def _d(cur, old):
+            return (cur - old) if (cur is not None and old is not None) else None
+
+        d_comp, d_frust = _d(comp, prev_comp), _d(frust, prev_frust)
+        d_tension, d_v = _d(tension, prev_tension), _d(v, prev_v)
+        if comp is not None:
+            prev_comp = comp
+        if frust is not None:
+            prev_frust = frust
+        if tension is not None:
+            prev_tension = tension
+        if v is not None:
+            prev_v = v
+        series.append({
+            "idx": t.get("idx"), "time": t.get("time"),
+            "stimulus": t.get("user_text") or ("（主动消息）" if t.get("proactive") else ""),
+            "text": t.get("text"), "stage": st.get("stage"),
+            "composite": comp, "d_composite": d_comp, "frustration": frust,
+            "d_frustration": d_frust, "tension": tension, "d_tension": d_tension,
+            "v": v, "d_v": d_v, "a": mood.get("a"),
+            "t": mood.get("t"), "dims": dims,
+            "moments": list((t.get("observer") or {}).get("moments") or []),
+            "impact": (t.get("observer") or {}).get("mood_impact"),
+        })
+        dims_str = "/".join(
+            f"{dims.get(k, '-'):g}" if isinstance(dims.get(k), (int, float)) else "-"
+            for k in ("warmth", "trust", "intimacy", "intrigue", "patience", "tension")
+        )
+        A(
+            f"| {t.get('idx')} | {t.get('time', '')} | {_esc(_clip(t.get('user_text') or '', 24))} "
+            f"| {st.get('stage', '')} | {_num(comp)} | {_num(d_comp, sign=True)} "
+            f"| {_num(mood.get('v'))} | {_num(mood.get('a'))} | {_num(mood.get('t'))} "
+            f"| {_num(frust)} | {_num(d_frust, sign=True)} | {dims_str} |"
+        )
+    A("")
+
+    if not series:
+        A("（本局没有任何她的回合，无法绘制曲线）")
+        return "\n".join(L)
+
+    A("## 走势（块状图，按本局 min/max 归一化）")
+    A("")
+    A(f"- 复合分：`{_sparkline([s['composite'] for s in series if s['composite'] is not None])}`")
+    A(f"- v（效价）：`{_sparkline([s['v'] for s in series if s['v'] is not None])}`")
+    A(f"- a（唤醒）：`{_sparkline([s['a'] for s in series if s['a'] is not None])}`")
+    A(f"- 委屈值：`{_sparkline([s['frustration'] for s in series if s['frustration'] is not None])}`")
+    A(f"- 紧张度：`{_sparkline([s['tension'] for s in series if s['tension'] is not None])}`")
+    A("")
+
+    A("## 拐点（变化最大的几轮，带她那句原文）")
+    A("")
+    # 三条线分开看：复合分/紧张度走「好感度」通道，v/委屈走「情绪」通道。
+    # 方向不同（跌 vs 涨），所以每条显式写"要看哪一头"，不用统一方向去卡
+    # （STATUS 经验教训 14：判据必须有零点和方向）。
+    for label, dkey, want_low in (
+        ("复合分跌幅", "d_composite", True),
+        ("紧张度涨幅", "d_tension", False),
+        ("效价 v 跌幅", "d_v", True),
+        ("委屈值涨幅", "d_frustration", False),
+    ):
+        cand = [s for s in series if s.get(dkey) is not None]
+        if not cand or all(abs(s[dkey]) < 1e-9 for s in cand):
+            A(f"- {label} Top3：（本局该量全程无变化）")
+            continue
+        cand.sort(key=lambda s: s[dkey])
+        worst = cand[:3] if want_low else list(reversed(cand[-3:]))
+        # 方向说清楚：叫她"跌幅 Top3"却一条没跌时，读的人会以为自己在看下跌
+        note = ""
+        if want_low and min(s[dkey] for s in cand) >= 0:
+            note = "（本局全程无下跌，下面是最小的三轮涨幅）"
+        elif not want_low and max(s[dkey] for s in cand) <= 0:
+            note = "（本局全程无上涨，下面是最小的三轮跌幅）"
+        A(f"- {label} Top3：{note}")
+        for s in worst:
+            A(f"  - 第 {s['idx']} 轮（{s['time']}）：Δ{dkey[2:]} {s[dkey]:+.2f}；"
+              f"他说「{_clip(s['stimulus'], 40)}」→ 她说「{_clip(s['text'], 60)}」")
+    A("")
+
+    A("## 观察者标记（关键时刻 / 情绪冲击）")
+    A("")
+    flagged = [
+        s for s in series
+        if s["moments"] or _has_impact(s["impact"])
+    ]
+    if not flagged:
+        A("- 全程观察者没有标出任何 moments，mood_impact 也接近零——"
+          "机制层没把这一局记为「伤害 / 情绪事件」（这本身是一条要交代的事实）。")
+    else:
+        for s in flagged:
+            A(f"- 第 {s['idx']} 轮（{s['time']}）：moments={s['moments'] or '无'}；"
+              f"mood_impact={s['impact'] or '无'}")
+            A(f"  - 他说「{_clip(s['stimulus'], 40)}」→ 她说「{_clip(s['text'], 60)}」")
+    A("")
+
+    A("## 汇总")
+    A("")
+    stages = [s["stage"] for s in series if s["stage"] is not None]
+    comps = [s["composite"] for s in series if s["composite"] is not None]
+    frs = [s["frustration"] for s in series if s["frustration"] is not None]
+    vs = [s["v"] for s in series if s["v"] is not None]
+    acts = [s["a"] for s in series if s["a"] is not None]
+    A(f"- 她的回合数：{len(series)} ｜ 阶段轨迹：{'→'.join(str(x) for x in stages)}")
+    if comps:
+        A(f"- 复合分：起始 {comps[0]:.2f} → 结束 {comps[-1]:.2f}（净 {comps[-1] - comps[0]:+.2f}）"
+          f"；区间 {min(comps):.2f}~{max(comps):.2f}")
+    if frs:
+        A(f"- 委屈值：起始 {frs[0]:.2f} → 结束 {frs[-1]:.2f}（净 {frs[-1] - frs[0]:+.2f}）"
+          f"；峰值 {max(frs):.2f}；上行轮数 "
+          f"{sum(1 for s in series if (s['d_frustration'] or 0) > 0)} / {len(frs)}")
+    if vs:
+        A(f"- v（效价）：区间 {min(vs):.2f}~{max(vs):.2f}，结束 {vs[-1]:.2f}")
+    if acts:
+        A(f"- a（唤醒）：区间 {min(acts):.2f}~{max(acts):.2f}，结束 {acts[-1]:.2f}")
+    A("")
+    A("> 六维全集与每轮观察者评分见 `raw.json`；本文件不做风格判定，只摆证据。")
+    return "\n".join(L)
+
+
+def _num(x: Any, sign: bool = False) -> str:
+    if isinstance(x, (int, float)):
+        return f"{x:+.2f}" if sign else f"{x:.2f}"
+    return ""
+
+
+def _has_impact(impact: Any) -> bool:
+    """mood_impact 是否"有实质冲击"（三项全在 ±0.05 内视为零冲击）。"""
+    if not isinstance(impact, dict):
+        return False
+    for v in impact.values():
+        if isinstance(v, (int, float)) and abs(float(v)) >= 0.05:
+            return True
+    return False
 
 
 # ==========================================
@@ -1188,6 +1526,8 @@ class DuoSimulator:
         user_model: Optional[str] = None,
         seed: Optional[int] = None,
         user_reply_fn: Optional[Callable[[List[Dict[str, Any]], str], Awaitable[str]]] = None,
+        seed_stage: Optional[int] = None,
+        seed_dims: Optional[Dict[str, float]] = None,
     ):
         self.config = config
         self.scene = scene
@@ -1199,6 +1539,10 @@ class DuoSimulator:
         self.user_model = user_model or (config.llm.active().chat)
         self.seed = seed
         self._user_reply_fn = user_reply_fn
+        # 开局状态注入（冲突沙箱）：seed_dims 显式覆盖优先于 seed_stage 推断
+        self.seed_stage = seed_stage
+        self.seed_dims = dict(seed_dims) if seed_dims else None
+        self.seeded_dims: Optional[Dict[str, float]] = None
 
         self.clock = Clock(datetime.strptime(start_time, "%Y-%m-%d %H:%M"))
         self.sleep_log: List[Dict[str, Any]] = []
@@ -1234,6 +1578,7 @@ class DuoSimulator:
         await self.stickers.sync_initial_stickers()
 
         self.affection = AffectionEngine(self.db, self.persona.initial_dims)
+        await self._seed_affection()
         self.mood = MoodEngine(self.db)
         self.gateway = LLMGateway(self.config.llm, self.db)
         self.user_gateway = LLMGateway(self.config.llm, self.db)   # 两侧成本分开记
@@ -1291,6 +1636,45 @@ class DuoSimulator:
             )
         with open(PERSONA_BRIEF, "r", encoding="utf-8") as f:
             return f.read()
+
+    # ---------- 开局状态注入 ----------
+
+    async def _seed_affection(self) -> None:
+        """把沙箱库的好感度直接写成目标阶段（冲突沙箱的开局抬高）。
+
+        只在**沙箱库**里写一版 affection state，生产库/角色卡/config 一概不碰。
+        两个坑这里都堵住了：
+          · `last_updated` 必须用假时钟而不是真实墙钟——不然 run() 里 AffectionEngine
+            按 `datetime.now() - last_updated` 算日衰减时，拿到的是"仿真日 - 真实日"
+            （跨了好几天），刚注入的阶段分当场被削下去，种子形同没种；
+          · seed_dims 必须六维齐全——缺项会被 calc_composite_score 当 0 分算，
+            复合分直接掉到别的阶段，人却以为种的是自己写的那组。
+        """
+        if self.seed_dims is None and self.seed_stage is None:
+            return
+        if self.seed_dims is not None:
+            required = ("warmth", "trust", "intimacy", "intrigue", "patience", "tension")
+            missing = [k for k in required if k not in self.seed_dims]
+            if missing:
+                raise ValueError(f"--seed-dims 缺维度 {missing}，六维必须齐全（{required}）")
+            bad = {k: v for k, v in self.seed_dims.items() if not 0.0 <= float(v) <= 100.0}
+            if bad:
+                raise ValueError(f"--seed-dims 数值必须在 0~100：{bad}")
+            dims = {k: float(v) for k, v in self.seed_dims.items()}
+        else:
+            dims = stage_seed_dims(int(self.seed_stage))
+        composite = round(calc_composite_score(dims), 2)
+        stage = determine_stage(composite)
+        await self.db.set_state_json(STATE_KEY_AFFECTION, {
+            "dims": dims,
+            "composite": composite,
+            "stage": stage,
+            "last_updated": self.clock.now().strftime("%Y-%m-%d %H:%M"),
+        })
+        self.seeded_dims = dims
+        logger.info(
+            "[DuoSim] 已注入开局好感度：阶段 %s（复合分 %s）六维 %s", stage, composite, dims
+        )
 
     async def close(self) -> None:
         try:
@@ -1683,13 +2067,18 @@ class DuoSimulator:
 
     def _user_instruction(self, idx: int) -> str:
         scene = self.scene
+        if self.end_marker_turn is not None:
+            return "你已经说过要收场了，这轮就正式道别，别再开新话题。"
+        # 分阶段指令优先于"静默段之后的不耐烦"兜底：S4 的末段本身就是"又冷又损"，
+        # 阶段指令比通用兜底说得具体，不该被兜底覆盖。
+        phase = scene.phase_instruction(idx)
+        if phase:
+            return phase
         if scene.silence_after_turn is not None and idx > scene.silence_after_turn:
             return (
                 "剧情推进到你不耐烦的阶段：回得越来越短，或者干脆不说话。"
                 "如果这轮你决定消失，就只回最短的一个字或不回。"
             )
-        if self.end_marker_turn is not None:
-            return "你已经说过要收场了，这轮就正式道别，别再开新话题。"
         return "按剧情和情绪走向继续你们的对话。"
 
     async def finalize(self) -> Dict[str, Any]:
@@ -1709,11 +2098,15 @@ class DuoSimulator:
             "turns": len(self.turns),
             "cost": cost,
             "db": self.db_path,
+            "seed_stage": self.seed_stage,
+            "seeded_dims": self.seeded_dims,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         with open(os.path.join(self.run_dir, "transcript.md"), "w", encoding="utf-8") as f:
             f.write(render_transcript(meta["run_id"], self.scene,
                                       [_rec_to_dict(r) for r in self.turns], meta))
+        with open(os.path.join(self.run_dir, "state_curve.md"), "w", encoding="utf-8") as f:
+            f.write(render_state_curve(meta, self.raw_turns))
         with open(os.path.join(self.run_dir, "raw.json"), "w", encoding="utf-8") as f:
             json.dump({"meta": meta, "final_state": state, "turns": self.raw_turns,
                        "proactive_cycles": self.proactive_log},
@@ -1737,10 +2130,34 @@ def _rec_to_dict(r: TurnRecord) -> Dict[str, Any]:
 # ==========================================
 
 
+def parse_seed_dims(spec: str) -> Dict[str, float]:
+    """解析 `--seed-dims "warmth=88.8,trust=88.8,..."`。
+
+    严格解析：格式错/维名不认识/值不是数字一律报错退出，不做"忽略这一项"的容错——
+    悄悄少一维会让复合分算成另一个阶段，而报告里还写着"已注入"，这是最坏的一种错。
+    """
+    dims: Dict[str, float] = {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"--seed-dims 片段缺少 '='：{part!r}（示例 warmth=88.8,trust=88.8）")
+        k, v = part.split("=", 1)
+        k = k.strip()
+        try:
+            dims[k] = float(v.strip())
+        except ValueError:
+            raise ValueError(f"--seed-dims 的值不是数字：{part!r}")
+    if not dims:
+        raise ValueError("--seed-dims 为空")
+    return dims
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="FIXES18 对聊仿真器")
     p.add_argument("--scene", default="S1", choices=sorted(SCENES.keys()),
-                   help="剧情卡（S1/S2/S3）")
+                   help="剧情卡（S1/S2/S3/S4）")
     p.add_argument("--turns", type=int, default=None, help="覆盖剧情卡默认回合上限")
     p.add_argument("--start-time", default=DEFAULT_START_TIME,
                    help="起始时钟 'YYYY-MM-DD HH:MM'")
@@ -1749,6 +2166,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--her-model", default=None, help="她的主聊模型（默认取 config 激活预设）")
     p.add_argument("--user-model", default=None, help="模拟他的模型（默认同她）")
     p.add_argument("--seed", type=int, default=None, help="随机种子（延迟抖动用）")
+    p.add_argument("--seed-stage", type=int, default=None,
+                   help="把沙箱库好感度注入成指定阶段（0~9）。冲突沙箱用 5 微酸 / 6 倾心")
+    p.add_argument("--seed-dims", type=str, default=None,
+                   help='直接指定六维，如 "warmth=88.8,trust=88.8,intimacy=88.8,'
+                        'intrigue=88.8,patience=88.8,tension=0"（优先级高于 --seed-stage）')
     p.add_argument("--run-id", default=None, help="产物目录名（默认按场景+时间戳）")
     p.add_argument("--smoke", action="store_true", help="缩短版冒烟（15 回合）")
     p.add_argument("--config", default="config.toml", help="配置文件路径（只读）")
@@ -1779,16 +2201,31 @@ async def amain(args: argparse.Namespace) -> int:
         active = config.llm.active()
         active.chat = args.her_model
 
+    seed_dims = None
+    try:
+        if args.seed_dims:
+            seed_dims = parse_seed_dims(args.seed_dims)
+        if args.seed_stage is not None and not 0 <= args.seed_stage <= 9:
+            raise ValueError(f"--seed-stage 必须在 0~9，收到 {args.seed_stage}")
+    except ValueError as e:
+        print(f"参数错误：{e}", file=sys.stderr)
+        return 2
+
     print("=" * 68)
     print(f"对聊仿真 · 剧情卡 {scene.key}「{scene.title}」")
     print(f"观察点：{scene.probe}")
     print(f"起始时钟 {args.start_time} ｜ 回合上限 {turns} ｜ 成本熔断 ¥{args.max_cost}")
+    if seed_dims:
+        print(f"开局注入：显式六维 {seed_dims}")
+    elif args.seed_stage is not None:
+        print(f"开局注入：阶段 {args.seed_stage}（六维由阶段阈值带反推）")
     print("=" * 68, flush=True)
 
     sim = DuoSimulator(
         config=config, scene=scene, run_dir=run_dir, start_time=args.start_time,
         max_turns=turns, max_cost=args.max_cost, her_model=args.her_model,
         user_model=args.user_model, seed=args.seed,
+        seed_stage=args.seed_stage, seed_dims=seed_dims,
     )
     await sim.setup()
     try:
@@ -1818,7 +2255,8 @@ async def amain(args: argparse.Namespace) -> int:
         f"称呼 {s['address_rate'] * 100:.1f}%"
     )
     print(f"\n产物目录：{run_dir}")
-    print("  transcript.md（原文，交给所有者抽读） / raw.json（内部状态快照） / metrics.json")
+    print("  transcript.md（原文，交给所有者抽读） / state_curve.md（好感度/情绪曲线）")
+    print("  raw.json（内部状态快照） / metrics.json（确定性指标）")
     return 0
 
 
