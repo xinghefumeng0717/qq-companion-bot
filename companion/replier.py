@@ -105,6 +105,33 @@ VOICE_PATTERN = re.compile(
 # 落库形态：与收侧他的语音转写同格式（observer/日记只认这一种形态）
 VOICE_RECORD_PREFIX = "（语音消息）"
 
+# 她把存档格式当发送语法写的识别（2026-10-05 生产实测）：
+# 历史里语音的存档形态是"（语音消息）内容"，她会有样学样地以（语音消息）开头
+# 输出一整行（她想发语音，但写错了语法）。只认行首，宁漏勿错。
+_VOICE_RECORD_LINE_PREFIX = re.compile(r"^[（(]\s*语音消息\s*[）)](.*)$", re.MULTILINE)
+
+
+def rewrite_voice_record_prefix(text: str, voice_allowed: bool) -> str:
+    """把行首"（语音消息）内容"翻译回语音意图；语音不可用时剥前缀留正文。
+
+    必须抢在旁白剥离之前：否则括号滤网把前缀当旁白剥掉，她想开口的意图
+    被静默降级成文字（生产实测：4 次想发语音，3 次写成存档格式被剥）。
+    """
+    if not text or "语音消息" not in text:
+        return text
+
+    def _sub(m: "re.Match[str]") -> str:
+        content = m.group(1).strip()
+        if not content:
+            return ""
+        if voice_allowed:
+            logger.info("[Replier] 她把存档格式（语音消息）当发送语法写了，翻译回 [voice:] 标记")
+            return f"[voice:]{content}[/voice]"
+        logger.info("[Replier] 语音不可用时她写了存档格式（语音消息），剥前缀按文字发")
+        return content
+
+    return _VOICE_RECORD_LINE_PREFIX.sub(_sub, text)
+
 
 def strip_leading_quote(text: str) -> Tuple[str, Optional[int]]:
     """剥掉回复开头的引用标记行，返回 (剩下的文本, 编号)。
@@ -1112,6 +1139,9 @@ class Replier:
 
         # 2. 行首触发方向标签剥离（【起】/【接】/【收】）
         clean_text = strip_direction_tag(clean_text)
+
+        # 2.5 她把存档格式（语音消息）当发送语法写时，抢在旁白剥离之前翻译回语音意图
+        clean_text = rewrite_voice_record_prefix(clean_text, voice_allowed)
 
         # 3. 旁白剥离
         clean_text = strip_narration(clean_text)

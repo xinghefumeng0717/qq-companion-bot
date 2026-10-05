@@ -22,7 +22,7 @@ from companion.db import Database, COUNTER_KEY_TOTAL_TURNS, TIME_FORMAT, parse_d
 from companion.memory import POSITIVE_SENTIMENTS, NEGATIVE_SENTIMENTS, MemoryManager, calc_diary_strength
 from companion.mood import MoodEngine
 from companion.observer import recent_observer_logs
-from companion.persona import Persona
+from companion.persona import Persona, holiday_span
 from companion.prompts import get_mood_description, get_mood_label, get_trust_description
 from companion.proactive import ProactiveScheduler
 from companion.backup import get_last_backup_time, run_daily_backup
@@ -83,6 +83,16 @@ class AdminServer:
         self.backup_dir = backup_dir
         self.start_time = datetime.now()
         self._runner: Optional[web.AppRunner] = None
+
+    def _current_activity(self, now_dt: datetime) -> str:
+        """看板"她此刻"的活动文案：节假日段长与聊天主链路同一数据源
+        （assembler.get_holidays）。长假期间她回绍兴老家，看板不许显示
+        "在学校上课"（生产实测 2026-10-05 国庆穿帮：聊天说对了绍兴，
+        看板却在教学区上专业必修）。"""
+        span = holiday_span(now_dt.strftime("%Y-%m-%d"), self.assembler.get_holidays())
+        return self.persona.get_current_activity(
+            now_dt.hour, now_dt.weekday(), holiday_span=span
+        )
 
     async def _today_cost(self) -> float:
         """获取今日累计 LLM 费用"""
@@ -154,7 +164,9 @@ class AdminServer:
         month_cn, day_cn, weekday_cn = format_chinese_date(now_dt)
         date_str = f"{month_cn}{day_cn}，{weekday_cn}。"
 
-        activity = self.persona.get_current_activity(now_dt.hour, now_dt.weekday())
+        # 节假日段长与聊天主链路同一数据源（assembler.get_holidays）——
+        # 长假期间她回绍兴老家，看板不许显示"在学校上课"（生产实测 10-05 国庆穿帮）
+        activity = self._current_activity(now_dt)
         if activity.startswith("正在"):
             act_phrase = activity
         elif activity.startswith("在"):
