@@ -6,9 +6,10 @@
 3. make_mock_gateway: Mock LLM Gateway
 """
 
+import json
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 from companion.admin import AdminServer
@@ -151,3 +152,93 @@ def make_mock_gateway(
         mock_gw.chat = AsyncMock()
     mock_gw.stream_chat = AsyncMock()
     return mock_gw
+
+
+def card_path() -> str:
+    """解析测试要用的角色卡目录，让公开 clone 不再依赖私有卡。
+
+    优先级：
+    1. 环境变量 QQC_TEST_CARD（显式指定，外人环境可设 characters/example）；
+    2. characters/qingzi 存在则用它（所有者本机，保持原有覆盖）；
+    3. 回落 characters/example（仓库自带的公开模板卡）。
+    """
+    env_card = os.environ.get("QQC_TEST_CARD", "").strip()
+    if env_card:
+        return env_card
+    private_card = os.path.join("characters", "qingzi")
+    if os.path.isdir(private_card):
+        return private_card
+    return os.path.join("characters", "example")
+
+
+# 夹具卡的默认 10 阶段：名称覆盖 test_fixes18 断言的第 4/5 格（知己/微酸）。
+FIXTURE_STAGE_NAMES = [
+    "初识", "认识", "熟悉", "朋友", "知己", "微酸", "倾心", "深情", "挚爱", "相伴",
+]
+
+# 夹具卡的默认作息：周六（weekday=5）午后带校园场景词，
+# 供 test_fixes14 验证长假路径不泄漏校园词。
+FIXTURE_DAILY_ROUTINE = [
+    {"start": 0, "end": 8, "activity": "在宿舍睡觉休息"},
+    {"start": 8, "end": 12, "activity": "去琴房练琴"},
+    {"start": 12, "end": 14, "activity": "在食堂吃午饭"},
+    {"start": 14, "end": 18, "activity": "周末外出：坐校车去玉泉老校区看老建筑", "days": [5, 6]},
+    {"start": 18, "end": 24, "activity": "在宿舍看书休息"},
+]
+
+
+def make_fixture_card(
+    base_dir: str,
+    stage_names: Optional[List[str]] = None,
+    daily_routine: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """在 base_dir 里写一张最小可用的测试夹具卡（结构化虚构内容，零私有影子）。
+
+    只填被测内容需要的字段：恰好 10 个阶段（默认含「知己」「微酸」）、
+    覆盖全天的 daily_routine（默认含一段周六校园作息）。返回 base_dir。
+    需要独立临时目录时由调用方自备（如 tempfile.mkdtemp + addCleanup）。
+    """
+    os.makedirs(base_dir, exist_ok=True)
+
+    names = list(stage_names) if stage_names else list(FIXTURE_STAGE_NAMES)
+    if len(names) != 10:
+        raise ValueError(f"夹具卡 stages 必须恰好 10 个，当前 {len(names)}")
+    stages = [
+        {"name": name, "tone": "测试语气", "instructions": [f"阶段 {i} 的测试指令"]}
+        for i, name in enumerate(names)
+    ]
+    routine = (
+        [dict(item) for item in daily_routine]
+        if daily_routine is not None
+        else [dict(item) for item in FIXTURE_DAILY_ROUTINE]
+    )
+
+    card = {
+        "name": "测试角色",
+        "user_address": "你",
+        "core_description": "测试夹具卡：只提供最小合法字段，不含任何真实角色设定。",
+        "chat_style": {"rules": ["你在用手机QQ聊天，只输出聊天文字本身"]},
+        "initial_dims": {
+            "warmth": 40.0,
+            "trust": 50.0,
+            "intimacy": 35.0,
+            "intrigue": 30.0,
+            "patience": 50.0,
+            "tension": 3.0,
+        },
+        "stages": stages,
+        "daily_routine": routine,
+        "personal_memories": [],
+        "habits": [],
+        "stickers_dir": "stickers",
+    }
+
+    with open(os.path.join(base_dir, "character.json"), "w", encoding="utf-8") as f:
+        json.dump(card, f, ensure_ascii=False, indent=2)
+
+    stickers_dir = os.path.join(base_dir, "stickers")
+    os.makedirs(stickers_dir, exist_ok=True)
+    with open(os.path.join(stickers_dir, "index.json"), "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
+    return base_dir

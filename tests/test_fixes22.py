@@ -740,12 +740,12 @@ class TestVoicePrompt(unittest.TestCase):
         self.assertIn("别连着发好几段", VOICE_PROMPT_BLOCK)
 
     def test_关着时提示词里没有voice(self):
-        from helpers import close_db, make_db, make_engine_stack
+        from helpers import card_path, close_db, make_db, make_engine_stack
 
         async def run():
             db = await make_db()
             try:
-                stack = make_engine_stack(db, persona_path=os.path.join("characters", "qingzi"))
+                stack = make_engine_stack(db, persona_path=card_path())
                 _msgs, prompt = await stack.assembler.assemble_messages("在吗", None, [], False)
                 return prompt
             finally:
@@ -755,12 +755,12 @@ class TestVoicePrompt(unittest.TestCase):
         self.assertNotIn("[voice:", prompt, "默认关时模型不该认识 [voice:]")
 
     def test_开着时提示词里有voice(self):
-        from helpers import close_db, make_db, make_engine_stack
+        from helpers import card_path, close_db, make_db, make_engine_stack
 
         async def run():
             db = await make_db()
             try:
-                stack = make_engine_stack(db, persona_path=os.path.join("characters", "qingzi"))
+                stack = make_engine_stack(db, persona_path=card_path())
                 _msgs, prompt = await stack.assembler.assemble_messages("在吗", None, [], True)
                 return prompt
             finally:
@@ -772,12 +772,12 @@ class TestVoicePrompt(unittest.TestCase):
 
     def test_她此刻仍独立成行(self):
         """FIXES21 踩过：【她此刻】被插进来的块挤到行中间，既有守卫报过一次。"""
-        from helpers import close_db, make_db, make_engine_stack
+        from helpers import card_path, close_db, make_db, make_engine_stack
 
         async def run():
             db = await make_db()
             try:
-                stack = make_engine_stack(db, persona_path=os.path.join("characters", "qingzi"))
+                stack = make_engine_stack(db, persona_path=card_path())
                 _msgs, prompt = await stack.assembler.assemble_messages("在吗", None, [], True)
                 return prompt
             finally:

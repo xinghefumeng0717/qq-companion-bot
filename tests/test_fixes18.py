@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from typing import Any, Dict, List
@@ -35,9 +36,12 @@ from unittest.mock import patch
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "sim"))
+if os.path.join(_REPO_ROOT, "tests") not in sys.path:
+    sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
 
 import duo_sim as D
 from companion.gateway import LLMGateway
+from helpers import make_fixture_card
 
 # ==========================================
 # 共用：假网关（两侧都不打真实 API）
@@ -276,10 +280,11 @@ class TestStageSeed(unittest.TestCase):
         self.assertLess(comp5, D.STAGE_THRESHOLDS[6])
         # 81~93 那格其实是「知己」（阶段 4）
         self.assertEqual(D.determine_stage(D.stage_seed_dims(4)["warmth"]), 4)
-        card_path = os.path.join("characters", "qingzi")
-        if not os.path.isdir(card_path):
-            self.skipTest("本地无 characters/qingzi（gitignored），跳过阶段名核对")
-        card = D.Persona.load(card_path)
+        # 阶段名核对走自建夹具卡，不再依赖任何真实（私有的）角色卡
+        card_dir = tempfile.mkdtemp(prefix="qqc_fixture_card_")
+        self.addCleanup(shutil.rmtree, card_dir, True)
+        make_fixture_card(card_dir)
+        card = D.Persona.load(card_dir)
         self.assertEqual(card.get_stage(5).name, "微酸")
         self.assertEqual(card.get_stage(4).name, "知己")
 

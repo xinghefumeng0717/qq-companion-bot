@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
@@ -35,9 +37,9 @@ from companion.prompts import (
     holiday_prompt_note,
 )
 from companion.config import ProactiveConfig, ReplyConfig
-from helpers import close_db, make_db, make_engine_stack, make_mock_gateway
+from helpers import card_path, close_db, make_db, make_engine_stack, make_fixture_card, make_mock_gateway
 
-# 校园场景词：来自真实角色卡的日常作息（见下方 TestQingziLongHolidayNoCampusRoutine）
+# 校园场景词：来自夹具卡的周六作息（见下方 TestLongHolidayNoCampusRoutine）
 CAMPUS_WORDS = ("银泉", "临湖", "琴房", "玉泉", "校车")
 
 
@@ -215,11 +217,18 @@ class TestGetCurrentActivityHolidaySpan(unittest.TestCase):
                 )
 
 
-class TestQingziLongHolidayNoCampusRoutine(unittest.TestCase):
-    """真实角色卡回归：周六作息里就有"坐校车去玉泉老校区"（E10 实锤来源）"""
+class TestLongHolidayNoCampusRoutine(unittest.TestCase):
+    """夹具卡回归：夹具的周六作息里带"坐校车去玉泉"（E10 同类场景）。
+
+    不依赖任何真实角色卡——本类断言的是"作息文案里有校园词"这一结构，
+    夹具卡自己提供该结构即可，公开 clone 无需私有卡也能跑到同一条路径。
+    """
 
     def setUp(self):
-        self.persona = Persona.load("characters/qingzi")
+        self._card_dir = tempfile.mkdtemp(prefix="qqc_fixture_card_")
+        self.addCleanup(shutil.rmtree, self._card_dir, True)
+        make_fixture_card(self._card_dir)
+        self.persona = Persona.load(self._card_dir)
 
     def test_short_holiday_would_leak_campus_words(self):
         """反向对照：短假路径确实会把校园作息词带出来。
@@ -273,7 +282,7 @@ class TestTask1AssemblerAndProactiveLongHoliday(unittest.IsolatedAsyncioTestCase
         self.gateway = make_mock_gateway()
         self.stack = make_engine_stack(
             self.db,
-            "characters/qingzi",
+            card_path(),
             gateway=self.gateway,
             reply_config=ReplyConfig(chunk_delay_min=0.0, chunk_delay_max=0.0),
             proactive_config=ProactiveConfig(quiet_hours=[]),

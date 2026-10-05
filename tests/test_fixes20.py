@@ -36,6 +36,8 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 if os.path.join(_REPO_ROOT, "scripts", "sim") not in sys.path:
     sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "sim"))
+if os.path.join(_REPO_ROOT, "tests") not in sys.path:
+    sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
 
 from companion.affection import AffectionEngine
 from companion.aggregator import MessageAggregator
@@ -75,9 +77,11 @@ from companion.replier import (
     strip_face_markers,
 )
 
-# 真实角色卡路径：下游回归（observer/记忆）要用真引擎堆，
+from helpers import card_path  # noqa: E402  （tests/ 已在上方加入 sys.path）
+
+# 角色卡路径：下游回归（observer/记忆）要用真引擎堆，
 # 不能拿 None 占位——那样只能验出"参数没传对"，验不到"纯标签会不会炸"。
-_QINGZI = os.path.join("characters", "qingzi")
+_QINGZI = card_path()
 
 
 async def _async_return(value: str):

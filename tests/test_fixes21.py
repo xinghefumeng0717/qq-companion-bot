@@ -334,11 +334,11 @@ class TestNumberedBlockAssembler(unittest.IsolatedAsyncioTestCase):
     async def test_单条消息时提示词与改动前一致(self):
         """无批次时不能多出任何编号块。"""
         sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
-        from helpers import close_db, make_db, make_engine_stack
+        from helpers import card_path, close_db, make_db, make_engine_stack
 
         db = await make_db()
         try:
-            stack = make_engine_stack(db, persona_path=os.path.join("characters", "qingzi"))
+            stack = make_engine_stack(db, persona_path=card_path())
             messages, _ = await stack.assembler.assemble_messages("在吗", None, [])
             user_msg = messages[-1]["content"]
             self.assertEqual(user_msg, "在吗")
@@ -348,11 +348,11 @@ class TestNumberedBlockAssembler(unittest.IsolatedAsyncioTestCase):
 
     async def test_三条消息时提示词含编号块(self):
         sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
-        from helpers import close_db, make_db, make_engine_stack
+        from helpers import card_path, close_db, make_db, make_engine_stack
 
         db = await make_db()
         try:
-            stack = make_engine_stack(db, persona_path=os.path.join("characters", "qingzi"))
+            stack = make_engine_stack(db, persona_path=card_path())
             joined = "\n".join(b["text"] for b in BATCH3)
             messages, _ = await stack.assembler.assemble_messages(joined, None, BATCH3)
             user_msg = messages[-1]["content"]
@@ -752,13 +752,13 @@ class TestTurnHandlerSilence(unittest.IsolatedAsyncioTestCase):
     """
 
     async def _run_turn(self, raw_reply: str, batch=None):
-        from helpers import close_db, make_db, make_engine_stack, make_mock_gateway
+        from helpers import card_path, close_db, make_db, make_engine_stack, make_mock_gateway
 
         db = await make_db()
         try:
             gw = make_mock_gateway()
             stack = make_engine_stack(
-                db, persona_path=os.path.join("characters", "qingzi"), gateway=gw
+                db, persona_path=card_path(), gateway=gw
             )
             sent: List[Dict[str, Any]] = []
             turned: List[Tuple[bool, Any]] = []

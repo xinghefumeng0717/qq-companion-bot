@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+if os.path.join(_REPO_ROOT, "tests") not in sys.path:
+    sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
 
 import companion.main as companion_main
 from companion.admin import AdminServer
@@ -27,6 +29,7 @@ from companion.config import ReplyConfig
 from companion.persona import LONG_HOLIDAY_ACTIVITY, Persona
 from companion.prompts import VOICE_USAGE_RULES
 from companion.replier import Replier, rewrite_voice_record_prefix
+from helpers import card_path
 
 
 class _StubStickers:
@@ -101,7 +104,7 @@ class TestAdminActivityHoliday(unittest.TestCase):
 
     def _dashboard(self, holidays):
         dash = AdminServer.__new__(AdminServer)
-        dash.persona = Persona.load(os.path.join(_REPO_ROOT, "characters", "qingzi"))
+        dash.persona = Persona.load(card_path())
         dash.assembler = _StubAssembler(holidays)
         return dash
 

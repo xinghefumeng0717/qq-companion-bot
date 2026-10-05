@@ -9,7 +9,9 @@
 
 前置条件（新环境必读）
   彩排的用户侧/主聊在单测里全被 class 级 patch 掉（同 test_fixes18 的手法），
-  但驱动器仍要建真实引擎、加载 `characters/qingzi`，并依赖 gitignored 的
+  但驱动器仍要建真实引擎、按 `config.character.path` 加载角色卡（新 clone 里
+  config.toml 缺失 → 回落 config.example.toml → characters/example，公开模板卡即可），
+  并依赖 gitignored 的
   `data/duo_sim/user_persona_brief.md`。缺画像简报的新 clone 里，凡经 `setup()`
   的用例统一 skip，不报 FAIL/ERROR。生成方式见 test_fixes18.py 文件头。
 
@@ -605,13 +607,13 @@ class TestTranscriptRender(unittest.TestCase):
                 {"type": "act", "act": "A2", "title": "D1夜·告别"},
                 {"type": "user", "time": f"{FR.DAY1} 21:44", "text": "晚安"},
                 {"type": "her", "time": f"{FR.DAY1} 21:44", "bubbles": [],
-                 "stickers": ["characters/qingzi/stickers/cat_diving.jpg"],
+                 "stickers": ["characters/example/stickers/猫猫探头.png"],
                  "silenced": False, "text": ""},
             ]
 
         out = FR.render_rehearsal(_FakeSim())
         self.assertIn("表情包", out)
-        self.assertIn("cat_diving.jpg", out)
+        self.assertIn("猫猫探头.png", out)
 
 
 class TestRehearsalDriver(_FakeGatewayBase):
