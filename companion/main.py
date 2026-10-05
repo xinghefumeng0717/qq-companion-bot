@@ -57,6 +57,9 @@ ADMIN_STOP_TIMEOUT = 5.0
 # 后台任务取消的有界等待：真机实测（2026-10-05）出现过某任务拒收取消、
 # gather 永不返回、systemd 30 秒 SIGKILL。超时就放弃它、点名留证、继续停机。
 TASK_CANCEL_TIMEOUT = 10.0
+# main() 收尾清扫的时限：要盖过 close() 的最坏路径（取消等待 + 看板关闭 + 余量），
+# 保证异常路径下 close() 也能在清扫窗口里跑完。
+SHUTDOWN_SWEEP_TIMEOUT = 20.0
 
 # 库文件路径唯一来源（构造时可注入，测试/多环境不必改代码）
 DEFAULT_DB_PATH = "data/companion.db"
@@ -482,9 +485,17 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    main_task = loop.create_task(bot.run())
+
     def _signal_handler() -> None:
         logger.info("[Bot] 接收到退出信号")
-        loop.create_task(bot.stop_gracefully())
+        # 只取消主任务：close() 由 run() 的 finally 单路执行到底。
+        # 旧写法另起 stop_gracefully 任务会形成两个"取消波"——close() 的取消波
+        # 干掉主任务后，main() finally 的第二波会把正在干活的 close() 自己打死，
+        # db.close() 永远轮不到，aiosqlite 非守护线程把进程挂到 systemd SIGKILL
+        # （2026-10-05 两次实测 30s 超时砍头，日志定格在"正在取消后台任务"）。
+        if not main_task.done():
+            main_task.cancel()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -493,15 +504,19 @@ def main() -> None:
             pass
 
     try:
-        loop.run_until_complete(bot.run())
+        loop.run_until_complete(main_task)
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("[Bot] 进程已中断退出")
     finally:
+        # 正常路径走到这里时 close() 已在主任务的 finally 里完整跑完。
+        # 这里是异常路径（如 Ctrl+C 直接打断）的防御性清理：必须有界，
+        # 绝不无界 gather——无界等待本身就是停机卡死的同族病根。
+        # 时限要盖过 close() 的最坏路径（取消等待 10s + 看板关闭 5s + 余量）。
         pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
         for t in pending:
             t.cancel()
         if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(asyncio.wait(pending, timeout=SHUTDOWN_SWEEP_TIMEOUT))
         loop.close()
 
 

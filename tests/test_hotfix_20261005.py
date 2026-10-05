@@ -21,6 +21,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+import companion.main as companion_main
 from companion.admin import AdminServer
 from companion.config import ReplyConfig
 from companion.persona import LONG_HOLIDAY_ACTIVITY, Persona
@@ -125,6 +126,38 @@ class TestAdminActivityHoliday(unittest.TestCase):
 
         source = inspect.getsource(AdminServer._current_activity)
         self.assertIn("assembler.get_holidays", source)
+
+
+class TestSingleCancelWave(unittest.TestCase):
+    """停机只能有一个取消波（2026-10-05 两次 30s SIGKILL 的根因）。
+
+    旧结构：信号处理器另起 stop_gracefully 任务 → close() 的取消波干掉主任务
+    → main() finally 的第二波取消把正在干活的 close() 打死 → db.close() 跑不到
+    → aiosqlite 非守护线程挂住进程。新结构：信号只取消主任务，close() 由
+    run() 的 finally 单路执行；main() finally 的清扫必须有界。
+    """
+
+    def test_信号处理器只取消主任务(self):
+        import inspect
+
+        source = inspect.getsource(companion_main.main)
+        self.assertNotIn(
+            "create_task(bot.stop_gracefully())",
+            source,
+            "信号路径不许另起 stop_gracefully 任务（那会制造第二个取消波）",
+        )
+        self.assertIn("main_task.cancel()", source)
+
+    def test_main收尾清扫有界(self):
+        import inspect
+
+        source = inspect.getsource(companion_main.main)
+        self.assertNotIn(
+            "gather(*pending",
+            source,
+            "main() 收尾不许无界 gather（无界等待 = 停机卡死同族病根）",
+        )
+        self.assertIn("asyncio.wait(pending, timeout=SHUTDOWN_SWEEP_TIMEOUT)", source)
 
 
 if __name__ == "__main__":
