@@ -440,8 +440,9 @@ class TTSManager:
     ) -> Dict[str, Any]:
         """真正发 HTTP 的那一层（单独拆出来：单测可用替身注入、超时在外面包死）
 
-        aiohttp 走项目既有依赖，不引新包；读取响应体后交给 json 解析，
-        非 JSON（网关 502 之类）会抛 ValueError，由调用方统一降级。
+        aiohttp 走项目既有依赖，不引新包。
+        两类失败都往上抛、由调用方统一降级：HTTP 状态码非 200（带状态码与响应体），
+        以及 200 但响应体不是 JSON（网关塞了 HTML 这种，json 抛 ValueError）。
         """
         import aiohttp  # noqa: PLC0415 - 与 edge 的延迟 import 同款，本地依赖
 
@@ -454,11 +455,12 @@ class TTSManager:
             async with session.post(url, json=payload, headers=headers) as resp:
                 raw = await resp.text()
                 status = resp.status
-        resp_obj = json.loads(raw)
         if status != 200:
-            # HTTP 层不 200（401/429/5xx）：把响应体带进错误里，日志里能直接看出病因
+            # HTTP 层不 200（401 key 不对 / 429 限流 / 5xx）：把状态码与响应体带进错误里，
+            # 日志能直接看出病因（这里**先于** JSON 解析，免得网关返回 HTML 时
+            # 只报一句 json 解析失败、把真正有用的 401 吞掉）。
             raise RuntimeError(f"HTTP {status}: {str(raw)[:200]}")
-        return resp_obj
+        return json.loads(raw)
 
     @staticmethod
     def cleanup(path: Optional[str]) -> None:
