@@ -144,6 +144,7 @@ path = "characters/example"        # 激活的角色卡目录
 
 ## 5. 角色卡编写教程
 
+> **想把它变成你自己的伴侣？** 先读 [docs/CUSTOMIZE.md](docs/CUSTOMIZE.md)（五步定制路径）。
 > **方法论长文**：[docs/CARD_CRAFT.md](docs/CARD_CRAFT.md)《怎么写出不像 AI 的角色卡》——十几版迭代攒下的改卡方法（病灶驱动、反面教材库、废话流基线、阶段化人格、盲测验证）。
 
 角色卡是伴侣灵魂的**唯一载体**，存放在 `characters/<角色名>/` 目录下：
