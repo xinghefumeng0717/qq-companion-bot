@@ -74,7 +74,8 @@ class TestDefaultOff(unittest.TestCase):
     def test_默认配置是关的(self):
         cfg = TTSConfig()
         self.assertFalse(cfg.enabled)
-        self.assertEqual(cfg.daily_limit, 3)
+        # 日上限 3→8：所有者 2026-10-05 拍板（上限是防模型抖动的保险丝，随阶段 B 落地）
+        self.assertEqual(cfg.daily_limit, 8)
         self.assertEqual(cfg.max_chars, 60)
         self.assertEqual(cfg.voice, "zh-CN-XiaoxiaoNeural")
 

@@ -300,7 +300,7 @@ class TTSConfig:
     model: str = "speech-2.8-hd"          # t2a_v2 模型；接口只认官方枚举
     group_id: str = ""                    # 可选；t2a_v2 实测**不需要**（老接口才要）
     # ── 公共闸门 ──
-    daily_limit: int = 3                  # 每日语音条数上限（低频动作）
+    daily_limit: int = 8                  # 每日语音条数上限（所有者 2026-10-05 拍板 8 条，从 3 上调）
     max_chars: int = 60                   # 单条字数上限（≈20 秒，NapCat >35s 有失败报告）
 
 
@@ -477,7 +477,7 @@ class Config:
             speed=float(tts_data.get("speed", 1.0)),
             model=str(tts_data.get("model", "speech-2.8-hd")),
             group_id=str(tts_data.get("group_id", "")),
-            daily_limit=int(tts_data.get("daily_limit", 3)),
+            daily_limit=int(tts_data.get("daily_limit", 8)),
             max_chars=int(tts_data.get("max_chars", 60)),
         )
         admin_data = data.get("admin", {})
