@@ -44,6 +44,7 @@ from companion.admin import (  # noqa: E402
     APPLE_TOUCH_ICON_FILE,
     ASSETS_DIR,
     FAVICON_FILE,
+    KAI_FONT_FILE,
     AdminServer,
 )
 from companion.admin_render import HTML_STYLE, html_shell, render_nav  # noqa: E402
@@ -192,6 +193,58 @@ class TestIconRoutes(unittest.IsolatedAsyncioTestCase):
         with patch("companion.admin.ASSETS_DIR", os.path.join(self.tmp, "no-such-dir")):
             resp = await admin.handle_favicon(_Req())
         self.assertEqual(resp.status, 404)
+
+
+class TestKaiFontRoute(unittest.IsolatedAsyncioTestCase):
+    """霞鹜文楷 webfont 路由：刻意免鉴权（CSS url() 带不了 ?token=），钉住防回退。"""
+
+    TOKEN = "s3cret"
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqc_kaifont_")
+        self.db_path = os.path.join(self.tmp, "companion.db")
+        self.db = await make_db(self.db_path)
+
+    async def asyncTearDown(self):
+        await close_db(self.db, self.db_path)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _admin(self, token: str = "") -> AdminServer:
+        return make_engine_stack(
+            self.db,
+            include_admin=True,
+            admin_config=AdminConfig(host="127.0.0.1", port=8080, token=token),
+            db_path=self.db_path,
+            backup_dir=os.path.join(self.tmp, "backup"),
+        ).admin
+
+    async def test_字库文件在仓库里且是woff2魔数(self):
+        path = os.path.join(ASSETS_DIR, KAI_FONT_FILE)
+        self.assertTrue(os.path.isfile(path), f"companion/assets/{KAI_FONT_FILE} 缺失")
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(4), b"wOF2")
+
+    async def test_token模式下不带token也照常200(self):
+        """免鉴权是有意设计（字体是公开 OFL 资产），不许被"统一鉴权"顺手收编。"""
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_kai_font(_Req())
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.content_type, "font/woff2")
+
+    async def test_长缓存头且文件缺失404(self):
+        admin = self._admin("")
+        resp = await admin.handle_kai_font(_Req())
+        self.assertIn("immutable", resp.headers.get("Cache-Control", ""))
+        with patch("companion.admin.ASSETS_DIR", os.path.join(self.tmp, "no-such-dir")):
+            resp = await admin.handle_kai_font(_Req())
+        self.assertEqual(resp.status, 404)
+
+    def test_样式表声明fontface且字体栈webfont优先(self):
+        self.assertIn("@font-face", HTML_STYLE)
+        self.assertIn(f'/assets/{KAI_FONT_FILE}', HTML_STYLE)
+        m = re.search(r"\.font-sentiment\s*\{[^}]*font-family:\s*([^;]+);", HTML_STYLE)
+        self.assertIsNotNone(m)
+        self.assertTrue(m.group(1).strip().startswith('"QZKai"'))
 
 
 class TestIconRoutesOverHTTP(unittest.IsolatedAsyncioTestCase):

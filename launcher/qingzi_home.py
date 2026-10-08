@@ -40,6 +40,28 @@ from launcher.core import (
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+
+def load_admin_token() -> str:
+    """从本地 config.toml 的 [admin].token 读取看板令牌（与服务器保持一致）。
+
+    2026-10-08 起服务器看板开启了读写全量鉴权：不带 token 的页面与 /api/status
+    一律 403。token 为空或读不到时返回空串，行为与旧版完全一致（裸访问模式）。
+    """
+    try:
+        import tomllib
+
+        config_path = os.path.join(PROJECT_ROOT, "config.toml")
+        with open(config_path, "rb") as f:
+            admin = tomllib.load(f).get("admin", {})
+        token = admin.get("token", "")
+        return str(token) if token else ""
+    except Exception:
+        return ""
+
+
+ADMIN_TOKEN = load_admin_token()
+TOKEN_QUERY = f"?token={ADMIN_TOKEN}" if ADMIN_TOKEN else ""
+
 # 主题配色 (#1e1e2e 系深色)
 BG_COLOR = "#1e1e2e"
 CARD_BG = "#262638"
@@ -351,10 +373,10 @@ class QingziHomeApp:
         self.btn_tunnel._default_bg = "#3b4252"
 
     def open_dashboard(self) -> None:
-        webbrowser.open("http://localhost:8080")
+        webbrowser.open(f"http://localhost:8080/{TOKEN_QUERY}")
 
     def open_logs_page(self) -> None:
-        webbrowser.open("http://localhost:8080/logs")
+        webbrowser.open(f"http://localhost:8080/logs{TOKEN_QUERY}")
 
     def open_project_folder(self) -> None:
         proj_dir = os.path.abspath(r"D:\qq-companion")
@@ -454,7 +476,7 @@ class QingziHomeApp:
         dash_ok = False
         if tunnel_ok:
             try:
-                req = urllib.request.Request("http://127.0.0.1:8080/", method="GET")
+                req = urllib.request.Request(f"http://127.0.0.1:8080/{TOKEN_QUERY}", method="GET")
                 with urllib.request.urlopen(req, timeout=3.0) as resp:
                     dash_ok = (resp.status == 200)
             except Exception:
@@ -464,7 +486,7 @@ class QingziHomeApp:
         api_data: dict[str, Any] | None = None
         if dash_ok:
             try:
-                req = urllib.request.Request("http://127.0.0.1:8080/api/status", method="GET")
+                req = urllib.request.Request(f"http://127.0.0.1:8080/api/status{TOKEN_QUERY}", method="GET")
                 with urllib.request.urlopen(req, timeout=3.0) as resp:
                     if resp.status == 200:
                         raw = resp.read().decode("utf-8")

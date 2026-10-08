@@ -10,6 +10,15 @@ from typing import Dict, Tuple
 
 HTML_STYLE = """
 <style>
+  /* 霞鹜文楷（LXGW WenKai Lite，OFL-1.1，GB2312 子集 woff2，见 companion/assets/OFL-LXGWWenKai.txt）
+     自带 webfont 的原因：iOS 的系统楷体（Kaiti SC/Kai）是按需下载字体，Safari 不会为网页自动拉取，
+     手机上 .font-sentiment 会掉成宋体；自带字库后电脑与手机渲染完全一致。该路由免鉴权（静态公开资产，
+     CSS 的 url() 无法携带鉴权查询串）。font-display: swap 保证字体未加载时先用系统字体出字。 */
+  @font-face {
+    font-family: "QZKai";
+    src: url("/assets/lxgw-wenkai-gb2312.woff2") format("woff2");
+    font-display: swap;
+  }
   :root {
     --bg:        #f6f1e7;   /* 宣纸底 */
     --card:      #fbf8f1;   /* 纸页卡片 */
@@ -199,7 +208,7 @@ HTML_STYLE = """
     .grid-2 { grid-template-columns: 1fr; }
   }
   .font-sentiment {
-    font-family: "Kaiti SC", "Kai", "STKaiti", "KaiTi", "SimSun", serif;
+    font-family: "QZKai", "Kaiti SC", "Kai", "STKaiti", "KaiTi", "SimSun", serif;
     font-style: italic;
   }
   .font-num {

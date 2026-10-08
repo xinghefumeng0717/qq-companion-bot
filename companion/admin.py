@@ -57,6 +57,8 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 FAVICON_FILE = "app-icon.png"
 APPLE_TOUCH_ICON_FILE = "app-icon-180.png"
+# 霞鹜文楷 GB2312 子集 woff2；/assets/ 字库路由免鉴权（理由见 handle_kai_font docstring）
+KAI_FONT_FILE = "lxgw-wenkai-gb2312.woff2"
 
 
 def warn_if_admin_exposed_without_token(config: AdminConfig) -> None:
@@ -151,6 +153,7 @@ class AdminServer:
         app.router.add_get("/stickers/img/{name}", self.handle_sticker_image)
         app.router.add_get("/favicon.png", self.handle_favicon)
         app.router.add_get("/apple-touch-icon.png", self.handle_apple_touch_icon)
+        app.router.add_get("/assets/lxgw-wenkai-gb2312.woff2", self.handle_kai_font)
         app.router.add_get("/logs", self.handle_logs)
         app.router.add_get("/admin", self.handle_admin)
         app.router.add_post("/admin/backup", self.handle_admin_backup)
@@ -941,6 +944,30 @@ class AdminServer:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
         return await self._serve_asset_png(APPLE_TOUCH_ICON_FILE)
+
+    async def handle_kai_font(self, request: web.Request) -> web.Response:
+        """霞鹜文楷 webfont（/assets/lxgw-wenkai-gb2312.woff2），**刻意免鉴权**。
+
+        免鉴权的理由：CSS `@font-face` 的 url() 无法携带 ?token= 查询串，若走读页面同款
+        鉴权则 token 模式下字体永远 403、手写体静默失效；字库本身是公开 OFL 资产
+        （companion/assets/OFL-LXGWWenKai.txt），不含任何私有数据。长缓存一年：
+        内容带版本号式文件名，换代时改文件名即可自然失效旧缓存。
+        """
+        full_path = os.path.join(ASSETS_DIR, KAI_FONT_FILE)
+        if not os.path.isfile(full_path):
+            logger.warning(f"[Admin] 字库文件缺失: {full_path}")
+            return web.Response(status=404, text="Not Found")
+        try:
+            with open(full_path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            logger.warning(f"[Admin] 字库读取失败 {full_path}: {e}")
+            return web.Response(status=404, text="Not Found")
+        return web.Response(
+            body=data,
+            content_type="font/woff2",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     # ==========================================
     # 6. /logs 日志 (纸面小票风日志窗)
