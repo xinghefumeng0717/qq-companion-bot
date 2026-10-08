@@ -199,7 +199,7 @@ HTML_STYLE = """
     .grid-2 { grid-template-columns: 1fr; }
   }
   .font-sentiment {
-    font-family: "STKaiti", "KaiTi", "SimSun", serif;
+    font-family: "Kaiti SC", "Kai", "STKaiti", "KaiTi", "SimSun", serif;
     font-style: italic;
   }
   .font-num {
