@@ -1,6 +1,7 @@
 """状态仪表盘 HTTP 服务 (admin.py)
 基于 aiohttp 实现手账纸主题仪表盘 (绑定 127.0.0.1:8080)，30 秒自动刷新。
-路由包含：总览 (/)、记忆 (/memory)、调试 (/debug)、计费 (/costs)、表情包 (/stickers)、日志 (/logs)、管理 (/admin)。
+路由包含：总览 (/)、记忆 (/memory)、调试 (/debug)、计费 (/costs)、表情包 (/stickers)、日志 (/logs)、管理 (/admin)，
+外加两条静态图标路由 /favicon.png、/apple-touch-icon.png（浏览器标签页与手机"添加到主屏幕"用）。
 """
 
 from __future__ import annotations
@@ -44,11 +45,18 @@ from companion.admin_render import (
 
 # 管理页鉴权（外部评审）：token 为空时保持 localhost 信任模式，行为与旧版逐字节一致；
 # token 非空时，**写操作**必须携带匹配的 token（请求头 X-Admin-Token 或表单/JSON 字段），
-# **读页面**（9 条 GET 路由）同样要求 token（URL query ?token= 或同一个请求头）——
+# **读页面**（9 条页面 GET 路由 + 2 条图标路由）同样要求 token（URL query ?token= 或同一个请求头）——
 # 读侧泄漏的是记忆、日志、计费与关系状态，把 host 绑到非回环时不能只挡写不挡读。
 ADMIN_TOKEN_HEADER = "X-Admin-Token"
 ADMIN_TOKEN_QUERY = "token"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+# 网站图标（浏览器标签页 / 手机"添加到主屏幕"）：两个静态 PNG 放在
+# companion/assets/ 下，由 /favicon.png 与 /apple-touch-icon.png 两条只读路由喂出去。
+# 与 /stickers/img/{name} 同一套读侧鉴权（token 非空时没 token 一律 403）。
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+FAVICON_FILE = "app-icon.png"
+APPLE_TOUCH_ICON_FILE = "app-icon-180.png"
 
 
 def warn_if_admin_exposed_without_token(config: AdminConfig) -> None:
@@ -141,6 +149,8 @@ class AdminServer:
         app.router.add_get("/costs", self.handle_costs)
         app.router.add_get("/stickers", self.handle_stickers)
         app.router.add_get("/stickers/img/{name}", self.handle_sticker_image)
+        app.router.add_get("/favicon.png", self.handle_favicon)
+        app.router.add_get("/apple-touch-icon.png", self.handle_apple_touch_icon)
         app.router.add_get("/logs", self.handle_logs)
         app.router.add_get("/admin", self.handle_admin)
         app.router.add_post("/admin/backup", self.handle_admin_backup)
@@ -444,29 +454,29 @@ class AdminServer:
 
         content = f"""
         <!-- 首屏卡：容器 1 (带顶部和纸胶带与入场动画) -->
-        <div class="card-hero">
+        <div class="card-hero sec-hero">
           <div class="font-sentiment" style="font-size: 17px; line-height: 1.9; color: var(--ink);">
             {html.escape(moment_sentence)}
           </div>
         </div>
 
-        <!-- 2.2 好感度雷达图 + 阶段台阶 -->
-        <div class="grid-2 section-block">
-          <div>
+        <!-- 2.2 好感度雷达图 + 阶段台阶 (手机端 .sec-stage 靠 order 顶到 .sec-affection 前面) -->
+        <div class="grid-2 section-block sec-vitals">
+          <div class="sec-affection">
             {render_section_header("好感度状态")}
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
               <span style="font-size:13px; color:var(--ink-soft);">复合好感分</span>
-              <span class="font-num" style="font-size:20px; font-weight:bold; color:var(--ink);">{composite:.1f}</span>
+              <span class="font-num composite-score" style="font-size:20px; font-weight:bold; color:var(--ink);">{composite:.1f}</span>
             </div>
             {radar_svg}
           </div>
 
-          <div>
+          <div class="sec-stage">
             {render_section_header("阶段台阶（进阶进度）")}
             {steps_bar_html}
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px; margin-bottom:12px;">
-              <span class="font-sentiment" style="font-size:15px; color:var(--gold); font-weight:600;">阶段 {stage_idx} · {html.escape(stage_obj.name)}</span>
-              <span style="font-size:12px; color:var(--ink-soft);">{stg_info}</span>
+              <span class="font-sentiment stage-name" style="font-size:15px; color:var(--gold); font-weight:600;">阶段 {stage_idx} · {html.escape(stage_obj.name)}</span>
+              <span class="stage-progress" style="font-size:12px; color:var(--ink-soft);">{stg_info}</span>
             </div>
             <div style="font-size:13px; color:var(--ink-soft); margin-top:8px;">
               {step_subtext}
@@ -478,7 +488,7 @@ class AdminServer:
         </div>
 
         <!-- 2.3 关系档案 + 连接状态 -->
-        <div class="grid-2 section-block">
+        <div class="grid-2 section-block sec-profile">
           <div>
             {render_section_header("关系档案 (Relationship Profile)")}
             <div style="display:flex; gap:36px; margin-bottom:18px;">
@@ -517,7 +527,7 @@ class AdminServer:
         </div>
 
         <!-- 2.4 PAD 情绪卡 -->
-        <div class="section-block">
+        <div class="section-block sec-pad">
           {render_section_header("情绪与心理 (PAD)")}
           <div style="display:flex; flex-direction:column; gap:14px; margin-top:10px;">
             <div>
@@ -563,7 +573,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("总览", "/", content, self._token_query()),
+            text=html_shell("总览", "/", content, self._token_query(), "page-overview"),
             content_type="text/html",
         )
 
@@ -837,19 +847,23 @@ class AdminServer:
 
           <div>
             {render_section_header("按业务用途分组统计")}
+            <div class="table-scroll">
             <table class="table">
               <thead><tr><th>Purpose</th><th>调用数</th><th>Prompt</th><th>Completion</th><th>总费用</th></tr></thead>
               <tbody>{"".join(group_trs)}</tbody>
             </table>
+            </div>
           </div>
         </div>
 
         <div class="section-block">
           {render_section_header("最近 20 次调用明细")}
+          <div class="table-scroll">
           <table class="table">
             <thead><tr><th>ID</th><th>用途</th><th>模型</th><th>Prompt</th><th>Completion</th><th>费用</th><th>时间</th></tr></thead>
             <tbody>{"".join(detail_trs)}</tbody>
           </table>
+          </div>
         </div>
         """
         return web.Response(
@@ -896,6 +910,37 @@ class AdminServer:
             if os.path.exists(full_path):
                 return web.FileResponse(full_path)
         return web.Response(status=404, text="Not Found")
+
+    # ==========================================
+    # 5.1 网站图标 (/favicon.png, /apple-touch-icon.png)
+    # ==========================================
+    async def _serve_asset_png(self, filename: str) -> web.Response:
+        """读 companion/assets/<filename> 以 image/png 返回；文件缺失一律 404。
+
+        鉴权由调用方先做（与读页面同一套 _read_authorized）。缺文件不抛异常：
+        图标是装饰品，丢了图标不该把看板带崩（用户看到的是浏览器默认地球图标）。
+        """
+        full_path = os.path.join(ASSETS_DIR, filename)
+        if not os.path.isfile(full_path):
+            logger.warning(f"[Admin] 图标文件缺失: {full_path}")
+            return web.Response(status=404, text="Not Found")
+        try:
+            with open(full_path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            logger.warning(f"[Admin] 图标读取失败 {full_path}: {e}")
+            return web.Response(status=404, text="Not Found")
+        return web.Response(body=data, content_type="image/png")
+
+    async def handle_favicon(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
+        return await self._serve_asset_png(FAVICON_FILE)
+
+    async def handle_apple_touch_icon(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
+        return await self._serve_asset_png(APPLE_TOUCH_ICON_FILE)
 
     # ==========================================
     # 6. /logs 日志 (纸面小票风日志窗)

@@ -267,6 +267,29 @@ ssh -L 8080:127.0.0.1:8080 user@你的服务器IP
 > （URL 加 `?token=你的令牌` 或请求头 `X-Admin-Token`；页面内链接会自动带上令牌）。
 > 令牌留空（默认）时一切照旧，不需要任何参数。详见第 10 节。
 
+### 手机访问（Tailscale 常开）
+
+SSH 隧道只适合坐在电脑前看。想让手机也能随手看一眼，用 [Tailscale](https://tailscale.com/)（点对点加密的私有网络，不用在云服务器上开公网端口）：
+
+在服务器终端执行：
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+sudo tailscale serve --bg http://127.0.0.1:8080
+```
+
+三条命令的含义：第一条装 Tailscale；第二条把这台服务器登录进你的私有网络（会打印一个授权链接，在浏览器点一下即可）；第三条让 Tailscale 把本机 `127.0.0.1:8080` 的看板以 HTTPS 代理出去——仪表盘本身仍然只监听回环地址，公网上扫不到它。第三条如果报错说 HTTPS 证书不可用，去 Tailscale 管理后台的 DNS 页面把 **HTTPS Certificates** 打开再重跑一次即可。
+
+手机装 Tailscale App、用**同一个账号**登录，然后浏览器打开：
+
+```
+https://<服务器名>.<你的tailnet>.ts.net
+```
+
+完整域名在服务器上跑 `tailscale status` 就能看到。若你在 `[admin].token` 设了令牌，URL 末尾要带上 `?token=你的令牌`，否则每个页面都会 403。
+
+看板已做手机适配（导航条可横滑、表格可横滑、页面按屏幕宽度排版），在手机浏览器里选"添加到主屏幕"就能当图标用——图标取自看板的 `/apple-touch-icon.png`。
+
 ---
 
 ## 7. Systemd 服务守护与开机自启

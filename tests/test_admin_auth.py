@@ -2,7 +2,8 @@
 
 外部评审发现：`/admin/reset`、`/admin/restart`、`/admin/backup` 等 POST 端点
 零鉴权，唯一防线是 host 绑 127.0.0.1 + confirm=YES。第二轮审计进一步指出：
-9 条 GET 路由（/、/memory、/debug、/costs、/stickers、/logs 等）在 host 被改成
+11 条读路由（9 条页面：/、/memory、/debug、/costs、/stickers、/logs 等，外加
+/favicon.png、/apple-touch-icon.png 两条图标路由）在 host 被改成
 非回环时同样裸奔（读侧泄漏记忆/日志/计费/关系状态）。本测试集钉住两条防线：
 
 1. `[admin].token` 非空时：
@@ -267,7 +268,7 @@ class TestAdminWriteAuthOverHTTP(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAdminReadAuth(unittest.IsolatedAsyncioTestCase):
-    """读页面（GET）鉴权：token 非空时 9 条 GET 路由全部要 token。"""
+    """读路由（GET）鉴权：token 非空时 11 条读路由（9 页面 + 2 图标）全部要 token。"""
 
     TOKEN = "s3cret"
 
@@ -302,6 +303,8 @@ class TestAdminReadAuth(unittest.IsolatedAsyncioTestCase):
             ("/admin", admin.handle_admin, {}),
             ("/api/status", admin.handle_api_status, {"headers": {"Accept": "application/json"}}),
             ("/stickers/img/x.png", admin.handle_sticker_image, {"match_info": {"name": "x.png"}}),
+            ("/favicon.png", admin.handle_favicon, {}),
+            ("/apple-touch-icon.png", admin.handle_apple_touch_icon, {}),
         ]
 
     # ---------------- token 为空：逐字节一致的旧行为 ----------------
@@ -316,7 +319,8 @@ class TestAdminReadAuth(unittest.IsolatedAsyncioTestCase):
     async def test_token为空时页面里不出现任何token字样(self):
         admin = self._admin("")
         for path, handler, _kwargs in self._get_routes(admin):
-            if path in ("/api/status", "/stickers/img/x.png"):
+            # /api/status 是 JSON、图片与图标路由不是文本页面：没有文本可查
+            if path in ("/api/status", "/stickers/img/x.png", "/favicon.png", "/apple-touch-icon.png"):
                 continue
             with self.subTest(path=path):
                 resp = await handler(_Req(query={}))

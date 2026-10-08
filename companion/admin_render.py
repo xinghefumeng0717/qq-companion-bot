@@ -187,7 +187,7 @@ HTML_STYLE = """
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
     gap: 24px;
   }
   .grid-2 {
@@ -330,6 +330,62 @@ HTML_STYLE = """
   .btn-action:hover {
     opacity: 0.9;
   }
+
+  /* 手机端适配：全部收在 768px 以下，桌面端（>768px）一个字节都不变 */
+  @media (max-width: 768px) {
+    .container { padding: 14px; }
+    .nav-inner {
+      height: auto;
+      padding: 8px 14px;
+    }
+    .nav-links {
+      overflow-x: auto;
+      flex-wrap: nowrap;
+      -webkit-overflow-scrolling: touch;
+    }
+    /* 触控目标：链接盒子高度 = 14px 字 × 1.6 行高 + 上下各 10px ≈ 42px（≥40px） */
+    .nav-links a {
+      padding: 10px 2px;
+      white-space: nowrap;
+    }
+    .nav-right { display: none; }
+    .card-hero { padding: 18px; }
+    .card { padding: 16px; }
+    .table { font-size: 12px; }
+    .table th, .table td { padding: 6px 8px 6px 0; }
+    .table-scroll { overflow-x: auto; }
+    .log-window { max-height: 55vh; }
+    h2 { font-size: 18px; }
+    svg { max-width: 100%; height: auto; }
+
+    /* 手指按不准：管理页三个操作按钮抬到 44px 高（iOS/安卓的推荐触控尺寸） */
+    .btn-action { min-height: 44px; }
+
+    /* 总览页手机端信息重排：手机要的"一眼答案"是阶段与复合分，不该先翻过整页。
+       顺序 = 首屏一句话 → 阶段台阶 → 好感度（复合分+雷达）→ PAD → 关系档案。
+
+       只有总览页的容器变 flex 列（page-overview 由 html_shell 的 container_class
+       参数注入）：这条规则只为重排服务，影响面锁死在总览页——其余 6 页的手机端
+       .container 仍是普通块流（可证未变）。实测总览页各区块只带 margin-bottom、
+       对向 margin 为 0，块流与 flex 列的相邻间距都是 36px，重排不会顺带改间距。
+       桌面完全没有这些规则，仍是普通块流。 */
+    .container.page-overview {
+      display: flex;
+      flex-direction: column;
+    }
+    .container.page-overview > .sec-hero { order: 1; }
+    .container.page-overview > .sec-vitals { order: 2; }
+    .container.page-overview > .sec-pad { order: 3; }
+    .container.page-overview > .sec-profile { order: 4; }
+    /* .sec-vitals 在手机上塌成单列（见 .grid-2 规则），用 order 把阶段台阶顶到好感度前面 */
+    .sec-vitals > .sec-stage { order: -1; }
+
+    /* 关键数字放大。内联样式定死了桌面的字号/字重，media 块要盖过内联只能加 !important；
+       这些规则的作用域只有 ≤768px，桌面计算值一个都没变。 */
+    .composite-score { font-size: 30px !important; }
+    .stage-name { font-size: 17px !important; }
+    .stage-progress { font-weight: 600 !important; }
+  }
 </style>
 """
 
@@ -469,21 +525,39 @@ def render_nav(current_path: str, token_query: str = "") -> str:
 
 
 def html_shell(
-    title: str, current_path: str, body_content: str, token_query: str = ""
+    title: str,
+    current_path: str,
+    body_content: str,
+    token_query: str = "",
+    container_class: str = "",
 ) -> str:
     """页面外壳。token_query 只在"token 非空"模式下非空（页面内链接要带 token）；
-    默认空串 = 输出与旧版逐字节一致。"""
+    默认空串 = 输出与旧版逐字节一致。
+
+    `<head>` 里除了 charset/自动刷新，还有两样：
+    - viewport meta：手机端按设备宽度排版（缺了它 390px 屏会按 980px 缩放，整页缩小成一条）；
+    - favicon / apple-touch-icon 两行 link：走 /favicon.png 与 /apple-touch-icon.png
+      两个路由（admin.py），手机"添加到主屏幕"才有图标；token 非空时同样要带 token，
+      否则图标请求会被鉴权拦掉（规则与 render_nav 一致）。
+
+    container_class 是可选语义钩子（默认空串 = `<div class="container">`，与旧版逐字节一致）：
+    目前只有总览页传 "page-overview"，供手机端把该页的 .container 变成 flex 列做信息重排。
+    """
+    container_attr = "container" + (f" {container_class}" if container_class else "")
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="30">
+  <link rel="icon" type="image/png" href="/favicon.png{token_query}">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png{token_query}">
   <title>{title} · QQ 伴侣机器人</title>
   {HTML_STYLE}
 </head>
 <body>
   {render_nav(current_path, token_query)}
-  <div class="container">
+  <div class="{container_attr}">
     {body_content}
   </div>
 </body>

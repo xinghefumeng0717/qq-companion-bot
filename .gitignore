@@ -21,3 +21,6 @@ Thumbs.db
 .vscode/
 .idea/
 snapshots/
+
+# 图标候选稿（设计中间产物，母版已定稿进 companion/assets/ 与 launcher/assets/qingzi_anime.ico）
+launcher/assets/candidates/*.png
