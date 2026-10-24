@@ -287,7 +287,7 @@ async def section_c() -> Dict[str, Any]:
         # 又是一次"判据找错字符串"的自伤。
         from helpers import make_engine_stack
 
-        stack = make_engine_stack(db, persona_path=os.path.join("characters", "qingzi"))
+        stack = make_engine_stack(db, persona_path=os.path.join("characters", "example"))
         _m, prompt_off = await stack.assembler.assemble_messages("在吗", None, [], False)
         _m2, prompt_on = await stack.assembler.assemble_messages("在吗", None, [], True)
         off_has = "[voice:" in prompt_off

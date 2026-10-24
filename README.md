@@ -446,11 +446,12 @@ powershell -ExecutionPolicy Bypass -File ".\launcher\创建桌面快捷方式.ps
 
 ### 12.2 角色卡依赖（公开 clone 无需私有卡）
 
-代码仓库只带公开模板卡 `characters/example/`，私有卡（如 `characters/example/`）被 `.gitignore` 排除。测试对角色卡的解析优先级是：
+代码仓库只带公开模板卡 `characters/example/`；私有卡（如 `characters/<角色名>/`）不进入公开仓。测试对角色卡的解析优先级是：
 
 1. 环境变量 `QQC_TEST_CARD`（显式指定要用的卡目录）；
-2. `characters/example/` 若存在则用它（所有者本机保持原有覆盖）；
-3. 回落到仓库自带的 `characters/example/`。
+2. 回落到仓库自带的 `characters/example/`。
+
+公开测试代码不硬编码任何私有卡路径。
 
 因此公开 clone 直接跑测试就会自动用 `characters/example/`。想显式指定某张卡：
 
