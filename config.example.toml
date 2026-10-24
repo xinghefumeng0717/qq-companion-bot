@@ -12,10 +12,10 @@ thinking_chat = true
 thinking_effort_chat = "low"
 thinking_tasks = false               # 后台总开关：true 则全部用途开思考（旧行为）
 thinking_effort_tasks = "low"
-# 总开关关闭时，按用途白名单开思考（默认即下列四项：写出来的文字用户看得见，不思考的 flash 行文会不通顺）
+# 总开关关闭时，按用途白名单开思考（默认即下列五项：写出来的文字用户看得见，不思考的 flash 行文会不通顺）
 # ⚠ 手工填写本字段时须包含 life_arc（她的生活主线）——写了白名单却漏掉它，
 #   主线生成会静默退回不思考，FIXES16 的效果等于没上。整行删掉则用代码默认值（同样含 life_arc）。
-thinking_tasks_purposes = ["diary_archive", "vision_perception", "proactive_message", "life_arc"]
+thinking_tasks_purposes = ["diary_archive", "vision_perception", "proactive_message", "life_arc", "reply_check"]
 
 # 每个 [models.<名>] 是一家厂商的完整档案
 [models.deepseek]
@@ -62,12 +62,31 @@ output_peak = 27.0
 output_offpeak = 13.5
 
 [character]
-path = "characters/example"        # 当前激活的角色卡目录
+path = "characters/example"        # 当前激活的角色卡目录（换角色只换这里 + 卡目录本身）
+# 人物档案（你是谁、她怎么叫你）。优先级：这里写了 > 卡顶层的 user 段 > profiles/default.json。
+# 空 = 卡里有 user 段就用卡里的（一张卡自带人设和"你是谁"）；都没有再读 profiles/default.json。
+user_profile = ""
+# 下面四个开关也可以由卡顶层的 features 段自声明（{"self_memory": true, ...}）：
+# 这里**没写**的项才取卡里的值；这里写了（包括写 false）一律以这里为准。
+self_memory = false                # 自我记忆：记下她说过的关于自己的事（喜好/经历/计划），之后说话对得上（默认关）
+meetup_recap = false               # 线下见面：聊天里约好见面就记下，见面时间过后自动补一段纪要（默认关）
+fact_layers = false                # 关于他的事分层：核心常驻 + 最近和相关的几条，防止越记越长（默认关 = 全部带上）
+impressions = false                # 对他的看法：每 8 轮更新几条"我觉得他……"，只影响她怎么接话、不说出口（默认关）
 
 [reply]
 max_chunks = 5                     # 单轮最多拆几条发送
 chunk_delay_min = 0.8              # 段间延迟秒数下限
 chunk_delay_max = 2.2
+self_check = false                 # 生成后质检：flash 检查复述/点评他的话和装饰性比喻，有就删掉（默认关）
+self_check_timeout = 10.0          # 质检最长等几秒，超时照发原稿（质检开 low 思考，中位约 1.6 秒）
+# trim_echo / vision_direct / candidates 同样可由卡里的 features 段自声明：
+# 这里没写的项取卡里的值，写了以这里为准。
+trim_echo = false                  # 首泡回声裁剪：第一个气泡在复述/点评他、后面还有话就删掉（不调模型，默认关）
+vision_direct = false              # 一步看图：主聊模型直接看图（要支持多模态），省掉单独看图那次调用（默认关）
+candidates = 1                     # 并行生成几条候选、挑没复述/点评/比喻的那条（1 = 不开，最多 4；费用按条数翻倍）
+# candidate_tiebreak = "warm"        # 多候选毛病分打平后的决胜："warm"=挑更暖的（默认）；"first"=取最先生成的（傲娇等"暖=人设磨损"的卡用，也可由卡 features 段自声明）
+style_examples = false             # 动态示例：按他这句话挑几条真人类似情境的回法当参考（只学怎么接，不学口吻；默认关）
+style_examples_path = "data/style_examples/real_chat.json"  # 示例库路径（相对项目根目录）
 
 [proactive]
 enabled = true
@@ -75,6 +94,9 @@ wake_interval_min = 20             # 唤醒间隔（分钟）下限，每次随�
 wake_interval_max = 40
 quiet_hours = [0, 8]               # 免打扰时段
 max_unanswered = 2                 # 连续 N 条主动消息未获回复，当天停止
+silence_slow_after_days = 2.0      # 他连续这么多天没回 → 降频（0 = 不降频）
+silence_slow_interval_hours = 48.0 # 降频后两条主动消息至少隔几小时
+silence_stop_after_days = 5.0      # 他连续这么多天没回 → 不再主动发，他一回话就恢复（0 = 永不停）
 
 # 回复时机人格化（FIXES15）——**整节删掉也能跑**，缺字段全部走代码默认值
 # 两个开关互相独立：timing_enabled 只管"拿起手机"的首条延迟，
@@ -113,7 +135,7 @@ speed = 1.0                        # 海螺语速：1.0 原速（0.9 慢速版�
 model = "speech-2.8-hd"            # 海螺 t2a_v2 模型，只能填官方枚举（…-hd 或 …-turbo）
 group_id = ""                      # 留空即可：t2a_v2 不需要 GroupId（那是老接口的查询参数）
 
-daily_limit = 30                   # 每日语音条数上限（所有者二次拍板：30 ≈ 感觉不到存在，但保留保险丝防抖动连发）
+daily_limit = 60                   # 每日语音条数上限（保险丝防抖动连发；60 ≈ 聊得多的日子也够，可按需下调）
 max_chars = 90                     # 单条字数上限（≈30 秒；NapCat 超过 35 秒有失败报告，别再加）
 
 [admin]
@@ -129,3 +151,8 @@ port = 8080
 #   所以不能只挡写不挡读）。浏览器访问 http://<host>:<port>/?token=你的token 即可，
 #   页面内链接与表情包图片会自动带上令牌；监控脚本用 /api/status?token=你的token。
 token = ""
+# 看板主题：journal = 原来的手账纸（默认）；plain = 通用白底；endfield = 科幻工业风。
+# **不写这一行** = 跟随角色卡：卡目录有 theme/skin.json 就用皮肤对应的主题
+# （skin.json 可用 "theme" 声明 plain/endfield，不写按 endfield），没有皮肤 → journal。
+# 写了就严格按这里（写 journal 也不再读卡上的皮肤）。
+# theme = "journal"

@@ -42,7 +42,7 @@ async def build_probe_messages(db: Database, persona: Persona, probe: str) -> Li
     affection = AffectionEngine(db, persona.initial_dims)
     mood = MoodEngine(db)
     memory = MemoryManager(db)
-    stickers = StickerManager("characters/qingzi/stickers", db)
+    stickers = StickerManager("characters/example/stickers", db)
     assembler = PromptAssembler(persona, affection, mood, memory, stickers, db)
     messages, _ = await assembler.assemble_messages(probe)
     return messages

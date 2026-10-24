@@ -47,7 +47,7 @@
 
 ## 审查面 C：部署日 Runbook 核对（对着 `docs/DEPLOY.md` 逐条过）
 
-1. **新资产的部署步骤是否齐**：life_arcs 表（老库 CREATE TABLE IF NOT EXISTS 平滑升级已在 FIXES16 测过，复核部署手册有没有写）、V3 卡 + stickers 目录同步清单（17 张运行时收藏图、index.json 43 键）、`characters/qingzi/` 红线流程步骤；
+1. **新资产的部署步骤是否齐**：life_arcs 表（老库 CREATE TABLE IF NOT EXISTS 平滑升级已在 FIXES16 测过，复核部署手册有没有写）、V3 卡 + stickers 目录同步清单（17 张运行时收藏图、index.json 43 键）、`characters/example/` 红线流程步骤；
 2. **服务器 config.toml 差异字段清单**：逐个字段对比服务器现值与代码默认值，确认 `thinking_tasks_purposes` 等新增字段靠代码默认值兜底即可、零改动上线的声明成立；holidays 已填 2026 国庆 8 天，2026 全年剩余节假日要不要顺手补齐（所有者拍板）；
 3. **遗留尾巴三件套**：①服务器 stickers 表 15 行孤儿清理 SQL（给出具体语句与执行时点：先备份再删）；②logrotate 配 bot.log（PLAN 有 DEPLOY 漏）；③`data/backup/` 34 份历史快照清理方案；
 4. **回滚预案**：总部署失败时每个迭代能否单独回退（代码 git revert + 库结构是否前向兼容——life_arcs 新表对旧代码是否无害，sticker index 新字段对旧代码是否无害，逐项写结论）；
@@ -62,7 +62,7 @@
 ## 审查面 E：公开仓库卫生
 
 1. **git 全历史 secrets 扫描**：`git log -p --all` 扫 API key / OneBot token / QQ 号 / 真实姓名 / 内网路径（已知 `bcfa636` 含第三方真实姓名，**推送前必须洗历史**，本审查给出洗历史的具体操作方案：rebase 方案 vs 新切干净分支方案，推荐其一并写明命令）；
-2. `.gitignore` 覆盖面：config.toml、local_env.md、data/、characters/qingzi/、snapshots/、venv/ 逐项验证 `git check-ignore`；
+2. `.gitignore` 覆盖面：config.toml、local_env.md、data/、characters/example/、snapshots/、venv/ 逐项验证 `git check-ignore`；
 3. `config.example.toml` 与 `config.toml` 字段漂移：example 是否落后于实际字段（新字段有没有补进 example 且不含真值）。
 
 ## 审查面 F：账实核对（STATUS 是"仓库即记忆"的枢纽，它错一字接班就歪）

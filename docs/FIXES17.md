@@ -7,7 +7,7 @@
 > 1. 标注三栏制：**画面**（一句话）+ **含义**（语用/情绪功能，如"表示干饭，带委屈的炫耀"）+ **适用场景**（"聊到吃饭/喊饿时用"）；
 > 2. **两段式施工**：第一段执行模型批量打标并生成审核表 → **停工等所有者审核**（所有者直接改审核表文件）→ 第二段应用入库。执行模型不得跳过审核直接入库；
 > 3. 审核对象必须是**服务器上的当前生产表情包库**（运行时收藏会增量，先拉回再标），不是本地的种子库；
-> 4. 执行模型**不动 `characters/qingzi/character.json`、`config.toml`**；`characters/qingzi/stickers/index.json` 的修改只许走"所有者审核后的审核表应用"这一条路。
+> 4. 执行模型**不动 `characters/example/character.json`、`config.toml`**；`characters/example/stickers/index.json` 的修改只许走"所有者审核后的审核表应用"这一条路。
 >
 > 全局约束（高压线）：
 > 1. 完成后 `./venv/Scripts/python.exe -m unittest discover -s tests` 全绿；

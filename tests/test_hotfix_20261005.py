@@ -81,6 +81,19 @@ class TestVoiceRecordPrefix(unittest.TestCase):
         self.assertIn("那送你半句，快去忙", record)
         self.assertNotIn("语音消息", record)
 
+    def test_中文方括号语音标记也走同一兜底(self):
+        for allowed in (True, False):
+            for marker in ("[语音]", "[语音消息]"):
+                with self.subTest(allowed=allowed, marker=marker):
+                    chunks, record = _replier().parse_reply(
+                        f"{marker} 呆货，听完了就钻被窝", voice_allowed=allowed
+                    )
+                    self.assertNotIn(marker, record)
+                    self.assertIn("呆货，听完了就钻被窝", record)
+                    self.assertEqual(
+                        any(c.get("type") == "voice" for c in chunks), allowed
+                    )
+
     def test_前缀不被旁白滤网吃掉(self):
         """核心回归：语音可用时，（语音消息）不得落入括号旁白滤网。"""
         chunks, _ = _replier().parse_reply("（语音消息）晚安，明天聊", voice_allowed=True)

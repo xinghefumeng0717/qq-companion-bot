@@ -305,6 +305,8 @@ class TestAdminReadAuth(unittest.IsolatedAsyncioTestCase):
             ("/stickers/img/x.png", admin.handle_sticker_image, {"match_info": {"name": "x.png"}}),
             ("/favicon.png", admin.handle_favicon, {}),
             ("/apple-touch-icon.png", admin.handle_apple_touch_icon, {}),
+            ("/skin/x.png", admin.handle_skin_file, {"match_info": {"path": "x.png"}}),
+            ("/api/home", admin.handle_api_home, {}),
         ]
 
     # ---------------- token 为空：逐字节一致的旧行为 ----------------
@@ -319,8 +321,9 @@ class TestAdminReadAuth(unittest.IsolatedAsyncioTestCase):
     async def test_token为空时页面里不出现任何token字样(self):
         admin = self._admin("")
         for path, handler, _kwargs in self._get_routes(admin):
-            # /api/status 是 JSON、图片与图标路由不是文本页面：没有文本可查
-            if path in ("/api/status", "/stickers/img/x.png", "/favicon.png", "/apple-touch-icon.png"):
+            # /api/status、/api/home 是 JSON、图片与图标路由不是文本页面：没有文本可查
+            if path in ("/api/status", "/api/home", "/stickers/img/x.png", "/skin/x.png",
+                        "/favicon.png", "/apple-touch-icon.png"):
                 continue
             with self.subTest(path=path):
                 resp = await handler(_Req(query={}))
@@ -472,6 +475,290 @@ class TestAdminReadAuthOverHTTP(unittest.IsolatedAsyncioTestCase):
     async def test_真实HTTP请求头token200(self):
         resp = await self.client.get("/memory", headers={"X-Admin-Token": self.TOKEN})
         self.assertEqual(resp.status, 200)
+
+
+class _SkinCardMixin:
+    """临时角色卡：example 卡 + theme/ 皮肤（两张图、一个非图片文件、一张目录外同名图）。"""
+
+    TOKEN = "s3cret"
+    _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqc_admin_skin_")
+        self.card = os.path.join(self.tmp, "card")
+        shutil.copytree(os.path.join(_REPO_ROOT, "characters", "example"), self.card)
+        self.theme_dir = os.path.join(self.card, "theme")
+        os.makedirs(self.theme_dir)
+        self._write("theme/me.png", self._PNG)
+        self._write("theme/hero.png", self._PNG)
+        self._write("theme/notes.txt", b"not an image")
+        # theme/ 之外的同名图片：路径穿越若失效就会命中它
+        self._write("secret.png", self._PNG)
+        with open(os.path.join(self.theme_dir, "skin.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "subtitle": "测试副标题",
+                    "avatar": {"default": "me.png"},
+                    "art": {"hero": "hero.png", "memory": "nope.png"},
+                },
+                f,
+            )
+        self.db_path = os.path.join(self.tmp, "companion.db")
+        self.backup_dir = os.path.join(self.tmp, "backup", "daily")
+        self.db = await make_db(self.db_path)
+
+    async def asyncTearDown(self):
+        await close_db(self.db, self.db_path)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, rel: str, data: bytes) -> None:
+        path = os.path.join(self.card, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def _admin(self, token: str = TOKEN, theme: str = "journal"):
+        # 这批测试钉的是 journal 主题下的行为；显式传 theme 才不会被卡里的皮肤接管
+        return make_engine_stack(
+            self.db,
+            persona_path=self.card,
+            include_admin=True,
+            admin_config=AdminConfig(host="127.0.0.1", port=8080, token=token, theme=theme),
+            db_path=self.db_path,
+            backup_dir=self.backup_dir,
+        ).admin
+
+
+class TestSkinAndHomeAuth(_SkinCardMixin, unittest.IsolatedAsyncioTestCase):
+    """`/skin/{path}` 与 `/api/home`：鉴权、目录边界、journal 主题下的图片一致性。
+
+    二审发现：journal 主题下 `self.skin` 为 None，`/api/home` 却现场加载皮肤并
+    给出 `/skin/...` 地址，而 `/skin/` 拿 None 解析不出文件 —— 图片全 404。
+    """
+
+    async def _home(self, admin, token: str = _SkinCardMixin.TOKEN):
+        resp = await admin.handle_api_home(_Req(query={"token": token}))
+        return resp, json.loads(resp.text)
+
+    async def _skin(self, admin, rel: str, token: str = _SkinCardMixin.TOKEN):
+        return await admin.handle_skin_file(
+            _Req(query={"token": token}, match_info={"path": rel})
+        )
+
+    async def test_journal主题页面不读皮肤但小窝仍有图(self):
+        admin = self._admin()
+        self.assertEqual(admin.theme, "journal")
+        self.assertIsNone(admin.skin, "journal 主题的页面不该读皮肤")
+        resp, home = await self._home(admin)
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(home["avatar"].startswith("/skin/"), home["avatar"])
+        self.assertTrue(home["art"]["hero"].startswith("/skin/"))
+        self.assertNotIn("memory", home["art"], "卡里没有的图不许产出地址")
+
+    async def test_小窝给出的每个皮肤图地址都能取到(self):
+        """二审问题的回归钉：JSON 里给出的 URL 必须由 /skin/ 真的能读到。"""
+        admin = self._admin()
+        _, home = await self._home(admin)
+        urls = [home["avatar"]] + list(home["art"].values())
+        self.assertTrue(urls)
+        for url in urls:
+            with self.subTest(url=url):
+                rel = url.split("?", 1)[0][len("/skin/"):]
+                img = await self._skin(admin, rel)
+                self.assertEqual(img.status, 200, f"{url} 指向的图取不到")
+                self.assertEqual(img.content_type, "image/png")
+
+    async def test_无token的皮肤路由一律403(self):
+        admin = self._admin()
+        resp = await admin.handle_api_home(_Req(query={}))
+        self.assertEqual(resp.status, 403)
+        resp = await admin.handle_skin_file(
+            _Req(query={}, match_info={"path": "me.png"})
+        )
+        self.assertEqual(resp.status, 403)
+
+    async def test_错token的皮肤路由403(self):
+        admin = self._admin()
+        resp = await admin.handle_api_home(_Req(query={"token": "wrong"}))
+        self.assertEqual(resp.status, 403)
+        resp = await self._skin(admin, "me.png", token="wrong")
+        self.assertEqual(resp.status, 403)
+
+    async def test_路径穿越与目录外文件被拒(self):
+        admin = self._admin()
+        for rel in (
+            "../secret.png",
+            "../../card/secret.png",
+            "/etc/passwd.png",
+            "..%2fsecret.png",
+            "notes.txt",
+            "nope.png",
+            "",
+        ):
+            with self.subTest(rel=rel):
+                resp = await self._skin(admin, rel)
+                self.assertEqual(resp.status, 404, f"{rel} 必须 404")
+
+    async def test_token为空时皮肤与图片照常放行(self):
+        admin = self._admin("")
+        resp, home = await self._home(admin, token="")
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(home["avatar"].startswith("/skin/"))
+        self.assertNotIn("token=", resp.text, "token 为空时图片地址不该多出 token")
+        img = await self._skin(admin, "me.png", token="")
+        self.assertEqual(img.status, 200)
+
+
+class TestSkinAndHomeOverHTTP(_SkinCardMixin, unittest.IsolatedAsyncioTestCase):
+    """真 aiohttp 请求：无/错 token 403，带 token 200，路径穿越 404。"""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        admin = self._admin()
+        app = web.Application()
+        app.router.add_get("/skin/{path:.+}", admin.handle_skin_file)
+        app.router.add_get("/api/home", admin.handle_api_home)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await super().asyncTearDown()
+
+    async def test_真实HTTP无token403(self):
+        for path in ("/skin/me.png", "/api/home"):
+            with self.subTest(path=path):
+                resp = await self.client.get(path)
+                self.assertEqual(resp.status, 403)
+
+    async def test_真实HTTP错token403(self):
+        for path in ("/skin/me.png", "/api/home"):
+            with self.subTest(path=path):
+                resp = await self.client.get(f"{path}?token=wrong")
+                self.assertEqual(resp.status, 403)
+
+    async def test_真实HTTP带token能取图与小窝(self):
+        resp = await self.client.get(f"/skin/me.png?token={self.TOKEN}")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.content_type, "image/png")
+
+        resp = await self.client.get(f"/api/home?token={self.TOKEN}")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.content_type, "application/json")
+        home = await resp.json()
+        self.assertTrue(home["avatar"])
+        urls = [home["avatar"]] + list(home["art"].values())
+        for url in urls:
+            with self.subTest(url=url):
+                # 不要剥掉 query：地址里自带 token 才是页面/小窝能直接用的形态
+                img = await self.client.get(url)
+                self.assertEqual(img.status, 200, f"{url} 在 journal 主题下取不到")
+
+    async def test_真实HTTP请求头token也能取图(self):
+        resp = await self.client.get(
+            "/skin/me.png", headers={"X-Admin-Token": self.TOKEN}
+        )
+        self.assertEqual(resp.status, 200)
+        resp = await self.client.get(
+            "/api/home", headers={"X-Admin-Token": self.TOKEN}
+        )
+        self.assertEqual(resp.status, 200)
+
+    async def test_真实HTTP路径穿越404(self):
+        for path in (
+            "/skin/../secret.png",
+            "/skin/%2e%2e/secret.png",
+            "/skin/%2e%2e%2fsecret.png",
+            "/skin/notes.txt",
+            "/skin/nope.png",
+        ):
+            with self.subTest(path=path):
+                resp = await self.client.get(f"{path}?token={self.TOKEN}")
+                self.assertEqual(resp.status, 404, f"{path} 必须 404")
+
+
+class TestNewThemeReadAuth(unittest.IsolatedAsyncioTestCase):
+    """plain / endfield 新页面同样走读侧鉴权，且不再注入旧手账样式表。"""
+
+    TOKEN = "s3cret"
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqc_admin_newtheme_")
+        self.db_path = os.path.join(self.tmp, "companion.db")
+        self.backup_dir = os.path.join(self.tmp, "backup", "daily")
+        self.db = await make_db(self.db_path)
+
+    async def asyncTearDown(self):
+        await close_db(self.db, self.db_path)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _admin(self, token: str, theme: str = "endfield"):
+        return make_engine_stack(
+            self.db,
+            include_admin=True,
+            admin_config=AdminConfig(host="127.0.0.1", port=8080, token=token, theme=theme),
+            db_path=self.db_path,
+            backup_dir=self.backup_dir,
+        ).admin
+
+    def _get_routes(self, admin):
+        return [
+            ("/", admin.handle_overview, {}),
+            ("/memory", admin.handle_memory, {}),
+            ("/debug", admin.handle_debug, {}),
+            ("/costs", admin.handle_costs, {}),
+            ("/stickers", admin.handle_stickers, {}),
+            ("/logs", admin.handle_logs, {}),
+            ("/admin", admin.handle_admin, {}),
+            ("/api/status", admin.handle_api_status, {"headers": {"Accept": "application/json"}}),
+            ("/api/home", admin.handle_api_home, {}),
+        ]
+
+    async def test_新主题无token读页面一律403(self):
+        admin = self._admin(self.TOKEN)
+        for path, handler, kwargs in self._get_routes(admin):
+            with self.subTest(path=path):
+                resp = await handler(_Req(query={}, **kwargs))
+                self.assertEqual(resp.status, 403, f"{path} 无 token 必须 403")
+
+    async def test_新主题带token读页面且链接带token(self):
+        admin = self._admin(self.TOKEN)
+        for path, handler, kwargs in self._get_routes(admin):
+            with self.subTest(path=path):
+                kwargs = dict(kwargs)
+                kwargs.pop("headers", None)
+                resp = await handler(_Req(query={"token": self.TOKEN}, **kwargs))
+                self.assertNotEqual(resp.status, 403, f"{path} 带对 token 应当放行")
+        resp = await admin.handle_memory(_Req(query={"token": self.TOKEN}))
+        for path in ("/", "/memory", "/debug", "/costs", "/stickers", "/logs", "/admin"):
+            self.assertIn(f'href="{path}?token={self.TOKEN}"', resp.text)
+
+    async def test_新主题表情包图片地址带token(self):
+        admin = self._admin(self.TOKEN)
+        admin.stickers.load_index()
+        if not admin.stickers._index:
+            self.skipTest("示例卡没有表情包索引")
+        first = next(iter(admin.stickers._index))
+        resp = await admin.handle_stickers(_Req(query={"token": self.TOKEN}))
+        self.assertIn(f'/stickers/img/{first}?token={self.TOKEN}', resp.text)
+
+    async def test_新主题token为空时页面不出现token字样也不注入旧样式(self):
+        for theme in ("endfield", "plain"):
+            admin = self._admin("", theme=theme)
+            for path, handler, kwargs in self._get_routes(admin):
+                if path in ("/api/status", "/api/home"):
+                    continue
+                with self.subTest(theme=theme, path=path):
+                    resp = await handler(_Req(query={}, **kwargs))
+                    self.assertEqual(resp.status, 200, path)
+                    self.assertNotIn("token=", resp.text, f"{path} 不该凭空多出 token 链接")
+                    self.assertNotIn(".diary-tape", resp.text, f"{path} 不该再注入旧样式表")
+
+    async def test_新主题403页不回显token(self):
+        admin = self._admin(self.TOKEN)
+        resp = await admin.handle_costs(_Req(query={"token": "wrong"}))
+        self.assertEqual(resp.status, 403)
+        self.assertNotIn(self.TOKEN, resp.text)
 
 
 class TestAdminExposureWarning(unittest.TestCase):

@@ -42,7 +42,7 @@ REPORT_FILE = "data/smoke_fixes21_report.json"
 SANDBOX_DB = "data/smoke_fixes21_sandbox.db"
 REAL_DB = "data/companion.db"
 FALLBACK_DB = "data/companion_example.db"
-DUO_SIM = os.path.join("scripts", "duo_sim.py")
+DUO_SIM = os.path.join("scripts", "sim", "duo_sim.py")
 
 # A 段：他连发三条。第 1 条埋一个需要回应的点（他其实在问她周六的安排），
 # 第 3 条才是真正的问题所在——引用价值就在"她要回的是较早的那条还是这条"。

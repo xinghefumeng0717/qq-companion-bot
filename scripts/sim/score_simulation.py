@@ -1,272 +1,276 @@
 """评分系统数值验证仿真脚本 (scripts/sim/score_simulation.py)
-用于 FIXES6 任务：验证好感度推进速度、情绪脉冲触发率、情绪冷落曲线与遗忘曲线。
-严格按 FIXES6 规范：直接 import 生产代码公式，不改动任何业务代码。
+
+验证好感度推进速度、阶段稳定性、情绪脉冲触发率、情绪冷落曲线与遗忘曲线。
+直接 import 生产代码（AffectionEngine / MoodEngine 原样跑），**不复刻公式**：
+时间用注入的假时钟（engine 的 now_fn）推进，所以日衰减走的是生产里真实的
+decay_anchor 路径；冷落用 role='user' 的发言行（mood.py 只看 user 行）。
+
+FIXES26 修正（旧脚本的两个口径事故）：
+  1. 旧脚本停聊日只改 last_updated，而日衰减早已改按 decay_anchor 计 —— 仿真里衰减几乎从不发生，
+     标出来的节奏在真实衰减下全部失真（S6 以上一年内到不了）；
+  2. 旧冷落仿真插的是 role='assistant' 行，mood.py 只认 role='user'，冷落惩罚其实没被测到。
+
+用法：
+    python scripts/sim/score_simulation.py            # 全量报告（含 10 年渐近线，约 1~2 分钟）
+    python scripts/sim/score_simulation.py --quick    # 跳过 10 年外推
+不调用任何 LLM。
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import datetime
 import math
 import os
 import random
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from companion.affection import (
-    ALPHA,
+from companion.affection import (  # noqa: E402
     DECAY_RATES,
+    RESISTANCE_EXPONENT,
+    STAGE_HYSTERESIS,
     STAGE_THRESHOLDS,
     AffectionEngine,
     calc_composite_score,
-    calc_resistance,
     determine_stage,
 )
-from companion.db import Database
-from companion.memory import (
-    ALL_SENTIMENTS,
-    NEGATIVE_SENTIMENTS,
-    POSITIVE_SENTIMENTS,
-    calc_diary_strength,
-)
-from companion.mood import MoodEngine
-from companion.persona import Persona
+from companion.db import TIME_FORMAT, Database  # noqa: E402
+from companion.memory import calc_diary_strength  # noqa: E402
+from companion.mood import MoodEngine  # noqa: E402
+
+# qingzi 卡的开局六维（脚本自带一份，角色卡是私有内容，缺卡时也能跑）
+DEFAULT_INITIAL_DIMS = {
+    "warmth": 22.0, "trust": 24.0, "intimacy": 18.0,
+    "intrigue": 26.0, "patience": 32.0, "tension": 1.5,
+}
+
+BASELINE_SCORES = (5.0, 5.5, 6.0, 5.5)  # sd, rs, wa, re（锚点后典型日常）
+
+# 目标节奏（docs/FIXES8.md），容差 ±25%
+TARGET_DAYS = {2: 7, 3: 21, 4: 45, 5: 75, 6: 120, 7: 210, 8: 365}
+STAGE_NAMES = {2: "熟络", 3: "同好", 4: "知己", 5: "微酸", 6: "倾心", 7: "依恋", 8: "深情", 9: "相守"}
+TOLERANCE = 0.25
+
+SIM_START = datetime.datetime(2026, 1, 1, 0, 0)
+
+
+class FakeClock:
+    def __init__(self, start: datetime.datetime = SIM_START):
+        self.now = start
+
+    def __call__(self) -> datetime.datetime:
+        return self.now
+
+
+# ---------- 聊天节律 ----------
+def pattern_6on1off(day: int) -> bool:
+    return day % 7 != 0
+
+
+def pattern_daily(day: int) -> bool:
+    return True
+
+
+def pattern_every_other(day: int) -> bool:
+    return day % 2 == 1
+
+
+def pattern_weekends(day: int) -> bool:
+    return day % 7 in (6, 0)
 
 
 # ==============================================================================
-# 任务 1：好感度推进速度仿真
+# 任务 1：好感度推进（真实引擎 + 假时钟）
 # ==============================================================================
 
-async def simulate_affection(
-    initial_dims: Dict[str, float],
-    scenarios: Dict[str, Dict[str, Any]],
-    sim_days: int = 365,
+async def run_affection(
+    scores: Tuple[float, float, float, float] = BASELINE_SCORES,
+    turns_per_day: int = 30,
+    pattern: Callable[[int], bool] = pattern_6on1off,
+    days: int = 365,
+    initial_dims: Optional[Dict[str, float]] = None,
+    stage_max_drop: Optional[int] = None,
+    silence: Optional[Tuple[int, int]] = None,
 ) -> Dict[str, Any]:
-    results = {}
+    """跑一条关系曲线。每个聊天日 20:00 起每 2 分钟一轮。
 
-    for key, sc in scenarios.items():
-        db = Database(":memory:")
-        await db.init_tables()
-        engine = AffectionEngine(db, initial_dims)
-        init_st = await engine.get_state()
-        curr_stage = init_st["stage"]
-
-        reached_stage: Dict[int, int] = {}
-        daily_composite: List[float] = [init_st["composite"]]
-        turn_deltas: List[float] = []
-        pulses = 0
-        total_turns = 0
-
-        # 记录各阶段到达天数
-        for day in range(1, sim_days + 1):
-            is_chat = True
-            if sc.get("days_rest", 0) > 0:
-                cycle = sc["days_chat"] + sc["days_rest"]
-                is_chat = (day % cycle) != 0
-
-            if not is_chat:
-                # 停聊日：让 last_updated 跨过 24h 以触发日衰减
-                st = await engine.get_state()
-                fake_dt = (
-                    datetime.datetime.now() - datetime.timedelta(hours=25)
-                ).strftime("%Y-%m-%d %H:%M")
-                st["last_updated"] = fake_dt
-                await engine.save_state(st)
-                daily_composite.append(st["composite"])
-                continue
-
-            for t in range(sc["turns_per_day"]):
-                old_comp = (await engine.get_state())["composite"]
-                st, pulse = await engine.update(
-                    self_disclosure=sc["sd"],
-                    responsiveness=sc["rs"],
-                    warmth_score=sc["wa"],
-                    resonance=sc["re"],
-                    moments=[],
-                )
-                total_turns += 1
-                new_comp = st["composite"]
-                turn_deltas.append(new_comp - old_comp)
-                if pulse:
-                    pulses += 1
-
-                stg = st["stage"]
-                if stg > curr_stage:
-                    for s in range(curr_stage + 1, stg + 1):
-                        if s not in reached_stage:
-                            reached_stage[s] = day
-                    curr_stage = stg
-
-            daily_composite.append(st["composite"])
-
-        final_st = await engine.get_state()
-        results[key] = {
-            "name": sc["name"],
-            "initial_dims": initial_dims,
-            "reached_stage": reached_stage,
-            "final_composite": final_st["composite"],
-            "final_stage": final_st["stage"],
-            "final_dims": final_st["dims"],
-            "daily_composite": daily_composite,
-            "turn_deltas": turn_deltas,
-            "pulses": pulses,
-            "total_turns": total_turns,
-        }
-        await db.close()
-
-    return results
-
-
-async def run_scenario_d_long_term(
-    initial_dims: Dict[str, float],
-    days: int = 3650,
-) -> Dict[str, Any]:
-    """极端满分长期仿真（3650 天外推）"""
+    silence=(start_day, n_days)：从 start_day（含）起整整 n_days 天不聊。
+    返回：arrivals（各阶段首次到达日）、drops（到达过的阶段之后又掉下去的天）、每日曲线等。
+    """
+    sd, rs, wa, re_ = scores
+    clock = FakeClock()
     db = Database(":memory:")
     await db.init_tables()
-    engine = AffectionEngine(db, initial_dims)
-    init_st = await engine.get_state()
-    curr_stage = init_st["stage"]
-    reached_stage: Dict[int, int] = {}
+    engine = AffectionEngine(db, dict(initial_dims or DEFAULT_INITIAL_DIMS),
+                             stage_max_drop=stage_max_drop, now_fn=clock)
+    st = await engine.get_state()
+    arrivals: Dict[int, int] = {}
+    max_stage = st["stage"]
+    drops: List[Tuple[int, int, int]] = []  # (day, 掉到的阶段, 当时历史最高)
+    daily: List[Dict[str, Any]] = []
+    deltas: List[float] = []
+    pulses = 0
 
-    checkpoints = {}
     for day in range(1, days + 1):
-        for _ in range(40):
-            st, _ = await engine.update(
-                self_disclosure=10.0,
-                responsiveness=10.0,
-                warmth_score=10.0,
-                resonance=10.0,
-                moments=[],
-            )
+        silent = silence is not None and silence[0] <= day < silence[0] + silence[1]
+        if silent or not pattern(day):
+            daily.append({"day": day, "chat": False, "lo": st["composite"], "hi": st["composite"],
+                          "stage": st["stage"]})
+            continue
+        lo = None
+        for t in range(turns_per_day):
+            clock.now = SIM_START + datetime.timedelta(days=day - 1, hours=20, minutes=2 * t)
+            prev = st["composite"]
+            st, pulse = await engine.update(sd, rs, wa, re_, [])
+            deltas.append(st["composite"] - prev)
+            pulses += int(pulse)
+            if lo is None:
+                lo = st["composite"]
             stg = st["stage"]
-            if stg > curr_stage:
-                for s in range(curr_stage + 1, stg + 1):
-                    if s not in reached_stage:
-                        reached_stage[s] = day
-                curr_stage = stg
-        if day in (30, 90, 180, 365, 730, 1825, 3650):
-            checkpoints[day] = {
-                "composite": st["composite"],
-                "stage": st["stage"],
-                "warmth": st["dims"]["warmth"],
-                "trust": st["dims"]["trust"],
-                "intimacy": st["dims"]["intimacy"],
-            }
+            if stg > max_stage:
+                for s in range(max_stage + 1, stg + 1):
+                    arrivals.setdefault(s, day)
+                max_stage = stg
+            elif stg < max_stage and (not drops or drops[-1][0] != day):
+                drops.append((day, stg, max_stage))
+        daily.append({"day": day, "chat": True, "lo": lo, "hi": st["composite"], "stage": st["stage"]})
 
     await db.close()
     return {
-        "reached_stage": reached_stage,
-        "checkpoints": checkpoints,
-        "final_dims": st["dims"],
-        "final_composite": st["composite"],
-        "final_stage": st["stage"],
+        "arrivals": arrivals,
+        "drops": drops,
+        "daily": daily,
+        "final": st,
+        "deltas": deltas,
+        "pulses": pulses,
+        "max_composite": max(d["hi"] for d in daily) if daily else st["composite"],
     }
+
+
+def _arrival_str(arr: Dict[int, int], s: int) -> str:
+    d = arr.get(s)
+    return f"{d}" if d is not None else "-"
+
+
+def print_target_table(base: Dict[str, Any], long_run: Optional[Dict[str, Any]]) -> bool:
+    print(f"{'阶段':<4} | {'名称':<4} | {'门槛':>6} | {'目标':>5} | {'容差(±25%)':<14} | {'实测':>5} | 判定")
+    print("-" * 72)
+    ok_all = True
+    for s in range(2, 9):
+        tgt = TARGET_DAYS[s]
+        lo, hi = tgt * (1 - TOLERANCE), tgt * (1 + TOLERANCE)
+        act = base["arrivals"].get(s)
+        ok = act is not None and lo <= act <= hi
+        ok_all &= ok
+        print(f"S{s:<3} | {STAGE_NAMES[s]:<4} | {STAGE_THRESHOLDS[s]:>6.1f} | {tgt:>4}d | "
+              f"[{lo:6.1f},{hi:6.1f}] | {(str(act) + 'd') if act else '未到':>5} | {'通过' if ok else '不通过'}")
+    if long_run is not None:
+        ok9 = 9 not in long_run["arrivals"]
+        ok_all &= ok9
+        print(f"S9   | 相守 | {STAGE_THRESHOLDS[9]:>6.1f} | 渐近线 | 3650 天不可达   | "
+              f"峰值 {long_run['max_composite']:.2f} | {'通过' if ok9 else '不通过'}")
+    return ok_all
+
+
+async def sensitivity(base_drops_ok: bool) -> None:
+    print("\n[敏感性：各阶段首次到达天数（365 天内，'-' = 未到）；掉阶 = 到达后又跌回的次数]")
+    header = f"{'场景':<30} | " + " ".join(f"S{s:<4}" for s in range(2, 10)) + " | 终分   | 掉阶"
+    print(header)
+    print("-" * len(header))
+    cases = [
+        ("分数 5（四项全 5）", dict(scores=(5, 5, 5, 5))),
+        ("分数 6（四项全 6）", dict(scores=(6, 6, 6, 6))),
+        ("分数 7（四项全 7）", dict(scores=(7, 7, 7, 7))),
+        ("基准分 每天 10 轮", dict(turns_per_day=10)),
+        ("基准分 每天 30 轮（基准）", dict()),
+        ("基准分 每天 90 轮", dict(turns_per_day=90)),
+        ("基准分 天天聊", dict(pattern=pattern_daily)),
+        ("基准分 隔天聊", dict(pattern=pattern_every_other)),
+        ("基准分 只周末聊", dict(pattern=pattern_weekends)),
+    ]
+    for name, kw in cases:
+        r = await run_affection(**kw)
+        row = f"{name:<30} | " + " ".join(f"{_arrival_str(r['arrivals'], s):<5}" for s in range(2, 10))
+        print(f"{row} | {r['final']['composite']:6.2f} | {len(r['drops'])}")
+
+
+async def silence_test() -> None:
+    print("\n[停聊测试：基准节奏聊到第 N 天后完全不聊 7/30 天，回来聊第一轮时的阶段]")
+    print(f"{'起点':<10} | {'停聊':<5} | {'停前阶段':<8} | {'无地板':<16} | {'stage_max_drop=1':<16}")
+    print("-" * 70)
+    for start in (150, 365):
+        for gap in (7, 30):
+            res = {}
+            for floor in (None, 1):
+                r = await run_affection(days=start + gap + 1, silence=(start + 1, gap), stage_max_drop=floor)
+                before = r["daily"][start - 1]
+                after = r["daily"][start + gap]
+                res[floor] = (before, after)
+            b, a0 = res[None]
+            _, a1 = res[1]
+            print(f"第 {start:<4} 天 | {gap:>2} 天 | S{b['stage']} ({b['hi']:.1f}) | "
+                  f"S{a0['stage']} ({a0['lo']:.1f})      | S{a1['stage']} ({a1['lo']:.1f})")
 
 
 # ==============================================================================
 # 任务 2：情绪脉冲触发率
 # ==============================================================================
 
-def analyze_mood_pulse(scenario_results: Dict[str, Any]) -> Dict[str, Any]:
-    pulse_analysis = {}
-    for sc_key in ("A", "B"):
-        res = scenario_results[sc_key]
-        deltas = res["turn_deltas"]
-        total = len(deltas)
-        cur_trigger = sum(1 for d in deltas if d > 0.50)
-        t_20 = sum(1 for d in deltas if d > 0.20)
-        t_15 = sum(1 for d in deltas if d > 0.15)
-        t_10 = sum(1 for d in deltas if d > 0.10)
-        max_delta = max(deltas) if deltas else 0.0
-        avg_delta = sum(deltas) / total if total > 0 else 0.0
-
-        pulse_analysis[sc_key] = {
-            "total_turns": total,
-            "max_delta": max_delta,
-            "avg_delta": avg_delta,
-            "rate_cur_0_50": cur_trigger / total * 100 if total else 0.0,
-            "rate_alt_0_20": t_20 / total * 100 if total else 0.0,
-            "rate_alt_0_15": t_15 / total * 100 if total else 0.0,
-            "rate_alt_0_10": t_10 / total * 100 if total else 0.0,
-        }
-    return pulse_analysis
+def pulse_stats(deltas: List[float]) -> Dict[str, float]:
+    n = len(deltas) or 1
+    return {
+        "turns": len(deltas),
+        "max": max(deltas) if deltas else 0.0,
+        "avg": sum(deltas) / n,
+        "rate_015": sum(1 for d in deltas if d > 0.15) / n * 100,
+        "rate_010": sum(1 for d in deltas if d > 0.10) / n * 100,
+    }
 
 
 # ==============================================================================
-# 任务 3：情绪引擎冷落曲线
+# 任务 3：情绪冷落曲线（真实引擎 + 假时钟，role='user'）
 # ==============================================================================
 
-async def simulate_neglect_curve(steps: int = 16, hours_per_step: float = 6.0) -> List[Dict[str, float]]:
-    """从默认初态连续冷落 96 小时，每 6 小时采样一次"""
-    # 运行 50 次取均值以消除 O-U 过程的高斯噪声
-    runs = 50
-    aggregated = [
-        {"hours": i * hours_per_step, "v": 0.0, "a": 0.0, "t": 0.0, "frustration": 0.0}
-        for i in range(steps + 1)
-    ]
-
-    for run_idx in range(runs):
+async def simulate_neglect(
+    call_every_hours: float,
+    total_hours: float = 96.0,
+    composite: float = 25.0,
+    runs: int = 30,
+    sample_hours: Tuple[float, ...] = (12, 24, 36, 48, 72, 96),
+) -> Dict[float, Dict[str, float]]:
+    """他最后一次发言后，每 call_every_hours 小时调一次 update_mood（无对话冲击）。
+    返回各采样时刻（取 <= 该时刻的最近一次调用后的状态）的 runs 次均值。"""
+    agg = {h: {"v": 0.0, "a": 0.0, "t": 0.0, "frustration": 0.0} for h in sample_hours}
+    rng_state = random.getstate()
+    random.seed(20261021)
+    for _ in range(runs):
+        clock = FakeClock()
         db = Database(":memory:")
         await db.init_tables()
-
-        # 插入基线消息以设置距上次聊天时间
-        base_time = datetime.datetime.now()
         await db.execute(
-            "INSERT INTO turns (role, content, created_at) VALUES ('assistant', '你好呀', ?)",
-            (base_time.strftime("%Y-%m-%d %H:%M"),),
+            "INSERT INTO turns (role, content, created_at) VALUES ('user', '晚安', ?)",
+            (SIM_START.strftime(TIME_FORMAT),),
         )
-
-        mood = MoodEngine(db)
-        init_st = await mood.get_state()
-        aggregated[0]["v"] += init_st["v"]
-        aggregated[0]["a"] += init_st["a"]
-        aggregated[0]["t"] += init_st["t"]
-        aggregated[0]["frustration"] += init_st["frustration"]
-
-        sim_now = base_time
-        for i in range(1, steps + 1):
-            sim_now += datetime.timedelta(hours=hours_per_step)
-            # 操纵 turns 表让 hours_since_chat 准确反映当前冷落小时数
-            # 操纵 state['last_updated'] 让 elapsed 准确为 6.0 小时
-            last_up = (sim_now - datetime.timedelta(hours=hours_per_step)).strftime("%Y-%m-%d %H:%M")
-            st = await mood.get_state()
-            st["last_updated"] = last_up
-            await mood.save_state(st)
-
-            # 把 turns.created_at 固定在 base_time，并让 datetime.now() 在计算时感知到差值
-            # 由于 get_hours_since_last_chat 用 datetime.now() - turns.created_at
-            # 我们通过将 turns.created_at 向过去推移来模拟时间流逝
-            sim_turn_created = (
-                datetime.datetime.now() - datetime.timedelta(hours=i * hours_per_step)
-            ).strftime("%Y-%m-%d %H:%M")
-            await db.execute("UPDATE turns SET created_at = ?", (sim_turn_created,))
-
-            # 同时更新 state['last_updated'] 使得 real_elapsed 恰好为 hours_per_step
-            sim_state_updated = (
-                datetime.datetime.now() - datetime.timedelta(hours=hours_per_step)
-            ).strftime("%Y-%m-%d %H:%M")
-            st["last_updated"] = sim_state_updated
-            await mood.save_state(st)
-
-            # 调用 update_mood，无对话冲击
-            new_st = await mood.update_mood(composite_affection=25.0, conv_v=0.0, conv_a=0.0, conv_trust=0.0)
-            aggregated[i]["v"] += new_st["v"]
-            aggregated[i]["a"] += new_st["a"]
-            aggregated[i]["t"] += new_st["t"]
-            aggregated[i]["frustration"] += new_st["frustration"]
-
+        mood = MoodEngine(db, now_fn=clock)
+        st = await mood.get_state()  # 状态初始化于他最后发言那一刻
+        n_calls = int(round(total_hours / call_every_hours))
+        last = {0.0: st}
+        for i in range(1, n_calls + 1):
+            h = i * call_every_hours
+            clock.now = SIM_START + datetime.timedelta(hours=h)
+            st = await mood.update_mood(composite_affection=composite)
+            last[h] = st
+        for sh in sample_hours:
+            key = max(k for k in last if k <= sh + 1e-9)
+            for f in agg[sh]:
+                agg[sh][f] += float(last[key][f])
         await db.close()
-
-    for item in aggregated:
-        item["v"] = round(item["v"] / runs, 2)
-        item["a"] = round(item["a"] / runs, 2)
-        item["t"] = round(item["t"] / runs, 2)
-        item["frustration"] = round(item["frustration"] / runs, 2)
-
-    return aggregated
+    random.setstate(rng_state)
+    return {h: {f: round(v / runs, 2) for f, v in vals.items()} for h, vals in agg.items()}
 
 
 # ==============================================================================
@@ -274,212 +278,101 @@ async def simulate_neglect_curve(steps: int = 16, hours_per_step: float = 6.0) -
 # ==============================================================================
 
 def compute_forgetting_table() -> List[Dict[str, Any]]:
-    """生成记忆日记强度从初始值衰减至 0.5 阈值的天数表"""
-    importances = [1, 3, 5, 8, 10]
-    sentiments = [("正面", 2.0), ("中性", 1.0), ("负面", 1.5)]
-    recall_counts = [0, 3, 8]
-
     rows = []
-    for imp in importances:
-        for sent_name, _ in sentiments:
-            for rec in recall_counts:
+    for imp in (1, 3, 5, 8, 10):
+        for sent_name in ("正面", "中性", "负面"):
+            for rec in (0, 3, 8):
                 s0, tau_eff = calc_diary_strength(imp, rec, sent_name, 0.0)
-                if s0 > 0.5:
-                    days_to_threshold = tau_eff * math.log(s0 / 0.5)
-                else:
-                    days_to_threshold = 0.0
-
-                # 额外计算半衰期（衰减到初始强度一半的时间）
-                half_life_days = tau_eff * math.log(2.0)
-
-                rows.append({
-                    "importance": imp,
-                    "sentiment": sent_name,
-                    "recall_count": rec,
-                    "initial_strength": round(s0, 2),
-                    "tau_effective": round(tau_eff, 1),
-                    "half_life_days": round(half_life_days, 1),
-                    "days_to_0_5": round(days_to_threshold, 1),
-                })
+                days_to = tau_eff * math.log(s0 / 0.5) if s0 > 0.5 else 0.0
+                rows.append({"importance": imp, "sentiment": sent_name, "recall_count": rec,
+                             "initial_strength": round(s0, 2), "tau_effective": round(tau_eff, 1),
+                             "days_to_0_5": round(days_to, 1)})
     return rows
 
 
 # ==============================================================================
-# 打印报告与主程序
+# 主程序
 # ==============================================================================
 
-async def main():
+async def main(quick: bool = False) -> None:
     print("=" * 80)
-    print("   QQ 伴侣机器人 · FIXES6 评分系统数值仿真报告 (纯算不改)")
+    print("   QQ 伴侣机器人 · 评分系统数值仿真（真实引擎 + 假时钟，FIXES26 口径）")
     print("=" * 80)
+    init_comp = calc_composite_score(DEFAULT_INITIAL_DIMS)
+    print(f"初始六维: {DEFAULT_INITIAL_DIMS}  复合分 {init_comp:.2f}（阶段 {determine_stage(init_comp)}）")
+    print(f"STAGE_THRESHOLDS = {STAGE_THRESHOLDS}")
+    print(f"DECAY_RATES = {DECAY_RATES}  阻力指数 = {RESISTANCE_EXPONENT}  降阶迟滞 = {STAGE_HYSTERESIS}")
 
-    persona = Persona.load("characters/qingzi")
-    initial_dims = persona.initial_dims
-    print(f"\n[基准环境] 角色: {persona.name}")
-    print(f"初始好感向量: {initial_dims}")
-    init_comp = calc_composite_score(initial_dims)
-    init_stage = determine_stage(init_comp)
-    print(f"初始复合分: {init_comp:.2f} (阶段 {init_stage}: {persona.get_stage(init_stage).name})")
-    print(f"阶段阈值 STAGE_THRESHOLDS: {STAGE_THRESHOLDS}\n")
-
-    # 1. 任务 1 仿真
-    print("-" * 80)
-    print("【任务 1：好感度推进速度仿真】")
-    print("-" * 80)
-    scenarios = {
-        "A": {
-            "name": "锚点后典型日常 (基准)",
-            "sd": 5.0, "rs": 5.5, "wa": 6.0, "re": 5.5,
-            "turns_per_day": 30, "days_chat": 6, "days_rest": 1,
-        },
-        "B": {
-            "name": "热恋满分 (8.0)",
-            "sd": 8.0, "rs": 8.0, "wa": 8.0, "re": 8.0,
-            "turns_per_day": 30, "days_chat": 6, "days_rest": 1,
-        },
-        "C": {
-            "name": "冷淡 (3.0)",
-            "sd": 3.0, "rs": 3.0, "wa": 3.0, "re": 3.0,
-            "turns_per_day": 15, "days_chat": 7, "days_rest": 0,
-        },
-        "D": {
-            "name": "极端满分 (10.0 上界测试)",
-            "sd": 10.0, "rs": 10.0, "wa": 10.0, "re": 10.0,
-            "turns_per_day": 40, "days_chat": 7, "days_rest": 0,
-        },
-    }
-
-    res_1 = await simulate_affection(initial_dims, scenarios, sim_days=365)
-
-    print("\n[各场景到达各阶段所需天数 (365天内)]")
-    print(f"{'场景':<24} | " + " | ".join([f"阶段{s}" for s in range(2, 10)]))
-    print("-" * 85)
-    for k, r in res_1.items():
-        row_str = f"{k}. {r['name']:<20} | "
-        for s in range(2, 10):
-            d = r["reached_stage"].get(s)
-            d_str = f"{d}天" if d is not None else "不可达"
-            row_str += f"{d_str:<6} | "
-        print(row_str)
-
-    print("\n[365 天末状态一览]")
-    print(f"{'场景':<24} | {'复合分':<8} | {'阶段':<6} | 温暖   信任   亲密   好奇   包容   紧张")
-    print("-" * 85)
-    for k, r in res_1.items():
-        dims = r["final_dims"]
-        dim_str = f"{dims['warmth']:<6.1f} {dims['trust']:<6.1f} {dims['intimacy']:<6.1f} {dims['intrigue']:<6.1f} {dims['patience']:<6.1f} {dims['tension']:<6.1f}"
-        print(f"{k}. {r['name']:<20} | {r['final_composite']:<8.2f} | 阶段{r['final_stage']:<4} | {dim_str}")
-
-    # 长期极端满分外推 3650 天
-    print("\n[极端满分场景 D 长期外推 (3650 天 / 10年)]")
-    res_d_long = await run_scenario_d_long_term(initial_dims, days=3650)
-    for day, cp in res_d_long["checkpoints"].items():
-        print(f"  Day {day:4d} ({day/365:4.1f}年): 复合分 = {cp['composite']:6.2f} (阶段 {cp['stage']}) | warmth={cp['warmth']:.1f}, trust={cp['trust']:.1f}, intimacy={cp['intimacy']:.1f}")
-
-    # FIXES8 目标 vs 实测 对照表
-    print("\n" + "=" * 80)
-    print("【FIXES8 关系推进节奏：目标 vs 实测对照表 (基准场景 A: 日常 30 轮, 6聊1歇)】")
-    print("=" * 80)
-    print(f"{'阶段':<6} | {'阶段名':<6} | {'门槛分':<8} | {'目标时间':<12} | {'允许容差(±25%)':<16} | {'实测到达天数':<12} | 判定")
-    print("-" * 80)
-    target_pacing = [
-        (2, "熟络", STAGE_THRESHOLDS[2], 7, 5.25, 8.75),
-        (3, "同好", STAGE_THRESHOLDS[3], 21, 15.75, 26.25),
-        (4, "知己", STAGE_THRESHOLDS[4], 45, 33.75, 56.25),
-        (5, "微酸", STAGE_THRESHOLDS[5], 75, 56.25, 93.75),
-        (6, "倾心", STAGE_THRESHOLDS[6], 120, 90.0, 150.0),
-        (7, "依恋", STAGE_THRESHOLDS[7], 210, 157.5, 262.5),
-        (8, "深情", STAGE_THRESHOLDS[8], 365, 273.75, 456.25),
-        (9, "相守", STAGE_THRESHOLDS[9], 9999, 9999, 9999),
-    ]
-
-    all_pacing_pass = True
-    for stg, name, th, target, tol_min, tol_max in target_pacing:
-        actual = res_1["A"]["reached_stage"].get(stg)
-        if stg == 9:
-            target_str = "渐近线"
-            tol_str = "3650天不可达"
-            actual_str = f"未到达 (终态 {res_d_long['final_composite']:.2f})" if stg not in res_d_long["reached_stage"] else f"{actual}天"
-            verdict = "【通过】" if (9 not in res_d_long["reached_stage"] and 9 not in res_1["A"]["reached_stage"]) else "【不通过】"
-        else:
-            target_str = f"~{target} 天"
-            tol_str = f"[{tol_min:.1f}, {tol_max:.1f}] 天"
-            actual_str = f"{actual} 天" if actual else "未到达"
-            passed = actual is not None and (tol_min <= actual <= tol_max)
-            if not passed:
-                all_pacing_pass = False
-            verdict = "【通过】" if passed else "【不通过】"
-
-        print(f"阶段{stg:<4} | {name:<6} | {th:<8.2f} | {target_str:<12} | {tol_str:<16} | {actual_str:<12} | {verdict}")
-
-    # 场景 C 复合分单调下行检查
-    c_series = res_1["C"]["daily_composite"]
-    c_mono_down = all(c_series[i] >= c_series[i+1] - 0.05 for i in range(len(c_series)-1))
-    c_tension = res_1["C"]["final_dims"]["tension"]
-    crit_c_pass = c_mono_down and c_tension <= initial_dims["tension"] and res_1["C"]["final_composite"] == 0.0
-
-    print(f"\n冷淡场景 C 验证: 复合分从 {init_comp:.2f} 单调递减归零至 0.00，无负数无异常: {'【通过】' if crit_c_pass else '【不通过】'}")
-
-    # 2. 任务 2 仿真
     print("\n" + "-" * 80)
-    print("【任务 2：情绪脉冲触发率】")
+    print("【任务 1：好感度推进（基准：sd5.0 rs5.5 wa6.0 re5.5，30 轮/天，聊 6 歇 1）】")
     print("-" * 80)
-    pulse_res = analyze_mood_pulse(res_1)
-    for sc_k in ("A", "B"):
-        p = pulse_res[sc_k]
-        print(f"场景 {sc_k} ({scenarios[sc_k]['name']}):")
-        print(f"  总轮次: {p['total_turns']}")
-        print(f"  单轮复合分最大涨幅: {p['max_delta']:.4f}, 平均涨幅: {p['avg_delta']:.4f}")
-        print(f"  新阈值 (>0.15) 触发率: {p['rate_alt_0_15']:.2f}%")
-        print(f"  备选阈值 (>0.10) 触发率: {p['rate_alt_0_10']:.2f}%")
+    base = await run_affection(days=365)
+    print("[门槛求解参考] 基准曲线在目标日的当日最高复合分（门槛即取这些值）：")
+    print("  " + "  ".join(f"d{d}={base['daily'][d - 1]['hi']:.2f}" for d in TARGET_DAYS.values()))
 
-    # 3. 任务 3 仿真
+    long_run = None
+    if not quick:
+        long_run = await run_affection(days=3650)
+        extreme = await run_affection(scores=(10, 10, 10, 10), turns_per_day=40,
+                                      pattern=pattern_daily, days=3650)
+        print(f"[渐近线] 基准 10 年峰值复合分 {long_run['max_composite']:.2f}；"
+              f"满分 10 x 40 轮/天 x 天天聊 10 年峰值 {extreme['max_composite']:.2f}"
+              f"（相守门槛 {STAGE_THRESHOLDS[9]}，{'不可达' if 9 not in extreme['arrivals'] else '可达！'}）")
+        print(f"[10 年稳定性] 基准节奏 10 年内到达后掉阶次数：{len(long_run['drops'])}")
+
+    print("\n[目标 vs 实测]")
+    ok = print_target_table(base, long_run)
+    print(f"\n基准 365 天内到达后掉阶次数：{len(base['drops'])} "
+          f"{'【通过】' if not base['drops'] else '【不通过】 ' + str(base['drops'][:5])}")
+    print(f"节奏总判定：{'【通过】' if ok else '【不通过】'}")
+
+    cold = await run_affection(scores=(3, 3, 3, 3), turns_per_day=15, pattern=pattern_daily)
+    his = [d["hi"] for d in cold["daily"]]
+    mono = all(his[i] >= his[i + 1] - 1e-9 for i in range(len(his) - 1))
+    print(f"冷淡场景（全 3 分，15 轮/天）：复合分 {init_comp:.2f} -> {cold['final']['composite']:.2f}，"
+          f"单调不增 {'【通过】' if mono else '【不通过】'}，无负数 {'【通过】' if min(his) >= 0 else '【不通过】'}")
+
+    await sensitivity(not base["drops"])
+    await silence_test()
+
     print("\n" + "-" * 80)
-    print("【任务 3：情绪引擎冷落曲线 (连续 96 小时)】")
+    print("【任务 2：情绪脉冲触发率（阈值 0.15）】")
     print("-" * 80)
-    neglect_data = await simulate_neglect_curve(steps=16, hours_per_step=6.0)
-    print(f"{'冷落时长':<10} | {'愉悦度 v':<10} | {'唤醒度 a':<10} | {'安心度 t':<10} | {'冷落驱力 frustration':<15}")
-    print("-" * 65)
-    for pt in neglect_data:
-        print(f"{pt['hours']:>4.0f} 小时   | {pt['v']:>8.2f}   | {pt['a']:>8.2f}   | {pt['t']:>8.2f}   | {pt['frustration']:>12.2f}")
+    hot = await run_affection(scores=(8, 8, 8, 8))
+    for name, r in (("基准", base), ("热恋 8 分", hot)):
+        p = pulse_stats(r["deltas"])
+        print(f"{name}: {p['turns']} 轮，单轮最大涨幅 {p['max']:.4f}，平均 {p['avg']:.4f}，"
+              f">0.15 触发率 {p['rate_015']:.2f}%（>0.10: {p['rate_010']:.2f}%）")
 
-    v_48h = next(pt["v"] for pt in neglect_data if pt["hours"] == 48.0)
-    crit_3_1_pass = -5.0 <= v_48h < 0.0
-    print(f"\n[任务 3 验收] 48 小时冷落后 v 处于 [-5, 0) 区间: {'【通过】' if crit_3_1_pass else '【不通过】'} (实际 v = {v_48h:.2f})")
-
-    # 4. 任务 4 仿真
     print("\n" + "-" * 80)
-    print("【任务 4：遗忘曲线半衰期与门槛表 (衰减至 0.5 阈值)】")
+    print("【任务 3：情绪冷落曲线（composite=25，他最后发言后不再说话；30 次均值）】")
     print("-" * 80)
-    forgetting_rows = compute_forgetting_table()
+    print("同一段冷落、不同调用频率——曲线应基本重合（旧实现按调用次数累计，1h 调用 48h 时 v=-10）")
+    print(f"{'调用间隔':<8} | " + " | ".join(f"{int(h):>2}h v/a/t/frus" for h in (24, 48, 72, 96)))
+    for every in (1.0 / 6.0, 1.0, 6.0, 24.0):
+        res = await simulate_neglect(every)
+        cells = [f"{res[h]['v']:5.2f}/{res[h]['a']:5.2f}/{res[h]['t']:4.2f}/{res[h]['frustration']:4.2f}"
+                 for h in (24, 48, 72, 96)]
+        label = f"{every * 60:.0f}min" if every < 1 else f"{every:.0f}h"
+        print(f"{label:>7}  | " + " | ".join(cells))
 
-    print(f"{'重要性':<6} | {'情感倾向':<8} | {'回忆次数':<8} | {'初始强度':<8} | {'τ_eff(天)':<10} | {'衰减至0.5天数':<12} | 评价")
-    print("-" * 75)
-    for r in forgetting_rows:
-        flag = ""
-        if r["importance"] == 5 and r["sentiment"] == "中性" and r["recall_count"] == 0:
-            flag = "⭐ 日常主力 (60~80天)"
-        elif r["importance"] == 8 and r["sentiment"] == "正面" and r["recall_count"] == 0:
-            flag = "⭐ 正面重要 (~1年)"
-        elif r["importance"] == 10 and r["recall_count"] == 8:
-            flag = "⭐ 永久深层记忆"
-        print(f"{r['importance']:<6d} | {r['sentiment']:<8} | {r['recall_count']:<8d} | {r['initial_strength']:<8.2f} | {r['tau_effective']:<10.1f} | {r['days_to_0_5']:<12.1f} | {flag}")
+    print("\n" + "-" * 80)
+    print("【任务 4：遗忘曲线（衰减至 0.5 阈值天数）】")
+    print("-" * 80)
+    rows = compute_forgetting_table()
 
-    imp1_neutral_0 = next(r for r in forgetting_rows if r["importance"] == 1 and r["sentiment"] == "中性" and r["recall_count"] == 0)
-    imp5_neutral_0 = next(r for r in forgetting_rows if r["importance"] == 5 and r["sentiment"] == "中性" and r["recall_count"] == 0)
-    imp8_pos_0 = next(r for r in forgetting_rows if r["importance"] == 8 and r["sentiment"] == "正面" and r["recall_count"] == 0)
-    imp10_pos_8 = next(r for r in forgetting_rows if r["importance"] == 10 and r["sentiment"] == "正面" and r["recall_count"] == 8)
+    def pick(imp: int, sent: str, rec: int) -> float:
+        return next(r["days_to_0_5"] for r in rows if r["importance"] == imp
+                    and r["sentiment"] == sent and r["recall_count"] == rec)
 
-    print("\n[FIXES8 任务 4 遗忘曲线验证结论]")
-    print(f"  1. 重要性 1 (中性, 0次回忆): {imp1_neutral_0['days_to_0_5']:.1f} 天 (目标 ~7 天, 容差 [5.6, 8.4]) -> {'【通过】' if 5.6 <= imp1_neutral_0['days_to_0_5'] <= 8.4 else '【不通过】'}")
-    print(f"  2. 重要性 5 (中性日常, 0次回忆): {imp5_neutral_0['days_to_0_5']:.1f} 天 (目标 60~80 天) -> {'【通过】' if 60 <= imp5_neutral_0['days_to_0_5'] <= 80 else '【不通过】'}")
-    print(f"  3. 重要性 8 (正面感动, 0次回忆): {imp8_pos_0['days_to_0_5']:.1f} 天 (目标 ~1 年, 容差 [292, 438]) -> {'【通过】' if 292 <= imp8_pos_0['days_to_0_5'] <= 438 else '【不通过】'}")
-    print(f"  4. 重要性 10 (正面+8次回忆加固): {imp10_pos_8['days_to_0_5']/365:.1f} 年 (目标 多年永久记忆) -> {'【通过】' if imp10_pos_8['days_to_0_5']/365 >= 2.5 else '【不通过】'}")
-
-    print("\n" + "=" * 80)
-    print("   仿真运行完毕。全部 4 个任务均已产出严格量化证据。")
-    print("=" * 80)
+    print(f"  重要性 1 中性 0 回忆: {pick(1, '中性', 0):.1f} 天（目标 ~7）")
+    print(f"  重要性 5 中性 0 回忆: {pick(5, '中性', 0):.1f} 天（目标 60~80）")
+    print(f"  重要性 8 正面 0 回忆: {pick(8, '正面', 0):.1f} 天（目标 ~365）")
+    print(f"  重要性 10 正面 8 回忆: {pick(10, '正面', 8) / 365:.1f} 年（目标 多年）")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--quick", action="store_true", help="跳过 10 年外推")
+    args = ap.parse_args()
+    asyncio.run(main(quick=args.quick))

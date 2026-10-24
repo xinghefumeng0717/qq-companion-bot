@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from companion.affection import AffectionEngine
+from companion.datefmt import relativize_dates
 from companion.config import ProactiveConfig, TimingConfig
 from companion.db import (
     Database,
@@ -30,6 +31,7 @@ from companion.mood import MoodEngine
 from companion.persona import LONG_HOLIDAY_MIN_SPAN, Persona, holiday_span
 from companion.prompts import (
     FACE_PROMPT_BLOCK,
+    face_prompt_block,
     PROACTIVE_DECISION_PROMPT,
     PROACTIVE_GENERATE_PROMPT,
     STAGE_GATING_RESTRICTED,
@@ -40,6 +42,8 @@ from companion.prompts import (
 )
 from companion.replier import (
     Replier,
+    count_today_faces,
+    face_daily_budget,
     strip_face_markers,
     typing_text_from_chunks_or_record,
 )
@@ -51,6 +55,24 @@ logger = logging.getLogger(__name__)
 TOPIC_DEDUP_THRESHOLD = 0.4
 # 阶段 0~2（含）禁止"想他/喜欢/心疼"类依恋念头，与日记门控同源
 RESTRICTED_STAGE_MAX = 2
+
+# 星期口癖（日期感素材最后一级）：按现实工作周写的，只属于跟现实节假日的世界。
+# 不跟现实节假日、有自己的纪年与作息的卡（world.follow_public_holidays=False）没有这套
+# "周一起新一周、周五盼周末"，一律退回中性的"平常的一天"。
+WEEKDAY_DATE_SENSE = {
+    0: "周一，新的一周开始啦",
+    4: "周五啦，快要周末了",
+    5: "周六休息日",
+    6: "周日时光",
+}
+NEUTRAL_DATE_SENSE = "平常的一天"
+
+
+def weekday_date_sense(weekday: int, world: Any = None) -> str:
+    """日期感念的星期口癖：world 不跟现实节假日时不带星期口癖（旧卡默认 True，逐字节不变）。"""
+    if getattr(world, "follow_public_holidays", True) is not True:
+        return NEUTRAL_DATE_SENSE
+    return WEEKDAY_DATE_SENSE.get(weekday, NEUTRAL_DATE_SENSE)
 
 
 def _char_jaccard(a: str, b: str) -> float:
@@ -233,6 +255,11 @@ class ProactiveScheduler:
         if unanswered >= self.config.max_unanswered:
             return True, f"连续 {unanswered} 条主动消息未回复，当天停止主动发消息"
 
+        # 3b. 他好几天没回：降频，再久就停（按天清零的第 3 条管不住多日沉默）
+        silence_reason = await self._silence_gate(now_dt)
+        if silence_reason:
+            return True, silence_reason
+
         # 4. 工作记忆最后一轮是机器人发言且未获回复（事件通道可豁免）
         if not skip_unanswered_reply:
             last_turn = await self.db.fetchone("SELECT role FROM turns ORDER BY id DESC LIMIT 1")
@@ -263,26 +290,23 @@ class ProactiveScheduler:
         ① 到期未完成待跟进 -> ② 欲言又止池 -> ③ 作息活动+时间 -> ④ 高强度日记回忆 -> ⑤ 日期感
         """
         now_dt = datetime.now()
-        current_time_str = now_dt.strftime(TIME_FORMAT)
         holidays = self.get_holidays()
         span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
 
-        # ① 到期未完成的待跟进事项
-        fu_row = await self.db.fetchone(
-            "SELECT id, topic FROM followups WHERE done = 0 AND remind_after <= ? ORDER BY id ASC LIMIT 1",
-            (current_time_str,),
-        )
-        if fu_row:
-            return f"之前答应过要跟进的事情：{fu_row['topic']}"
+        # ① 到期未完成的待跟进事项（过期的已由 memory 清掉）。
+        #    用掉即勾掉：问过一次就算跟进过了，他不回也不再拿它当素材
+        #    （生产实锤：一条"明天七点起床"被连续当素材 9 天）。
+        fu_rows = await self.memory.get_open_followups(due_only=True, limit=1)
+        if fu_rows:
+            fu = fu_rows[0]
+            await self.memory.mark_followup_done(fu["id"])
+            return f"之前答应过要跟进的事情：{self.memory.format_followup(fu)}"
 
-        # ② 欲言又止池
-        sup_row = await self.db.fetchone(
-            "SELECT id, content FROM suppressed_desires ORDER BY id DESC LIMIT 1"
-        )
-        if sup_row:
-            # 用掉后清除
-            await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (sup_row["id"],))
-            return f"之前想对他说但忍住的话题：{sup_row['content']}"
+        # ② 欲言又止池（只取还作数的念头，用掉后清除）
+        desires = await self.memory.get_live_desires(limit=1)
+        if desires:
+            await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (desires[0]["id"],))
+            return f"之前想对他说但忍住的话题：{desires[0]['content']}"
 
         # ③ 作息活动 + 当前时间（短假按周六作息留校；长假直接回卡里的长假文案）
         current_activity = self.persona.get_current_activity(
@@ -292,7 +316,7 @@ class ProactiveScheduler:
             # 长假只附短假那句会漏掉"不在学校"的关键信息，但那句文案本身已写明不在学校，
             # 叠上去就是同一件事说两遍，所以长假不再附注
             if 0 < span < LONG_HOLIDAY_MIN_SPAN:
-                current_activity += holiday_prompt_note(span)
+                current_activity += holiday_prompt_note(span, self.persona.world)
             return f"现在是 {now_dt.hour}点多，自己此刻正在：{current_activity}"
 
         # ④ 高强度日记回忆
@@ -300,9 +324,8 @@ class ProactiveScheduler:
         if diaries:
             return f"忽然回想起了之前的片段：{diaries[0]}"
 
-        # ⑤ 日期感
-        weekday_map = {0: "周一，新的一周开始啦", 4: "周五啦，快要周末了", 5: "周六休息日", 6: "周日时光"}
-        date_sense = weekday_map.get(now_dt.weekday(), "平常的一天")
+        # ⑤ 日期感（星期口癖只属于跟现实工作周的卡，见 weekday_date_sense）
+        date_sense = weekday_date_sense(now_dt.weekday(), getattr(self.persona, "world", None))
         return f"日期感念：今天好像是{date_sense}"
 
     def _calc_typing_duration(self, text: str) -> float:
@@ -377,6 +400,74 @@ class ProactiveScheduler:
                 return True
         return False
 
+    async def _silence_gate(self, now_dt: datetime) -> str:
+        """他多日没回时的降频闸门：返回拦截原因，放行返回空串。
+
+        生产实锤（10-10~18）：他 9 天没回，第 3 条闸门每天清零，她每天照发 1~2 条。
+        沉默天数从他最后一次说话算起；他从没说过话不拦（首次破冰另有阶段规则管）。
+        """
+        cfg = self.config
+        stop_days = float(getattr(cfg, "silence_stop_after_days", 0) or 0)
+        slow_days = float(getattr(cfg, "silence_slow_after_days", 0) or 0)
+        if stop_days <= 0 and slow_days <= 0:
+            return ""
+        try:
+            last_user = await self.memory.get_last_user_turn_time()
+            if last_user is None:
+                return ""
+            silent_days = (now_dt - last_user).total_seconds() / 86400
+            if stop_days > 0 and silent_days >= stop_days:
+                return f"他已 {silent_days:.1f} 天没回，停止主动发消息直到他回话"
+            if slow_days > 0 and silent_days >= slow_days:
+                row = await self.db.fetchone(
+                    "SELECT created_at FROM turns WHERE role = 'assistant' AND proactive = 1 "
+                    "AND created_at > ? ORDER BY id DESC LIMIT 1",
+                    (last_user.strftime(TIME_FORMAT),),
+                )
+                last_sent = parse_dt(row["created_at"]) if row and row["created_at"] else None
+                interval_h = float(getattr(cfg, "silence_slow_interval_hours", 48.0))
+                if last_sent and (now_dt - last_sent).total_seconds() < interval_h * 3600:
+                    return f"他已 {silent_days:.1f} 天没回，降频中（距上条主动消息不足 {interval_h:g} 小时）"
+        except Exception as e:
+            logger.warning(f"[Proactive] 沉默降频闸门计算失败，放行: {e}")
+        return ""
+
+    def _for_her(self, text: str) -> str:
+        """给她看的提示词：卡的 world.date_style = relative 时把具体日期换成相对说法。"""
+        world = getattr(self.persona, "world", None)
+        if getattr(world, "relative_dates", False) is True:
+            return relativize_dates(text, datetime.now())
+        return text
+
+    async def _reply_gap_note(self) -> str:
+        """"他上次回你是什么时候、之后你发的几条他都没回"——拼在最近聊天记录块的最前面。
+
+        生产实锤（10-10~18）：他 9 天没回，她每天照样问"七点计划还算不算数"，
+        像是不知道自己在对着空气说话。聊天记录本身有时间戳，但模型不会自己去数。
+        他从没说过话 / 他的话就是最后一条时返回空串（不加这一行）。
+        """
+        try:
+            last_user = await self.memory.get_last_user_turn_time()
+            if last_user is None:
+                return ""
+            row = await self.db.fetchone(
+                "SELECT COUNT(*) AS n FROM turns WHERE role = 'assistant' AND proactive = 1 "
+                "AND created_at > ?",
+                (last_user.strftime(TIME_FORMAT),),
+            )
+            unanswered = int(row["n"]) if row else 0
+            if unanswered <= 0:
+                return ""
+            days = (datetime.now().date() - last_user.date()).days
+            when = "今天" if days == 0 else ("昨天" if days == 1 else f"{days} 天前")
+            return (
+                f"（他上次回你消息是 {last_user.strftime('%m-%d %H:%M')}（{when}），"
+                f"之后你主动发的 {unanswered} 条他都还没回。他没接的话题不要换个说法再问一遍。）\n"
+            )
+        except Exception as e:
+            logger.warning(f"[Proactive] 计算回复间隔失败，跳过该提示: {e}")
+            return ""
+
     async def _generate_and_send(self, material: str, current_time_str: str) -> bool:
         """给定话题素材走"生成 → 切段 → typing 表演 → 发送 → 落库"整条管道。
 
@@ -389,26 +480,37 @@ class ProactiveScheduler:
         # 任务1：生成层注入最近 8 条对话历史。E1 的根因就是这里 0 条历史，
         # 她对"他已经坐动车到家"完全无知，只能拿永不更新的 facts 硬编
         gen_turns = await self.memory.get_recent_turns(limit=8)
-        recent_chat_block = format_recent_chat(gen_turns, max_chars=60)
+        recent_chat_block = await self._reply_gap_note() + format_recent_chat(gen_turns, max_chars=60)
 
+        medium = self.persona.world.chat_medium
         gen_user_prompt = PROACTIVE_GENERATE_PROMPT.format(
             user_address=self.persona.user_address,
+            # 默认值保留改造前的"手机 QQ"写法（带空格），旧卡提示词逐字节不变
+            chat_medium="手机 QQ" if medium == "手机QQ" else medium,
+            typing_habit=self.persona.world.typing_habit,
             current_time=current_time_str,
             topic_material=material,
             recent_chat=recent_chat_block,
             stickers_list=stickers_list,
-            face_block=FACE_PROMPT_BLOCK,
+            face_block=face_prompt_block(self.persona.world),
         )
 
         # FIXES22：主动消息同样走语音闸门（"睡前收到她一条语音"是这张卡的高光场景），
         # 与主聊共用同一份 TTSManager 账目（开关/日上限/作息）。**先问闸门再组装**：
         # 关着时提示词里就不该出现 [voice:] 这个写法。
         voice_ok = await self._voice_gate_ok()
-        # 完整人格 system prompt 注入
-        system_prompt = await self.assembler.assemble_system_prompt("", voice_ok)
+        # FIXES27：TTS 开着、闸门却没过（真在合练/走不开）时，提示词里得告诉她
+        # "这会儿只能打字"，免得主动消息里答应了发语音、实际只发出文字。
+        # 防御式 getattr：老测试/旧装配没有 self.tts 也能走。
+        tts_cfg = getattr(getattr(self, "tts", None), "config", None)
+        voice_gated_note = (not voice_ok) and bool(getattr(tts_cfg, "enabled", False))
+        # 完整人格 system prompt 注入（主动消息传空串：作息注记不会误加"你其实是醒着的"）
+        system_prompt = await self.assembler.assemble_system_prompt(
+            "", voice_ok, voice_gated_note=voice_gated_note
+        )
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": gen_user_prompt},
+            {"role": "user", "content": self._for_her(gen_user_prompt)},
         ]
 
         try:
@@ -424,9 +526,14 @@ class ProactiveScheduler:
 
         # 切段与发送（source=proactive：占位符兜底的 INFO 日志据此标注来源）
         # FIXES22：用上面问过闸门的那份结论（不重复查库），语音与主聊共用额度
+        face_budget = None
+        if getattr(self.persona.world, "face_usage", "normal") == "rare":
+            used_faces = await count_today_faces(self.db)
+            face_budget = face_daily_budget(self.persona.world, used_faces)
         chunks, clean_text = self.replier.parse_reply(
             reply_text,
             source="proactive",
+            face_budget=face_budget,
             voice_allowed=voice_ok,
             voice_max_chars=getattr(
                 getattr(self.tts, "config", None), "max_chars", 60
@@ -498,7 +605,7 @@ class ProactiveScheduler:
         current_time_str = now_dt.strftime(TIME_FORMAT)
         span = holiday_span(now_dt.strftime("%Y-%m-%d"), self.get_holidays())
         if span:
-            current_time_str += holiday_prompt_note(span)
+            current_time_str += holiday_prompt_note(span, self.persona.world)
 
         sent = await self._generate_and_send(
             self.arcs.build_event_material(arc), current_time_str
@@ -518,6 +625,13 @@ class ProactiveScheduler:
 
     async def trigger_cycle(self) -> None:
         """执行单次主动消息评估周期"""
+        # 线下见面：到点的约定补纪要（没有到点的约定时不发 API）
+        meetups = getattr(self, "meetups", None)
+        if meetups is not None:
+            try:
+                await meetups.process_due()
+            except Exception as e:
+                logger.warning(f"[Proactive] 见面纪要处理异常: {e}")
         # FIXES16：状态机每次醒来顺手推一次（极便宜，只在 today 且过 18:00 才发 API）
         if self.arcs is not None:
             try:
@@ -563,8 +677,8 @@ class ProactiveScheduler:
         a = float(mood_state.get("a", 1.0))
         t = float(mood_state.get("t", 7.0))
 
-        fu_rows = await self.db.fetchall("SELECT topic FROM followups WHERE done = 0 LIMIT 3")
-        fu_str = "、".join([r["topic"] for r in fu_rows]) if fu_rows else "无"
+        fu_rows = await self.memory.get_open_followups(limit=3)
+        fu_str = "、".join([self.memory.format_followup(r) for r in fu_rows]) if fu_rows else "无"
         diaries = await self.memory.get_active_diaries()
         recent_diary_str = diaries[0] if diaries else "暂无特别回忆"
 
@@ -573,18 +687,16 @@ class ProactiveScheduler:
         span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
         current_time_str = now_dt.strftime(TIME_FORMAT)
         if span:
-            current_time_str += holiday_prompt_note(span)
+            current_time_str += holiday_prompt_note(span, self.persona.world)
         stage_idx = aff_state.get("stage", 0)
 
         # 任务1：决策层也要看得见最近聊过什么 / 已有定论 / 已忍住的念头，
         # 否则它会选一个"他上轮刚说过"的话题（E1/E2）或复读同一念头（E5）
         recent_turns = await self.memory.get_recent_turns(limit=5)
-        recent_chat_brief = format_recent_chat(recent_turns, max_chars=30)
-        facts_all = await self.memory.get_all_facts()
+        recent_chat_brief = await self._reply_gap_note() + format_recent_chat(recent_turns, max_chars=30)
+        facts_all = await self.memory.get_facts_for_prompt()
         known_facts_str = "、".join(facts_all) if facts_all else "无"
-        desire_rows = await self.db.fetchall(
-            "SELECT content FROM suppressed_desires ORDER BY id DESC LIMIT 5"
-        )
+        desire_rows = await self.memory.get_live_desires(limit=5)
         pending_desires_str = (
             "、".join([str(r["content"]) for r in desire_rows if r["content"]])
             if desire_rows
@@ -611,7 +723,7 @@ class ProactiveScheduler:
 
         try:
             resp = await self.gateway.chat(
-                messages=[{"role": "user", "content": decision_user_prompt}],
+                messages=[{"role": "user", "content": self._for_her(decision_user_prompt)}],
                 model=self.gateway.config.observer_model,
                 temperature=0.7,
                 json_mode=True,

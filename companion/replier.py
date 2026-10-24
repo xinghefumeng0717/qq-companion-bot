@@ -8,6 +8,7 @@ import asyncio
 import logging
 import random
 import re
+from datetime import datetime
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 from companion.config import ReplyConfig
@@ -62,8 +63,12 @@ _MIXED_BASE = (
     r"|\[face[:：]([^\]]+)\]"
     r"|^[ \t]*\[quote[:：](\d+)\]"
 )
+# 三种生产写法同源共用：
+# [voice:正文[/voice] / [voice:]正文[/voice] / [voice:正文][/voice]。
+# 最后一种是 2026-10-23 真实事故：闭合标记前多一个 ]，漏成普通文字。
+_VOICE_PATTERN_SOURCE = r"\[voice[:：]\]?\s*([^\[\]]*?)\s*\]?\s*\[/voice\]"
 MIXED_SEGMENT_PATTERN = re.compile(
-    _MIXED_BASE + r"|\[voice[:：]\]?\s*([^\[\]]*?)\s*\[/voice\]",
+    _MIXED_BASE + "|" + _VOICE_PATTERN_SOURCE,
     re.IGNORECASE | re.MULTILINE,
 )
 # 语音不可用（开关关/日上限/作息闸门）时用这份：group(4) 恒为 None
@@ -76,6 +81,46 @@ MIXED_SEGMENT_PATTERN_NO_VOICE = re.compile(
 # 他的纯表情气泡 92% 是 1~2 个，同款二连合法（他的语料里有 107 条二连），
 # 三连罕见（21 条）。发侧取"每轮 ≤2"，同时也天然满足"同一气泡 ≤2"。
 FACE_MAX_PER_TURN = 2
+
+# 小黄脸日额度（卡 world.face_usage = "rare"）：提示词软约束会被历史上下文里的
+# 旧习惯带偏（2026-10-22 实测：卡写"基本不用"，跑分仍 45 次/27 条），真正的闸在这里。
+# 超出当日额度的 [face:] 标记剥掉只留正文——与"发不出去的脸"同一降级口径。
+FACE_RARE_DAILY_BUDGET = 2
+
+
+def enforce_face_daily_budget(text: str, budget: Optional[int]) -> str:
+    """只保留当日额度内的 [face:] 标记，超出的剥标记留正文。None = 不限（默认旧行为）。"""
+    if budget is None or ("[face" not in text and "[FACE" not in text):
+        return text
+    seen = 0
+
+    def _keep(m: "re.Match[str]") -> str:
+        nonlocal seen
+        seen += 1
+        if seen <= budget:
+            return m.group(0)
+        return ""
+
+    out = FACE_PATTERN.sub(_keep, text)
+    if seen > budget:
+        logger.info(f"[Replier] 小黄脸日额度：本轮 {seen} 个超出剩余额度 {budget}，超出部分已降级为纯文字")
+    return out
+
+
+async def count_today_faces(db: Any) -> int:
+    """今天已发出的 QQ 表情数（她落库记录里的 [face:] 标记计数）。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = await db.fetchall(
+        "SELECT content FROM turns WHERE role = 'assistant' AND created_at >= ?", (today,)
+    )
+    return sum(len(FACE_PATTERN.findall((r[0] or ""))) for r in rows)
+
+
+def face_daily_budget(world: Any, used_today: int) -> Optional[int]:
+    """world.face_usage = "rare" → 今日剩余额度；其余（含旧卡没声明）→ None 不限。"""
+    if getattr(world, "face_usage", "normal") != "rare":
+        return None
+    return max(0, FACE_RARE_DAILY_BUDGET - used_today)
 
 # typing/段间延迟里，一个非文字段（表情包或表情）折算成几个字——
 # 沿用表情包既有折算（原来 sticker 就是这个 5），一个脸不该触发长打字。
@@ -90,25 +135,29 @@ SILENCE_TOKEN = "[沉默]"
 # 引用标记（FIXES21）：行首的 [quote:N]
 QUOTE_PATTERN = re.compile(r"^[ \t]*\[quote[:：](\d+)\]", re.IGNORECASE | re.MULTILINE)
 
-# 语音标记（FIXES22）：`[voice:]一小段口语[/voice]`
-# 成对出现才算（未闭合/只有开标记 → 当普通文字，不猜她想干嘛）。
+# 语音标记（FIXES22）：成对出现才提成语音段，三种括号写法同源兼容。
 # 刻意用成对标签而不是裸标记：语音是"一段"，开口与闭口要能对上；
 # 裸标记一旦落进正文就会把她正常说话的一部分吃成语音。
-#
-# ⚠ 冒号后**允许**一个右括号（两种写法都收）：提示词示范用无括号写法
-# `[voice:…[/voice]`，但模型可能自作主张加成 `[voice:]…[/voice]`。
-# 只认其中一种 = 另一种静默失效（这个雷已经炸过一次，单测写对了才没照到）。
-VOICE_PATTERN = re.compile(
-    r"\[voice[:：]\]?\s*([^\[\]]*?)\s*\[/voice\]", re.IGNORECASE
+# 未闭合/空内容等异常不再原样发送：第 6 步统一剥残留语法、保留正文。
+VOICE_PATTERN = re.compile(_VOICE_PATTERN_SOURCE, re.IGNORECASE)
+
+# 合法 voice 段在第 4 步已经提走；此后文字段里剩下的开/闭标记都是
+# 未闭合、空内容、夹了其他标记等异常形态。只剥语法、保留正文。
+RESIDUAL_VOICE_OPEN_PATTERN = re.compile(
+    r"\[\s*voice(?![A-Za-z])\s*[:：]?\s*\]?", re.IGNORECASE
 )
+RESIDUAL_VOICE_CLOSE_PATTERN = re.compile(r"\[\s*/\s*voice\s*\]", re.IGNORECASE)
 
 # 落库形态：与收侧他的语音转写同格式（observer/日记只认这一种形态）
 VOICE_RECORD_PREFIX = "（语音消息）"
 
 # 她把存档格式当发送语法写的识别（2026-10-05 生产实测）：
 # 历史里语音的存档形态是"（语音消息）内容"，她会有样学样地以（语音消息）开头
-# 输出一整行（她想发语音，但写错了语法）。只认行首，宁漏勿错。
-_VOICE_RECORD_LINE_PREFIX = re.compile(r"^[（(]\s*语音消息\s*[）)](.*)$", re.MULTILINE)
+# 输出一整行（她想发语音，但写错了语法）。仿真还出现过中文行首标记 [语音]。
+# 两种都只认行首，宁漏勿错。
+_VOICE_RECORD_LINE_PREFIX = re.compile(
+    r"^(?:[（(]\s*语音消息\s*[）)]|\[语音(?:消息)?\])\s*(.*)$", re.MULTILINE
+)
 
 
 def rewrite_voice_record_prefix(text: str, voice_allowed: bool) -> str:
@@ -117,7 +166,7 @@ def rewrite_voice_record_prefix(text: str, voice_allowed: bool) -> str:
     必须抢在旁白剥离之前：否则括号滤网把前缀当旁白剥掉，她想开口的意图
     被静默降级成文字（生产实测：4 次想发语音，3 次写成存档格式被剥）。
     """
-    if not text or "语音消息" not in text:
+    if not text or ("语音消息" not in text and "[语音]" not in text and "[语音消息]" not in text):
         return text
 
     def _sub(m: "re.Match[str]") -> str:
@@ -556,6 +605,36 @@ def normalize_face_markers(text: str) -> str:
     return "".join(out)
 
 
+# 裸表情标签：[doge] / [[汪汪]]（方括号里没有冒号，长度很短）
+BARE_FACE_TAG_PATTERN = re.compile(r"\[\[([^\[\]:：\n]{1,10})\]\]|\[([^\[\]:：\n]{1,10})\]")
+
+
+def normalize_bare_face_tags(text: str) -> str:
+    """她写的裸标签 `[doge]` 改写成发侧语法 `[face:doge]`。
+
+    生产实锤（2026-10-09 23:12 主动消息）："别又睡到中午[doge]" 原样发到 QQ，
+    机主看到的是一串方括号字面量——裸标签是**读侧**形态（他消息里的表情翻成的字），
+    她有样学样照抄了。提示词已经禁止，这里是机制层兜底。
+
+    只认 QQ 表情表里查得到的名字（[沉默]/[图片] 这类不是表情名，一个字节不动）；
+    改写后交给 normalize_face_markers 走既有白名单：清单内的变真表情，
+    清单外的（[汪汪]、黑名单 [微笑]）剥掉标记只留正文。
+    """
+    if not text or "[" not in text:
+        return text
+
+    def _sub(m: "re.Match[str]") -> str:
+        name = (m.group(1) or m.group(2) or "").strip()
+        if face_id_by_name(name) is None:
+            return m.group(0)
+        return f"[face:{name}]"
+
+    out = BARE_FACE_TAG_PATTERN.sub(_sub, text)
+    if out != text:
+        logger.info("[Replier] 裸表情标签已改写成 [face:] 语法（她照抄了读侧形态）")
+    return out
+
+
 def keep_face_cap(
     chunks: List[Dict[str, Any]], limit: int = FACE_MAX_PER_TURN
 ) -> List[Dict[str, Any]]:
@@ -896,6 +975,23 @@ def normalize_voice_markers(text: str) -> str:
     return stripped
 
 
+def strip_residual_voice_markers(text: str) -> str:
+    """文字发送前的最后保险：残留 voice 语法不上屏，正文照留。
+
+    必须在合法 voice 段提取之后调用，避免把正常语音又洗回文字。
+    覆盖未闭合、只有闭标记、空内容以及语音里夹 face/sticker 等形态。
+    """
+    if not text or "voice" not in text.lower():
+        return text or ""
+    stripped = RESIDUAL_VOICE_OPEN_PATTERN.sub("", text)
+    stripped = RESIDUAL_VOICE_CLOSE_PATTERN.sub("", stripped)
+    if stripped != text:
+        logger.warning(
+            "[Replier] 未识别语音标记兜底：剥掉残留语法只留正文，禁止原样上屏"
+        )
+    return stripped
+
+
 def merge_quote_into_next(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把 quote 段并进**紧随其后的第一条消息**，作为它的 `_quote` 头（任务3 第1条）。
 
@@ -1054,6 +1150,7 @@ class Replier:
         quote_targets: Optional[List[Dict[str, Any]]] = None,
         voice_allowed: bool = False,
         voice_max_chars: int = 60,
+        face_budget: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], str]:
         """处理回复全文：
         0. 沉默权（FIXES13）：完整输出恰为 [沉默] -> 返回 ([], "")
@@ -1066,7 +1163,8 @@ class Replier:
         4. sticker / face / quote / voice 标记与文字混排拆分（一次扫描，保原句顺序）
         5. 整行兜底滤网：图片占位符（[图片] 这类，FIXES12 / E8）→ 内心旁白（FIXES19）
            判定按**标记拆分前的原始行**拼回后再做（DEEP_AUDIT B-4/A-8）
-        6. 句子切段
+        6. 句子切段；每个文字子段再剥残留 voice 语法（合法语音已在第4步提走，
+           这里只清未闭合/空内容/夹其他标记的异常形态，留正文且不产生空气泡）
         7. 硬上限：表情包整轮 1 个 → QQ 表情整轮 2 个 → 引用整轮 1 条 → 语音整轮 1 条
            超限额的脸整段丢弃（它是标记、没有正文可留，DEEP_AUDIT B-5）
         8. QQ 表情并进紧邻文字段（混排合并成同一个气泡）
@@ -1150,10 +1248,17 @@ class Replier:
         # 3. 旁白剥离
         clean_text = strip_narration(clean_text)
 
+        # 3.4 裸表情标签 [doge] → [face:doge]（必须在 3.5 白名单降级之前）
+        clean_text = normalize_bare_face_tags(clean_text)
+
         # 3.5 FIXES20：发不出去的 [face:] 标记原地还原成普通文字。
         #     放在标记扫描之前——降级后它就是普通文字，自然落进同一个文字段、
         #     留在同一个气泡里，不会被拆成"你真棒" + "[face:微笑]"两条。
         clean_text = normalize_face_markers(clean_text)
+
+        # 3.55 小黄脸日额度（world.face_usage = "rare"）：超额的标记剥掉只留正文，
+        #      在切分前处理，被剥的标记随文字留在原气泡里
+        clean_text = enforce_face_daily_budget(clean_text, face_budget)
 
         # 3.6 FIXES22：语音不可用时，**剥掉标记只留正文**。
         #     走 no-voice 正则意味着标记压根不被识别，所以必须先在这里把标记
@@ -1237,7 +1342,7 @@ class Replier:
             elif voice_text is not None:
                 # FIXES22 语音段。可用就成段（并按 max_chars 截断，宁可短不可长）；
                 # 不可用（开关/上限/闸门）→ **剥掉标记只发正文**：
-                # "[voice:刚练完 手指都快断了[/voice]" 这种标记语法漏到 QQ 上，
+                # "[voice:刚忙完 总算能歇口气[/voice]" 这种标记语法漏到 QQ 上，
                 # 机主看到的是一串没人看得懂的方括号，而里面的内容本身完全能当话说。
                 vc = voice_chunk(voice_text, voice_allowed, voice_max_chars)
                 if vc is not None:
@@ -1249,8 +1354,8 @@ class Replier:
                     if body:
                         if not self._append_marker_as_text(segments, body, line):
                             pending_leading_marker = body
-                    elif not self._append_marker_as_text(segments, m.group(0), line):
-                        pending_leading_marker = m.group(0)
+                    else:
+                        logger.info("[Replier] 空语音标记（无正文），丢弃标记")
             else:
                 # QQ 系统表情。3.5 步已把不合法的降级成文字了，这里拿到 None
                 # 只可能是防御性分支（正则与 normalize 不一致），照样按文字处理。
@@ -1329,6 +1434,10 @@ class Replier:
                 continue
             sub_chunks = chunk_text_sentences(seg["content"], max_chunks=self.config.max_chunks)
             for i, sc in enumerate(sub_chunks):
+                # 合法 voice 已在第 4 步提走；这里的残留全是异常语法。
+                sc = strip_residual_voice_markers(sc)
+                if not sc.strip():
+                    continue
                 is_last = i == len(sub_chunks) - 1
                 chunk = {"type": "text", "content": sc}
                 if is_last:

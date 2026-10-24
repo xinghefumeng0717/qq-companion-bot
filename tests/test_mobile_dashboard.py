@@ -6,13 +6,18 @@
 2. 浏览器标签页 / 手机"添加到主屏幕"没有图标（缺 favicon 与 apple-touch-icon）；
 3. 手机竖屏下导航 7 个链接被挤成一团、宽表把页面撑出横向滚动。
 
-本测试集钉住四件事：
+本测试集钉住五件事：
 - html_shell 一定输出 viewport meta 与两行图标 link；
 - 图标 link 与导航链接同一套 token 规则（token 非空带 `?token=`，空则一个 token 字样都不多）；
 - `/favicon.png`、`/apple-touch-icon.png` 两条路由：token 空模式 200 + image/png，
   token 非空模式无 token 403 / 带对 token 200；文件缺失返回 404 而不是抛异常；
+- 有皮肤时两条图标路由按角色默认头像现画（512 / 180、宣纸底不透明），
+  无皮肤或头像缺失回落到 companion/assets 下的静态图；
 - /costs 的宽表包了 `.table-scroll`，且手机样式全部收在 `@media (max-width: 768px)` 里
   （桌面端一个字节都不许变）。
+
+新主题页面不再强制 30 秒整页刷新（总览的局部刷新由页面脚本负责）；
+手账纸旧页面仍保留原来的 30 秒刷新，这两条都在下面钉住。
 
 调优层（在适配之上叠加的手机端专项优化）另钉住：
 - 触控目标：导航链接盒子 ≥40px、`.btn-action` 44px；
@@ -26,6 +31,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import re
 import shutil
@@ -33,6 +40,8 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from PIL import Image, ImageDraw
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -49,9 +58,11 @@ from companion.admin import (  # noqa: E402
 )
 from companion.admin_render import HTML_STYLE, html_shell, render_nav  # noqa: E402
 from companion.config import AdminConfig  # noqa: E402
-from helpers import close_db, make_db, make_engine_stack  # noqa: E402
+from helpers import close_db, make_db, make_engine_stack, make_fixture_card  # noqa: E402
 
 MOBILE_MEDIA_QUERY = "@media (max-width: 768px)"
+PAPER_RGBA = (0xF4, 0xEF, 0xE4, 0xFF)
+AVATAR_RGBA = (17, 119, 187, 0xFF)
 
 
 class _Req:
@@ -193,6 +204,129 @@ class TestIconRoutes(unittest.IsolatedAsyncioTestCase):
         with patch("companion.admin.ASSETS_DIR", os.path.join(self.tmp, "no-such-dir")):
             resp = await admin.handle_favicon(_Req())
         self.assertEqual(resp.status, 404)
+
+
+class TestDynamicSkinIcon(unittest.IsolatedAsyncioTestCase):
+    """有皮肤时图标按角色默认头像现画；无皮肤/头像缺失回落到静态图。
+
+    皮肤与头像都在临时目录里现造（make_fixture_card + 一张手画的 PNG），
+    不依赖仓库里的私人角色卡。
+    """
+
+    TOKEN = "s3cret"
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqc_mobile_skin_")
+        self.db_path = os.path.join(self.tmp, "companion.db")
+        self.db = await make_db(self.db_path)
+        self.card_dir = make_fixture_card(os.path.join(self.tmp, "card"))
+        avatar_dir = os.path.join(self.card_dir, "theme", "avatar")
+        os.makedirs(avatar_dir, exist_ok=True)
+        avatar = Image.new("RGBA", (160, 120), (0, 0, 0, 0))
+        ImageDraw.Draw(avatar).ellipse((10, 10, 109, 109), fill=AVATAR_RGBA)
+        avatar.save(os.path.join(avatar_dir, "default.png"))
+        self._write_skin({"avatar": {"default": "avatar/default.png"}})
+
+    async def asyncTearDown(self):
+        await close_db(self.db, self.db_path)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_skin(self, data) -> None:
+        with open(os.path.join(self.card_dir, "theme", "skin.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def _admin(self, token: str = "", persona_path: str = "") -> AdminServer:
+        return make_engine_stack(
+            self.db,
+            persona_path=persona_path or self.card_dir,
+            include_admin=True,
+            admin_config=AdminConfig(host="127.0.0.1", port=8080, token=token),
+            db_path=self.db_path,
+            backup_dir=os.path.join(self.tmp, "backup"),
+        ).admin
+
+    @staticmethod
+    def _static_bytes(filename: str) -> bytes:
+        with open(os.path.join(ASSETS_DIR, filename), "rb") as f:
+            return f.read()
+
+    async def test_有皮肤时按默认头像现画两种尺寸(self):
+        admin = self._admin()
+        self.assertEqual(admin.theme, "endfield")
+        for handler, size in (
+            (admin.handle_favicon, 512),
+            (admin.handle_apple_touch_icon, 180),
+        ):
+            with self.subTest(size=size):
+                resp = await handler(_Req())
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.content_type, "image/png")
+                self.assertEqual(resp.body[:8], b"\x89PNG\r\n\x1a\n")
+                with Image.open(io.BytesIO(resp.body)) as img:
+                    self.assertEqual(img.format, "PNG")
+                    self.assertEqual(img.size, (size, size))
+                    rgba = img.convert("RGBA")
+                # 四角是宣纸底色且完全不透明
+                for point in ((0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)):
+                    self.assertEqual(rgba.getpixel(point), PAPER_RGBA)
+                # 中心是临时头像的颜色：证明用的是角色头像，不是 assets 里的旧静态图
+                self.assertEqual(rgba.getpixel((size // 2, size // 2)), AVATAR_RGBA)
+
+    async def test_生成图不是静态旧图(self):
+        admin = self._admin()
+        for handler, filename in (
+            (admin.handle_favicon, FAVICON_FILE),
+            (admin.handle_apple_touch_icon, APPLE_TOUCH_ICON_FILE),
+        ):
+            with self.subTest(filename=filename):
+                resp = await handler(_Req())
+                self.assertNotEqual(resp.body, self._static_bytes(filename))
+
+    async def test_头像透明区域透出宣纸底(self):
+        """头像本身带透明背景：合成后不能出现黑底/白底方块。"""
+        resp = await self._admin().handle_favicon(_Req())
+        with Image.open(io.BytesIO(resp.body)) as img:
+            rgba = img.convert("RGBA")
+        margin = round(512 * 0.08)
+        self.assertEqual(rgba.getpixel((margin + 2, 512 // 2)), PAPER_RGBA)
+
+    async def test_无皮肤回落到静态图(self):
+        admin = self._admin(persona_path=os.path.join(_REPO_ROOT, "characters", "example"))
+        self.assertEqual(admin.theme, "journal")
+        for handler, filename in (
+            (admin.handle_favicon, FAVICON_FILE),
+            (admin.handle_apple_touch_icon, APPLE_TOUCH_ICON_FILE),
+        ):
+            with self.subTest(filename=filename):
+                resp = await handler(_Req())
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.body, self._static_bytes(filename))
+
+    async def test_头像缺失时回落静态图(self):
+        self._write_skin({"avatar": {"default": "avatar/no-such.png"}})
+        resp = await self._admin().handle_favicon(_Req())
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.body, self._static_bytes(FAVICON_FILE))
+
+    async def test_有皮肤时token鉴权契约不变(self):
+        admin = self._admin(token=self.TOKEN)
+        for handler in (admin.handle_favicon, admin.handle_apple_touch_icon):
+            with self.subTest(handler=handler.__name__):
+                self.assertEqual((await handler(_Req())).status, 403)
+                authed = await handler(_Req(query={"token": self.TOKEN}))
+                self.assertEqual(authed.status, 200)
+                self.assertEqual(authed.content_type, "image/png")
+
+    async def test_新主题页面不再整页30秒刷新(self):
+        admin = self._admin()
+        resp = await admin.handle_stickers(_Req())
+        self.assertEqual(resp.status, 200)
+        self.assertNotIn('http-equiv="refresh"', resp.text)
+
+    async def test_手账纸旧页面仍保留30秒刷新(self):
+        admin = self._admin(persona_path=os.path.join(_REPO_ROOT, "characters", "example"))
+        resp = await admin.handle_stickers(_Req())
+        self.assertIn('<meta http-equiv="refresh" content="30">', resp.text)
 
 
 class TestKaiFontRoute(unittest.IsolatedAsyncioTestCase):

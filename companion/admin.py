@@ -1,13 +1,16 @@
 """状态仪表盘 HTTP 服务 (admin.py)
-基于 aiohttp 实现手账纸主题仪表盘 (绑定 127.0.0.1:8080)，30 秒自动刷新。
+基于 aiohttp 实现手账纸主题仪表盘 (绑定 127.0.0.1:8080)；手账纸旧页面沿用 30 秒整页刷新，
+新主题页面不再强制刷新（总览的局部刷新由页面自己的脚本负责）。
 路由包含：总览 (/)、记忆 (/memory)、调试 (/debug)、计费 (/costs)、表情包 (/stickers)、日志 (/logs)、管理 (/admin)，
-外加两条静态图标路由 /favicon.png、/apple-touch-icon.png（浏览器标签页与手机"添加到主屏幕"用）。
+外加两条图标路由 /favicon.png、/apple-touch-icon.png（浏览器标签页与手机"添加到主屏幕"用，
+有皮肤时按当前角色头像现画，没有则回落到 companion/assets 下的静态图）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import html
+import io
 import json
 import logging
 import math
@@ -16,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 from aiohttp import web
+from PIL import Image
 
 from companion.affection import AffectionEngine, STAGE_THRESHOLDS
 from companion.assembler import PromptAssembler
@@ -33,6 +37,8 @@ from companion.stickers import StickerManager
 
 logger = logging.getLogger(__name__)
 
+from companion import dashboard
+from companion import dashboard_pages as pages
 from companion.admin_render import (
     HTML_STYLE,
     format_chinese_date,
@@ -51,12 +57,18 @@ ADMIN_TOKEN_HEADER = "X-Admin-Token"
 ADMIN_TOKEN_QUERY = "token"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
-# 网站图标（浏览器标签页 / 手机"添加到主屏幕"）：两个静态 PNG 放在
-# companion/assets/ 下，由 /favicon.png 与 /apple-touch-icon.png 两条只读路由喂出去。
+# 网站图标（浏览器标签页 / 手机"添加到主屏幕"）：有当前皮肤时按角色默认头像在内存里现画，
+# 没有皮肤/头像缺失/生成失败时回落到 companion/assets/ 下的两个静态 PNG。
 # 与 /stickers/img/{name} 同一套读侧鉴权（token 非空时没 token 一律 403）。
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 FAVICON_FILE = "app-icon.png"
 APPLE_TOUCH_ICON_FILE = "app-icon-180.png"
+# 现画图标的规格：favicon 512（高分屏标签页），apple-touch-icon 180（iOS 主屏幕）。
+# 宣纸底色与看板 --paper 同一个值；不预切圆角，iOS 自己会按系统样式裁。
+FAVICON_SIZE = 512
+APPLE_TOUCH_ICON_SIZE = 180
+ICON_PAPER_RGB = (0xF4, 0xEF, 0xE4)
+ICON_MARGIN_RATIO = 0.08
 # 霞鹜文楷 GB2312 子集 woff2；/assets/ 字库路由免鉴权（理由见 handle_kai_font docstring）
 KAI_FONT_FILE = "lxgw-wenkai-gb2312.woff2"
 
@@ -88,7 +100,52 @@ __all__ = [
     "render_radar_svg",
     "render_nav",
     "html_shell",
+    "resolve_theme",
 ]
+
+
+# 皮肤对应的看板主题：skin.json 可以写 "theme" 显式声明（plain / endfield）；
+# 没写时按 endfield——科幻工业风是专门承接角色卡皮肤的那套外壳。
+SKIN_DEFAULT_THEME = "endfield"
+
+
+def card_theme(char_dir: str) -> str:
+    """角色卡 theme/skin.json 对应的看板主题；没有皮肤/皮肤坏了 → 空串。"""
+    path = os.path.join(char_dir or "", "theme", "skin.json")
+    if not char_dir or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"[Admin] 皮肤 {path} 读取失败，主题按无皮肤处理: {e}")
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    declared = str(data.get("theme") or "").strip().lower()
+    if declared in dashboard.THEMES:
+        return declared
+    if declared:
+        logger.warning(
+            f"[Admin] 皮肤 {path} 的 theme={declared!r} 不认识（只认 "
+            f"{'/'.join(dashboard.THEMES)}），按 {SKIN_DEFAULT_THEME} 处理"
+        )
+    return SKIN_DEFAULT_THEME
+
+
+def resolve_theme(config: AdminConfig, char_dir: str) -> str:
+    """看板主题三层优先：config 显式写 > 卡里的皮肤 > journal。
+
+    `theme_explicit` 由 Config.load 记录（dataclass 哨兵也保证程序里显式传值算显式）：
+    · 显式写了（包括 journal）→ 严格用 config，不再看卡；
+    · 没写但卡目录有 theme/skin.json → 皮肤的 theme（没声明就 endfield）；
+    · 都没有 → journal（旧卡行为不变）。
+    """
+    theme = str(getattr(config, "theme", "") or "").strip().lower()
+    explicit = bool(getattr(config, "theme_explicit", False)) or theme != "journal"
+    if explicit:
+        return theme if theme in dashboard.THEMES else "journal"
+    return card_theme(char_dir) or "journal"
 
 
 class AdminServer:
@@ -121,6 +178,31 @@ class AdminServer:
         self.backup_dir = backup_dir
         self.start_time = datetime.now()
         self._runner: Optional[web.AppRunner] = None
+        # 主题三层：config 显式 > 卡里的皮肤 > journal（旧卡不变）
+        self.theme = resolve_theme(config, getattr(persona, "base_dir", "") or "")
+        self.skin = (
+            dashboard.load_skin(getattr(persona, "base_dir", "") or "")
+            if self.theme != "journal" else None
+        )
+        # 页面之外的皮肤来源（/api/home 与 /skin/ 共用），见 _image_skin()
+        self._image_skin_cache: Optional[dashboard.Skin] = None
+        self._image_skin_loaded = self.theme != "journal"
+
+    def _image_skin(self) -> Optional[dashboard.Skin]:
+        """小窝接口与 /skin/ 图片共用的皮肤。
+
+        journal 主题的页面不读皮肤（self.skin 为 None），但小窝不论主题都要图：
+        两个路由必须拿到同一份结果，否则 /api/home 给出 /skin/ 地址、
+        /skin/ 却解析不出文件，图片全 404。惰性加载，只读一次磁盘。
+        """
+        if self.skin is not None:
+            return self.skin
+        if not self._image_skin_loaded:
+            self._image_skin_cache = dashboard.load_skin(
+                getattr(self.persona, "base_dir", "") or ""
+            )
+            self._image_skin_loaded = True
+        return self._image_skin_cache
 
     def _current_activity(self, now_dt: datetime) -> str:
         """看板"她此刻"的活动文案：节假日段长与聊天主链路同一数据源
@@ -154,6 +236,9 @@ class AdminServer:
         app.router.add_get("/favicon.png", self.handle_favicon)
         app.router.add_get("/apple-touch-icon.png", self.handle_apple_touch_icon)
         app.router.add_get("/assets/lxgw-wenkai-gb2312.woff2", self.handle_kai_font)
+        app.router.add_get("/assets/{font}", self.handle_display_font)
+        app.router.add_get("/skin/{path:.+}", self.handle_skin_file)
+        app.router.add_get("/api/home", self.handle_api_home)
         app.router.add_get("/logs", self.handle_logs)
         app.router.add_get("/admin", self.handle_admin)
         app.router.add_post("/admin/backup", self.handle_admin_backup)
@@ -253,12 +338,35 @@ class AdminServer:
         """页面内链接：带上 token，保证点一下不会掉线。token 为空时原样返回。"""
         return f"{path}{self._token_query()}"
 
+    def _page(self, title: str, path: str, content: str, container_class: str = "") -> str:
+        """页面外壳：journal 主题与旧版逐字节一致；新主题只套 dashboard 外壳。
+
+        新主题不再把旧手账样式表塞进 `<head>`：内容已经是新组件（dashboard_pages.py），
+        一页只有一套 CSS。container_class 只对 journal 的 html_shell 有意义。
+        """
+        if self.theme == "journal":
+            return html_shell(title, path, content, self._token_query(), container_class)
+        return dashboard.render_shell(
+            title, path, content, self.theme, self.skin,
+            self._token_query(), self.persona.name, refresh=False,
+        )
+
     def _read_forbidden_response(self, request: web.Request) -> web.Response:
         """读页面鉴权失败：不回显 token，不泄漏任何页面内容。"""
         logger.warning("[AdminPage] 鉴权失败：缺少或错误的 admin token，已拒绝读取仪表盘页面")
         if "application/json" in request.headers.get("Accept", ""):
             return web.json_response(
                 {"status": "error", "error": "未授权：缺少或错误的 admin token"},
+                status=403,
+            )
+        if self.theme != "journal":
+            # 刻意不带 token：403 页不能把正确 token 回显给未授权的人
+            return web.Response(
+                text=dashboard.render_shell(
+                    "未授权", "", pages.render_forbidden(), self.theme, self.skin,
+                    "", self.persona.name,
+                ),
+                content_type="text/html",
                 status=403,
             )
         content = """
@@ -284,6 +392,16 @@ class AdminServer:
                 {"status": "error", "error": "未授权：缺少或错误的 admin token"},
                 status=403,
             )
+        if self.theme != "journal":
+            # 同上：失败页不回显 token，导航链接也不带
+            return web.Response(
+                text=dashboard.render_shell(
+                    "未授权", "/admin", pages.render_unauthorized(), self.theme, self.skin,
+                    "", self.persona.name,
+                ),
+                content_type="text/html",
+                status=403,
+            )
         content = """
         <div class="card">
           <h3 style="color:var(--cinnabar);">未授权</h3>
@@ -304,6 +422,15 @@ class AdminServer:
     async def handle_overview(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
+        if self.theme != "journal":
+            data = await dashboard.collect_overview(self)
+            content = dashboard.render_overview(data, self.skin, self._token_query())
+            return web.Response(
+                text=dashboard.render_shell(
+                    "总览", "/", content, self.theme, self.skin, self._token_query(), self.persona.name
+                ),
+                content_type="text/html",
+            )
         aff_state = await self.affection.get_state()
         dims = aff_state.get("dims", {})
         composite = float(aff_state.get("composite", 30.0))
@@ -378,7 +505,9 @@ class AdminServer:
             step_items.append(f'<div style="flex:1; height:8px; border-radius:2px; background:{bg};" title="阶段 {idx}"></div>')
         steps_bar_html = f'<div style="display:flex; gap:4px; margin: 16px 0 12px 0;">{"".join(step_items)}</div>'
 
-        thresholds = STAGE_THRESHOLDS
+        # 角色卡自带门槛时看板按卡的门槛显示（拿不到就用默认标定）
+        card_th = getattr(self.affection, "thresholds", None)
+        thresholds = card_th if isinstance(card_th, list) and card_th else STAGE_THRESHOLDS
         curr_thresh = thresholds[stage_idx] if stage_idx < len(thresholds) else thresholds[-1]
         if stage_idx < len(thresholds) - 1:
             next_stage_obj = self.persona.get_stage(stage_idx + 1)
@@ -576,7 +705,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("总览", "/", content, self._token_query(), "page-overview"),
+            text=self._page("总览", "/", content, "page-overview"),
             content_type="text/html",
         )
 
@@ -586,6 +715,16 @@ class AdminServer:
     async def handle_memory(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
+        if self.theme != "journal":
+            data = await dashboard.collect_memory(self)
+            content = dashboard.render_memory(data, self.skin, self._token_query())
+            return web.Response(
+                text=dashboard.render_shell(
+                    "记忆", "/memory", content, self.theme, self.skin, self._token_query(),
+                    self.persona.name, refresh=False,
+                ),
+                content_type="text/html",
+            )
         rows = await self.db.fetchall(
             """
             SELECT id, content, importance, sentiment, recall_count, created_at, last_recall_at
@@ -679,7 +818,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("记忆系统", "/memory", content, self._token_query()),
+            text=self._page("记忆系统", "/memory", content),
             content_type="text/html",
         )
 
@@ -689,6 +828,12 @@ class AdminServer:
     async def handle_debug(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
+        if self.theme != "journal":
+            content = pages.render_debug(await pages.collect_debug(self))
+            return web.Response(
+                text=self._page("调试信息", "/debug", content),
+                content_type="text/html",
+            )
         system_prompt = self.assembler.last_assembled_prompt or "（尚未组装过提示词）"
 
         observer_blocks = []
@@ -746,7 +891,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("调试信息", "/debug", content, self._token_query()),
+            text=self._page("调试信息", "/debug", content),
             content_type="text/html",
         )
 
@@ -756,6 +901,12 @@ class AdminServer:
     async def handle_costs(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
+        if self.theme != "journal":
+            content = pages.render_costs(await pages.collect_costs(self))
+            return web.Response(
+                text=self._page("计费统计", "/costs", content),
+                content_type="text/html",
+            )
         total_row = await self.db.fetchone(
             "SELECT COUNT(*) as calls, SUM(cost_estimate) as total_cost, SUM(prompt_tokens) as p_tokens, SUM(completion_tokens) as c_tokens FROM llm_calls"
         )
@@ -870,7 +1021,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("计费统计", "/costs", content, self._token_query()),
+            text=self._page("计费统计", "/costs", content),
             content_type="text/html",
         )
 
@@ -880,6 +1031,12 @@ class AdminServer:
     async def handle_stickers(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
+        if self.theme != "journal":
+            content = pages.render_stickers(pages.collect_stickers(self))
+            return web.Response(
+                text=self._page("表情包库", "/stickers", content),
+                content_type="text/html",
+            )
         self.stickers.load_index()
         items = []
         for name, data in self.stickers._index.items():
@@ -899,7 +1056,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("表情包库", "/stickers", content, self._token_query()),
+            text=self._page("表情包库", "/stickers", content),
             content_type="text/html",
         )
 
@@ -917,12 +1074,51 @@ class AdminServer:
     # ==========================================
     # 5.1 网站图标 (/favicon.png, /apple-touch-icon.png)
     # ==========================================
-    async def _serve_asset_png(self, filename: str) -> web.Response:
-        """读 companion/assets/<filename> 以 image/png 返回；文件缺失一律 404。
+    def _render_icon(self, size: int) -> Optional[bytes]:
+        """按当前皮肤的**默认头像**在内存里画一张正方形 PNG；画不了返回 None。
 
-        鉴权由调用方先做（与读页面同一套 _read_authorized）。缺文件不抛异常：
-        图标是装饰品，丢了图标不该把看板带崩（用户看到的是浏览器默认地球图标）。
+        刻意不用 avatar_for(当前心情)：图标跟着心情走，手机主屏幕就会一天换好几张脸。
+        头像按等比缩放居中，四周留一点宣纸底色；不预切圆角（iOS 会自己裁）。
+        图只在内存里走一圈，不写角色卡，也不写服务器磁盘。
         """
+        skin = self._image_skin()
+        rel = skin.avatar_for("default") if skin else ""
+        path = dashboard.skin_file(skin, rel)
+        if not path:
+            return None
+        try:
+            with Image.open(path) as img:
+                avatar = img.convert("RGBA")
+            margin = max(4, round(size * ICON_MARGIN_RATIO))
+            box = size - margin * 2
+            scale = min(box / avatar.width, box / avatar.height)
+            avatar = avatar.resize(
+                (max(1, round(avatar.width * scale)), max(1, round(avatar.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+            canvas = Image.new("RGBA", (size, size), ICON_PAPER_RGB + (255,))
+            canvas.paste(
+                avatar,
+                ((size - avatar.width) // 2, (size - avatar.height) // 2),
+                avatar,
+            )
+            buf = io.BytesIO()
+            canvas.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception as e:
+            logger.warning(f"[Admin] 动态图标生成失败，回落到静态图标 ({path}): {e}")
+            return None
+
+    async def _serve_asset_png(self, filename: str, icon_size: int) -> web.Response:
+        """有当前皮肤就先按角色默认头像现画 PNG，否则读 companion/assets/<filename>。
+
+        鉴权由调用方先做（与读页面同一套 _read_authorized）。没有皮肤、头像缺失或
+        画图异常一律回落到静态文件，保留原有 404 行为：图标是装饰品，丢了图标不该
+        把看板带崩（用户看到的是浏览器默认地球图标）。
+        """
+        generated = self._render_icon(icon_size)
+        if generated is not None:
+            return web.Response(body=generated, content_type="image/png")
         full_path = os.path.join(ASSETS_DIR, filename)
         if not os.path.isfile(full_path):
             logger.warning(f"[Admin] 图标文件缺失: {full_path}")
@@ -938,12 +1134,12 @@ class AdminServer:
     async def handle_favicon(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
-        return await self._serve_asset_png(FAVICON_FILE)
+        return await self._serve_asset_png(FAVICON_FILE, FAVICON_SIZE)
 
     async def handle_apple_touch_icon(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
-        return await self._serve_asset_png(APPLE_TOUCH_ICON_FILE)
+        return await self._serve_asset_png(APPLE_TOUCH_ICON_FILE, APPLE_TOUCH_ICON_SIZE)
 
     async def handle_kai_font(self, request: web.Request) -> web.Response:
         """霞鹜文楷 webfont（/assets/lxgw-wenkai-gb2312.woff2），**刻意免鉴权**。
@@ -969,13 +1165,55 @@ class AdminServer:
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
+    async def handle_display_font(self, request: web.Request) -> web.Response:
+        """新主题的拉丁字体子集（OFL），和霞鹜文楷同理免鉴权；只认白名单里的文件名。"""
+        name = request.match_info.get("font", "")
+        if name not in dashboard.DISPLAY_FONTS:
+            return web.Response(status=404, text="Not Found")
+        full_path = os.path.join(ASSETS_DIR, name)
+        if not os.path.isfile(full_path):
+            return web.Response(status=404, text="Not Found")
+        with open(full_path, "rb") as f:
+            data = f.read()
+        return web.Response(
+            body=data,
+            content_type="font/woff2",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    async def handle_skin_file(self, request: web.Request) -> web.Response:
+        """角色卡皮肤里的图片（theme/ 目录，只读、只认图片），走读页面鉴权。"""
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
+        full_path = dashboard.skin_file(self._image_skin(), request.match_info.get("path", ""))
+        if not full_path:
+            return web.Response(status=404, text="Not Found")
+        ext = os.path.splitext(full_path)[1].lower().lstrip(".")
+        ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, f"image/{ext}")
+        with open(full_path, "rb") as f:
+            data = f.read()
+        return web.Response(body=data, content_type=ctype, headers={"Cache-Control": "private, max-age=3600"})
+
+    async def handle_api_home(self, request: web.Request) -> web.Response:
+        """桌面小窝用：她是谁、现在怎样、头像与状态图地址（没有皮肤时图片字段为空）。"""
+        if not self._read_authorized(request):
+            return self._read_forbidden_response(request)
+        skin = self._image_skin()
+        return web.json_response(await dashboard.collect_home(self, skin, self._token_query()))
+
     # ==========================================
     # 6. /logs 日志 (纸面小票风日志窗)
     # ==========================================
     async def handle_logs(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
-        log_path = "data/logs/bot.log"
+        if self.theme != "journal":
+            content = pages.render_logs(pages.collect_logs(self))
+            return web.Response(
+                text=self._page("运行日志", "/logs", content),
+                content_type="text/html",
+            )
+        log_path = pages.LOG_FILE
         if os.path.exists(log_path):
             try:
                 with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -993,7 +1231,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("运行日志", "/logs", content, self._token_query()),
+            text=self._page("运行日志", "/logs", content),
             content_type="text/html",
         )
 
@@ -1035,6 +1273,12 @@ class AdminServer:
     async def handle_admin(self, request: web.Request) -> web.Response:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
+        if self.theme != "journal":
+            content = pages.render_admin(await pages.collect_admin(self))
+            return web.Response(
+                text=self._page("管理控制台", "/admin", content),
+                content_type="text/html",
+            )
         last_backup = get_last_backup_time(self.backup_dir) or "暂无备份"
         # token 为空时 token_field 也是空串，页面 HTML 与改动前逐字节一致。
         # token 非空时回填配置里的 token（而不是请求里带的那个）：表单是 POST，
@@ -1083,7 +1327,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("管理控制台", "/admin", content, self._token_query()),
+            text=self._page("管理控制台", "/admin", content),
             content_type="text/html",
         )
 
@@ -1095,6 +1339,20 @@ class AdminServer:
             logger.warning(f"[AdminAction] 立即备份成功: {backup_path}")
             if "application/json" in request.headers.get("Accept", ""):
                 return web.json_response({"status": "ok", "backup_path": backup_path})
+            if self.theme != "journal":
+                content = pages.render_notice(
+                    "ok", "备份完成", "BACKUP / DONE",
+                    [
+                        f"备份文件已生成：<code>{html.escape(backup_path)}</code>",
+                        f"已同步更新最新备份："
+                        f"<code>{html.escape(os.path.join(self.backup_dir, 'latest.db'))}</code>",
+                    ],
+                    [(self._link("/admin"), "返回管理面板"), (self._link("/"), "返回总览")],
+                )
+                return web.Response(
+                    text=self._page("备份结果", "/admin", content),
+                    content_type="text/html",
+                )
             content = f"""
             <div class="card">
               <h3 style="color:var(--celadon);">备份成功</h3>
@@ -1104,13 +1362,24 @@ class AdminServer:
             </div>
             """
             return web.Response(
-                text=html_shell("备份结果", "/admin", content, self._token_query()),
+                text=self._page("备份结果", "/admin", content),
                 content_type="text/html",
             )
         except Exception as e:
             logger.warning(f"[AdminAction] 立即备份失败: {e}")
             if "application/json" in request.headers.get("Accept", ""):
                 return web.json_response({"status": "error", "error": str(e)}, status=500)
+            if self.theme != "journal":
+                content = pages.render_notice(
+                    "err", "备份失败", "BACKUP / FAILED",
+                    [f"异常信息：<code>{html.escape(str(e))}</code>"],
+                    [(self._link("/admin"), "返回管理面板")],
+                )
+                return web.Response(
+                    text=self._page("备份失败", "/admin", content),
+                    content_type="text/html",
+                    status=500,
+                )
             content = f"""
             <div class="card">
               <h3 style="color:var(--cinnabar);">备份失败</h3>
@@ -1119,7 +1388,7 @@ class AdminServer:
             </div>
             """
             return web.Response(
-                text=html_shell("备份失败", "/admin", content, self._token_query()),
+                text=self._page("备份失败", "/admin", content),
                 content_type="text/html",
                 status=500,
             )
@@ -1139,6 +1408,21 @@ class AdminServer:
         if "application/json" in request.headers.get("Accept", ""):
             return web.json_response({"status": "ok", "message": "已收到，5 秒后重启"})
 
+        if self.theme != "journal":
+            content = pages.render_notice(
+                "warn", "已收到重启请求", "RESTART / PENDING",
+                [
+                    "机器人进程将在 <strong>5 秒后</strong> 退出，并由 systemd 守护进程 "
+                    "(Restart=always) 自动拉起。",
+                    "请等待约 10 秒后刷新总览页面。",
+                ],
+                [(self._link("/"), "返回总览")],
+            )
+            return web.Response(
+                text=self._page("重启中", "/admin", content),
+                content_type="text/html",
+            )
+
         content = f"""
         <div class="card">
           <h3 style="color:var(--gold);">已收到重启请求</h3>
@@ -1147,7 +1431,7 @@ class AdminServer:
         </div>
         """
         return web.Response(
-            text=html_shell("重启中", "/admin", content, self._token_query()),
+            text=self._page("重启中", "/admin", content),
             content_type="text/html",
         )
 
@@ -1172,6 +1456,17 @@ class AdminServer:
             logger.warning(f"[AdminAction] 重置数据请求拒绝: 缺少 confirm=YES (实际为 '{confirm_val}')")
             if "application/json" in request.headers.get("Accept", "") or request.content_type == "application/json":
                 return web.json_response({"status": "error", "error": "缺少 confirm=YES，拒绝重置"}, status=400)
+            if self.theme != "journal":
+                content = pages.render_notice(
+                    "err", "重置已拒绝", "RESET / REFUSED",
+                    ["必须准确输入大写 <code>YES</code> 方可重置数据。数据库未被更改。"],
+                    [(self._link("/admin"), "返回管理面板")],
+                )
+                return web.Response(
+                    text=self._page("重置被拒绝", "/admin", content),
+                    content_type="text/html",
+                    status=400,
+                )
             content = f"""
             <div class="card">
               <h3 style="color:var(--cinnabar);">重置已拒绝</h3>
@@ -1180,7 +1475,7 @@ class AdminServer:
             </div>
             """
             return web.Response(
-                text=html_shell("重置被拒绝", "/admin", content, self._token_query()),
+                text=self._page("重置被拒绝", "/admin", content),
                 content_type="text/html",
                 status=400,
             )
@@ -1195,6 +1490,21 @@ class AdminServer:
             if "application/json" in request.headers.get("Accept", "") or request.content_type == "application/json":
                 return web.json_response({"status": "ok", "result": res})
             counts_html = "".join([f"<li>{k}: 清空 {v} 行</li>" for k, v in res.get("cleared_counts", {}).items()])
+            if self.theme != "journal":
+                content = pages.render_notice(
+                    "ok", "重置完成", "RESET / DONE",
+                    [
+                        f"已先在 <code>{html.escape(str(res.get('backup_path')))}</code> 完成全量备份。",
+                        "各表清除详情：",
+                        f"<ul>{counts_html}</ul>",
+                        "表情包资产 (stickers) 与计费明细 (llm_calls) 已按策略完整保留。",
+                    ],
+                    [(self._link("/"), "查看总览"), (self._link("/admin"), "返回管理面板")],
+                )
+                return web.Response(
+                    text=self._page("重置完成", "/admin", content),
+                    content_type="text/html",
+                )
             content = f"""
             <div class="card">
               <h3 style="color:var(--celadon);">重置完成</h3>
@@ -1206,13 +1516,24 @@ class AdminServer:
             </div>
             """
             return web.Response(
-                text=html_shell("重置完成", "/admin", content, self._token_query()),
+                text=self._page("重置完成", "/admin", content),
                 content_type="text/html",
             )
         except Exception as e:
             logger.warning(f"[AdminAction] 数据重置执行异常: {e}")
             if "application/json" in request.headers.get("Accept", "") or request.content_type == "application/json":
                 return web.json_response({"status": "error", "error": str(e)}, status=500)
+            if self.theme != "journal":
+                content = pages.render_notice(
+                    "err", "重置执行失败", "RESET / FAILED",
+                    [f"异常信息：<code>{html.escape(str(e))}</code>"],
+                    [(self._link("/admin"), "返回管理面板")],
+                )
+                return web.Response(
+                    text=self._page("重置失败", "/admin", content),
+                    content_type="text/html",
+                    status=500,
+                )
             content = f"""
             <div class="card">
               <h3 style="color:var(--cinnabar);">重置执行失败</h3>
@@ -1221,7 +1542,7 @@ class AdminServer:
             </div>
             """
             return web.Response(
-                text=html_shell("重置失败", "/admin", content, self._token_query()),
+                text=self._page("重置失败", "/admin", content),
                 content_type="text/html",
                 status=500,
             )

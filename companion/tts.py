@@ -31,6 +31,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from companion.config import ModelPreset, TTSConfig
+# FIXES27：睡眠词口径只有一份（persona.SLEEP_WORDS），这里不另抄一张表——
+# persona 只依赖 lorebook，tts 反向 import 它不构成循环。
+from companion.persona import is_sleep_activity
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +154,10 @@ def _minimax_extra_note(resp: Dict[str, Any]) -> str:
 # 但角色卡的 daily_routine 往往不写这些通用词，而写它自己那套叫法（校园/工作场景
 # 各有各的说法）——照抄任务书词表的后果是**闸门永远打不响**，等于装了个死开关。
 # 所以按"卡里可能出现的作息用词"补齐，宁可多拦不可漏拦。
-# 换卡后若新卡的作息用词不同，按同样思路把这个元组补全即可（词表是通用的
-# "不方便说话"场景词，不绑定任何一张具体角色卡）。
+#
+# 这张表只是**没有声明词表的卡**（旧卡）的兜底：新卡可以在 world.voice_busy_words
+# 里写自己世界的"不方便说话"词（见 persona.World），传进 activity_allows_voice
+# 就整表替换；卡里写了空数组 = 该卡没有忙闲场景词，只留例外白名单。
 BLOCK_KEYWORDS: Tuple[str, ...] = (
     # 任务书原词表
     "上课", "合排", "合练", "排练", "图书馆", "考试", "讲座", "熄灯",
@@ -180,11 +185,26 @@ ALLOW_OVERRIDES: Tuple[str, ...] = (
 )
 
 
-def activity_allows_voice(activity: str) -> Tuple[bool, str]:
+def activity_allows_voice(
+    activity: str,
+    block_keywords: Optional[Tuple[str, ...]] = None,
+    awake_override: bool = False,
+    light_busy_words: Optional[Tuple[str, ...]] = None,
+) -> Tuple[bool, str]:
     """按活动文案判断"此刻方不方便说话"→ (允许, 原因)
 
-    顺序：先看例外白名单（卡里明说空闲的），再看屏蔽词。两者都命中时例外赢——
-    宁可在"她在自习"这种边界场景偶尔放开，也不要把她真的在睡觉/合练时叫起来。
+    顺序：先看例外白名单（卡里明说空闲的），再看睡眠词的醒着例外，再看屏蔽词。
+    白名单与屏蔽词都命中时例外赢——宁可在"她在自习"这种边界场景偶尔放开，
+    也不要把她真的在睡觉/合练时叫起来。
+
+    block_keywords 是角色卡 world.voice_busy_words 传进来的词表：
+    None = 卡没声明，用代码内置词表（旧卡行为不变）；空元组 = 卡明确声明没有这类词。
+
+    awake_override（FIXES27）：传 True 表示"这一轮他正在跟她聊"，她不可能真的睡着。
+    放行的只有两类：睡眠词（她醒着就是醒着）和卡里声明的**轻忙词**
+    （world.voice_light_busy_words：对账/逛市集这类"手上有事嘴闲着"的活动）；
+    上课/合练/作画/讲课这类真忙仍然拦——"在聊天"不是万能钥匙。
+    主动消息没有 awake_override，轻忙词照样拦（她不该吃着火锅突然发语音找他）。
     """
     text = (activity or "").strip()
     if not text:
@@ -192,7 +212,18 @@ def activity_allows_voice(activity: str) -> Tuple[bool, str]:
     for kw in ALLOW_OVERRIDES:
         if kw in text:
             return True, f"例外放行（命中 {kw}）"
-    for kw in BLOCK_KEYWORDS:
+    # FIXES27：生产事故——作息文案「在缘缘庄睡着」命中 voice_busy_words 的「睡着」，
+    # 语音闸门整夜关着，主人 00:24 讨要语音也发不出去。对话中的轮次（他就在跟她聊）
+    # 里她不可能睡着，所以命中睡眠词时按醒着放行；其他忙词不受影响。
+    if awake_override and is_sleep_activity(text):
+        return True, "对话中轮次：作息命中睡眠词但他正在跟她聊，按醒着放行"
+    # FIXES27：轻忙词（卡声明的"手上有事嘴闲着"场景）在对话中轮次放行
+    if awake_override and light_busy_words:
+        for kw in light_busy_words:
+            if kw in text:
+                return True, f"对话中轮次：「{kw}」是卡里声明的轻忙场景，放行"
+    keywords = BLOCK_KEYWORDS if block_keywords is None else tuple(block_keywords)
+    for kw in keywords:
         if kw in text:
             return False, f"当前在「{text}」（命中 {kw}），不方便说话"
     return True, "当前活动适合说话"
@@ -229,6 +260,9 @@ class TTSManager:
       · 延迟加载（edge_tts 只在第一次真的要用时才 import，模块缺失不影响主流程）
       · 失败一律降级不抛（这里返回 None，调用方发文字）
       · 临时文件先落盘再发送、发完 finally 删
+
+    作息闸门的忙闲词表：`voice_busy_words` 由 main 从角色卡 world 传进来
+    （`None` = 卡没声明，用 BLOCK_KEYWORDS 内置词表；空元组 = 卡声明没有这类词）。
     """
 
     def __init__(
@@ -237,11 +271,20 @@ class TTSManager:
         db: Any = None,
         out_dir: str = "data/voice_out",
         minimax_preset: Optional[ModelPreset] = None,
+        voice_busy_words: Optional[Tuple[str, ...]] = None,
+        voice_light_busy_words: Optional[Tuple[str, ...]] = None,
     ):
         self.config = config
         self.db = db
         self.out_dir = out_dir
         self.minimax_preset = minimax_preset
+        # 角色卡 world.voice_busy_words：None = 卡没声明（用内置词表，旧卡不变）；
+        # 空元组 = 卡明确声明没有忙闲场景词。main.py 装配时从 persona 传进来。
+        self.voice_busy_words = None if voice_busy_words is None else tuple(voice_busy_words)
+        # FIXES27：轻忙词表（对话中放行的"手上有事嘴闲着"场景），同样由 main 从卡传进来
+        self.voice_light_busy_words = (
+            None if voice_light_busy_words is None else tuple(voice_light_busy_words)
+        )
         os.makedirs(self.out_dir, exist_ok=True)
 
     @property
@@ -260,15 +303,34 @@ class TTSManager:
     # 闸门
     # ------------------------------------------------------------------
 
-    async def check_gate(self, activity: str = "") -> Tuple[bool, str]:
-        """能不能现在发语音：开关 → 日上限 → 作息场景。任一不过返回 (False, 原因)"""
+    async def check_gate(
+        self,
+        activity: str = "",
+        awake_override: bool = False,
+        user_requested: bool = False,
+    ) -> Tuple[bool, str]:
+        """能不能现在发语音：开关 → 日上限 → 作息场景。任一不过返回 (False, 原因)
+
+        FIXES27 两处放行，**都只在作息腿**：
+          · awake_override：本轮他正在跟她聊（她不可能睡着），睡眠词不再算忙；
+          · user_requested：他这句话点名要语音（"发个语音""唱一句"）。
+        开关腿与日上限腿原样保留、绝不绕过——那两道是保险丝，不是心情问题。
+        """
         if not self.config.enabled:
             return False, "TTS 开关关闭（[tts].enabled=false）"
         used, limit = await self.daily_status()
         if used >= limit:
             return False, f"今日语音已达上限（{used}/{limit} 条）"
-        ok, why = activity_allows_voice(activity)
+        ok, why = activity_allows_voice(
+            activity,
+            self.voice_busy_words,
+            awake_override=awake_override,
+            light_busy_words=self.voice_light_busy_words,
+        )
         if not ok:
+            if user_requested:
+                # 他明确讨要了就再开一扇门：作息只是"方不方便"，他点名就优先他。
+                return True, "他点名要语音，作息闸门放行（开关与日上限照常）"
             return False, f"作息闸门：{why}"
         return True, f"可用（今日已发 {used}/{limit}）"
 

@@ -118,8 +118,8 @@ async def print_status(config: Config) -> None:
     """CLI 打印当前机器人状态 (--status)"""
     db = Database()
     await db.init_tables()
-    persona = Persona.load(config.character.path)
-    affection = AffectionEngine(db, persona.initial_dims)
+    persona = Persona.load(config.character.path, config.character.user_profile)
+    affection = AffectionEngine.from_persona(db, persona)
     mood = MoodEngine(db)
     memory = MemoryManager(db)
 
@@ -140,12 +140,16 @@ class CompanionBot:
         # 库路径的唯一源头：db / backup_scheduler / admin 三处共用，不再各自硬编码
         self.db_path = db_path
         self.db = Database(self.db_path)
-        self.persona = Persona.load(config.character.path)
+        self.persona = Persona.load(config.character.path, config.character.user_profile)
+        # 她的世界不跟现实节假日走（world.follow_public_holidays = false）时，作息/提示词一律当没有节假日
+        holidays = (
+            config.get_holidays if self.persona.world.follow_public_holidays else (lambda: [])
+        )
 
         stickers_dir = os.path.join(self.persona.base_dir, self.persona.stickers_dir)
         self.stickers = StickerManager(stickers_dir, self.db)
 
-        self.affection = AffectionEngine(self.db, self.persona.initial_dims)
+        self.affection = AffectionEngine.from_persona(self.db, self.persona)
         self.mood = MoodEngine(self.db)
         self.gateway = LLMGateway(config.llm, self.db)
         self.memory = MemoryManager(self.db, self.gateway, self.affection, self.persona)
@@ -160,13 +164,28 @@ class CompanionBot:
             self.memory,
             self.stickers,
             self.db,
-            holidays_provider=config.get_holidays,
+            holidays_provider=holidays,
             arcs=self.arcs,
         )
+        if getattr(config.reply, "style_examples", False) is True:
+            from companion.style_examples import StyleExampleBank
+
+            bank_path = config.reply.style_examples_path
+            if not os.path.isabs(bank_path):
+                bank_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), bank_path)
+            self.assembler.style_examples = StyleExampleBank.load(bank_path)
+        if getattr(config.character, "self_memory", False) is True:
+            self.assembler.self_memory = True
+        if getattr(config.character, "impressions", False) is True:
+            self.assembler.impressions = True
         self.replier = Replier(config.reply, self.stickers)
         self.observer = Observer(
             self.gateway, self.affection, self.mood, self.memory, self.stickers, self.db
         )
+        self.observer.self_memory = self.assembler.self_memory
+        self.memory.self_memory = self.assembler.self_memory
+        self.memory.impressions = self.assembler.impressions
+        self.memory.fact_layers = getattr(config.character, "fact_layers", False) is True
 
         self.voice_processor = VoiceProcessor(config.voice)
         # FIXES22：语音回复（阶段 A，默认关）。与语音输入并列成一个独立开关，
@@ -174,7 +193,13 @@ class CompanionBot:
         # 阶段 B：provider="minimax" 时鉴权复用现有 [models.minimax] 档案
         # （不新增密钥字段；档案不存在就是 None，合成层报缺 key 后降级为文字）。
         self.tts = TTSManager(
-            config.tts, self.db, minimax_preset=config.llm.presets.get("minimax")
+            config.tts,
+            self.db,
+            minimax_preset=config.llm.presets.get("minimax"),
+            # 卡里声明了"不方便说话"的场景词就用卡里的；旧卡没写 = 内置词表
+            voice_busy_words=self.persona.world.voice_busy_words,
+            # FIXES27：轻忙词表（对账/逛市集这类"手上有事嘴闲着"的）——对话中轮次放行
+            voice_light_busy_words=self.persona.world.voice_light_busy_words,
         )
 
         self.proactive = ProactiveScheduler(
@@ -189,12 +214,17 @@ class CompanionBot:
             db=self.db,
             send_msg_fn=self._send_chunk_to_onebot,
             assembler=self.assembler,
-            holidays_provider=config.get_holidays,
+            holidays_provider=holidays,
             set_typing_fn=self._set_typing_to_onebot,
             timing_config=config.timing,
             arcs=self.arcs,
             tts=self.tts,   # FIXES22：与主聊共用同一份语音账目
         )
+        if getattr(config.character, "meetup_recap", False) is True:
+            from companion.meetups import MeetupManager
+
+            meetups = MeetupManager(self.db, self.gateway, self.persona, self.memory)
+            self.assembler.meetups = self.observer.meetups = self.proactive.meetups = meetups
 
         self.turn_handler = TurnHandler(
             config=config,

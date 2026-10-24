@@ -204,6 +204,33 @@ class Database:
             CREATE TABLE IF NOT EXISTS facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT UNIQUE,
+                core INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS self_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT UNIQUE,
+                prev TEXT,
+                core INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS impressions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT,
+                confidence INTEGER DEFAULT 1,
+                evidence TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS meetups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                when_at TEXT,
+                place TEXT,
+                plan TEXT,
+                status INTEGER DEFAULT 0,
+                recap TEXT,
                 created_at TEXT
             );
 
@@ -285,6 +312,12 @@ class Database:
         for col in ("cache_hit_tokens", "cache_miss_tokens"):
             if col not in existing_cols:
                 await conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {col} INTEGER DEFAULT 0")
+        # 旧库迁移：facts / self_facts 补核心标记列（记忆分层）
+        for table in ("facts", "self_facts"):
+            async with conn.execute(f"PRAGMA table_info({table})") as cur:
+                cols = {row[1] for row in await cur.fetchall()}
+            if "core" not in cols:
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN core INTEGER DEFAULT 0")
         await conn.commit()
 
         # 初始化计数器

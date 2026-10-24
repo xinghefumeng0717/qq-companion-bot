@@ -42,7 +42,7 @@ REPORT_FILE = "data/smoke_fixes20_report.json"
 SANDBOX_DB = "data/smoke_fixes20_sandbox.db"
 REAL_DB = "data/companion.db"
 FALLBACK_DB = "data/companion_example.db"
-DUO_SIM = os.path.join("scripts", "duo_sim.py")
+DUO_SIM = os.path.join("scripts", "sim", "duo_sim.py")
 
 # 收侧三条用例：狗头（损）、捂脸（尴尬）、纯脸无字（过去会被整条吞掉）
 INBOUND_CASES: List[Dict[str, Any]] = [

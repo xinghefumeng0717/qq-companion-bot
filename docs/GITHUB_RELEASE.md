@@ -5,7 +5,7 @@
 
 ## 一、发布前硬闸（不满足不许推）
 
-1. **红线文件零跟踪**：`git ls-files | grep -E "config\.toml|local_env|test_keys|^data/|characters/qingzi"` 必须零输出；
+1. **红线文件零跟踪**：`git ls-files | grep -E "config\.toml|local_env|test_keys|^data/|characters/example"` 必须零输出；
 2. **测试全绿**：`./venv/Scripts/python.exe -m unittest discover -s tests`；
 3. **敏感串全历史扫描**（仓库即记忆 = 历史也是曝光面）：
 
@@ -47,7 +47,7 @@ git push origin v2.0.0
 |---|---|---|
 | 零容忍 | API key / token / 密码 | 永不入库（gitignore），泄露几分钟内会被机器人盗刷 |
 | 现实身份 | 真名、QQ 号、手机号、IP、私有路径、第三方姓名 | 洗历史清零 |
-| 语料与卡内容 | 真实聊天记录、青梓角色卡本体 | 永不跟踪（data/ 与 characters/qingzi/ 被拦） |
+| 语料与卡内容 | 真实聊天记录、青梓角色卡本体 | 永不跟踪（data/ 与 characters/example/ 被拦） |
 | 项目内容 | "有个角色叫青梓"这件事、迭代故事、测试工程、卡结构模板（characters/example/） | 大方公开——这是项目的故事与价值 |
 
 License：MIT（署名 星河赴梦）。

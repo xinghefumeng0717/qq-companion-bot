@@ -34,7 +34,7 @@ from companion.chat import ChatSession
 from companion.config import ProactiveConfig, ReplyConfig
 from companion.db import TIME_FORMAT
 from companion.proactive import ProactiveScheduler, format_recent_chat
-from companion.prompts import PROACTIVE_GENERATE_PROMPT
+from companion.prompts import FACE_PROMPT_BLOCK, PROACTIVE_GENERATE_PROMPT
 from companion.replier import Replier
 from companion.turn_handler import TurnHandler
 
@@ -74,7 +74,7 @@ E8_PROD_TRANSCRIPT = (
 PLACEHOLDER_TOKENS = ["[图片]", "【图片】", "[照片]", "【照片】", "[image]", "[IMAGE]"]
 
 # B 段：一张真实表情包（「夸夸」＝赞同、认可，正是 E9 里的场景）
-B_STICKER = "characters/qingzi/stickers/cat_thanks.jpg"
+B_STICKER = "characters/example/stickers/cat_thanks.jpg"
 # E9 的判据：描述里必须出现"社交含义"而非只有画面元素
 SOCIAL_MEANING_KEYWORDS = [
     "表示", "传达", "含义", "意思", "收尾", "同意", "认可", "敷衍", "回应",
@@ -239,11 +239,13 @@ async def run_smoke_test() -> dict:
         with patch("companion.proactive.datetime", _FakeDatetime):
             gen_turns = await session.memory.get_recent_turns(limit=8)
             gen_user_prompt = PROACTIVE_GENERATE_PROMPT.format(
+            typing_habit="手机打字习惯",
                 user_address=session.persona.user_address,
                 current_time=FAKE_NOW.strftime(TIME_FORMAT),
                 topic_material=E8_DESIRE,
                 recent_chat=format_recent_chat(gen_turns, max_chars=60),
                 stickers_list="、".join(session.stickers.get_prompt_sticker_list()),
+                face_block=FACE_PROMPT_BLOCK,
             )
             forced_system = await session.assembler.assemble_system_prompt("")
             forced_raw = await session.gateway.chat(

@@ -1,6 +1,6 @@
 """青梓综合评测体系 V4 (scripts/sim/benchmark_v4.py)
 
-对**当前生产卡**（characters/qingzi/，即已替换的 V3 卡）做一次性定版大考：
+对**当前生产卡**（characters/example/，即已替换的 V3 卡）做一次性定版大考：
 12 个场景 × 2 个时间伪装时钟 × N 次采样，全部走本地 config.toml 的真实 key
 （主聊 deepseek-v4-pro / thinking low，与生产一致），严禁 mock 主聊。
 
@@ -59,7 +59,7 @@ from companion.mood import MoodEngine
 from companion.observer import Observer
 from companion.persona import Persona, is_holiday_date
 from companion.proactive import ProactiveScheduler, format_recent_chat
-from companion.prompts import PROACTIVE_GENERATE_PROMPT
+from companion.prompts import FACE_PROMPT_BLOCK, PROACTIVE_GENERATE_PROMPT
 from companion.replier import SILENCE_TOKEN, Replier, chunk_record_text, is_silence_output
 from companion.stickers import StickerManager
 
@@ -69,8 +69,8 @@ RAW_JSON = f"{OUT_DIR}/report.json"
 REPORT_MD = f"{OUT_DIR}/report.md"
 TRANSCRIPTS_MD = f"{OUT_DIR}/transcripts.md"
 
-CARD_DIR = "characters/qingzi"          # 当前生产卡（V3），单卡评测不做 A/B
-CARD_LABEL = "生产卡 V3（characters/qingzi/character.json）"
+CARD_DIR = "characters/example"          # 当前生产卡（V3），单卡评测不做 A/B
+CARD_LABEL = "生产卡 V3（characters/example/character.json）"
 
 # ── 时钟：两个时间伪装时刻 ──────────────────────────────────────────────
 # 2026-10-09 是周五（国庆假期已结束的普通工作日）；2026-10-05 是周一（国庆长假中）。
@@ -282,6 +282,12 @@ C_VISUAL_RE = re.compile(
 C_TASTE_RE = re.compile(r"好吃|香|馋|味道|辣|下饭|想尝|看饿|会吃|爱吃|喜欢|想吃|来一口")
 # D：图内元素词（任务书 V4 口径：猫/狗/卡通/画风/可爱/乖/这图/表情包）
 D_IMG_RE = re.compile(r"猫|狗|卡通|画风|可爱|乖|这图|表情包")
+# 表情包/QQ表情标记的名字不算"点评图片"（回一张"乖巧嗯嗯"是收尾，不是在评他的图）
+MARKER_RE = re.compile(r"\[(?:表情|sticker|face)[:：][^\]]*\]", re.IGNORECASE)
+
+
+def d_img_words(text: str) -> List[str]:
+    return sorted(set(D_IMG_RE.findall(MARKER_RE.sub("", text or ""))))
 # A：纯表情包回复（replier 落记录格式 [表情:xxx]；兼容未匹配时的模型裸标记 [sticker:xxx]）
 STICKER_ONLY_RE = re.compile(r"\[(?:表情|sticker)[:：][^\]]+\]", re.IGNORECASE)
 # E：梗词（任务书 V4 口径：麻辣烫/阿姨/红油/辣椒）
@@ -648,11 +654,14 @@ async def run_proactive_scenario(session, key: str, clock_key: str) -> Dict[str,
         #    决策层选什么是模型的自由意志，不能只靠它配合来验收——这一步才是真正的判据。
         gen_turns = await session.memory.get_recent_turns(limit=8)
         gen_user_prompt = PROACTIVE_GENERATE_PROMPT.format(
+            typing_habit="手机打字习惯",
             user_address=session.persona.user_address,
             current_time=fake_now.strftime(TIME_FORMAT),
             topic_material=sc["desire"],
             recent_chat=format_recent_chat(gen_turns, max_chars=60),
             stickers_list="、".join(session.stickers.get_prompt_sticker_list()),
+            # FIXES20 起模板多了 {face_block}；漏传会 KeyError，整个 J 场景一格都跑不起来
+            face_block=FACE_PROMPT_BLOCK,
         )
         forced_system = await session.assembler.assemble_system_prompt("")
         forced_raw = await session.gateway.chat(
@@ -809,7 +818,7 @@ def d_close_ok(text: str) -> bool:
     满足全部：无图内元素词（口径不变）、无问号、无新场景词、叮嘱小句 ≤1。
     不再把"沉默或短收"当判定条件——沉默率/字数只作记录指标输出。
     """
-    if D_IMG_RE.search(text or "") or has_question_mark(text):
+    if d_img_words(text) or has_question_mark(text):
         return False
     if NEW_SCENE_RE.search(text or ""):
         return False
@@ -887,7 +896,7 @@ def eval_cell(key: str, cell: Dict[str, Any]) -> Dict[str, Any]:
         r = replies[0] if replies else ""
         cautions = caution_clauses(r)
         v = {
-            "img_words": sorted(set(D_IMG_RE.findall(r))),
+            "img_words": d_img_words(r),
             "has_question": has_question_mark(r),
             "n_cautions": len(cautions),
             "cautions": cautions,
@@ -1348,9 +1357,15 @@ def summarize(data: Dict[str, Any]) -> Dict[str, Any]:
         if a.get("gate_blocked")
     )
     j_attempts = sum(len(c.get("attempts") or []) for c in j_cells)
+    # 分母只数"强制直调真的产出了文字"的格：报错格（如模板 KeyError）不能算进
+    # "0 命中"——一格都没跑成时 need_zero 得到 total=0，判定为无数据而不是 PASS
+    j_valid = sum(
+        1 for c in j_cells
+        if ((c.get("forced") or {}).get("generation_raw") or c.get("trigger_sent"))
+    )
     verdicts["J"] = {
         "checks": [
-            need_zero("实发层占位符 0/5", j_sent, len(j_cells)),
+            need_zero("实发层占位符 0/5", j_sent, j_valid),
         ],
         "observability": {
             "决策层选 A 的采样数": f"{j_choice_a}/{len(j_cells)}",
@@ -1537,7 +1552,7 @@ def build_report_md(data: Dict[str, Any]) -> str:
     L.append("")
     L.append(f"- 生成时间：{meta['generated_at']}")
     L.append(f"- 评测卡：**{CARD_LABEL}**（单卡评测，不做 A/B）")
-    L.append(f"- 主聊模型：`{meta['model']}`，thinking={meta['thinking']} effort={meta['effort']}（与生产一致，全部真实 API）")
+    L.append(f"- 主聊模型：`{meta['model']}`，thinking={meta['thinking']} effort={meta['effort']}（全部真实 API）")
     L.append(f"- 采样：每场景每钟 {meta['runs']} 次；总调用 {meta['total_llm_calls']} 次，估算费用 **¥{meta['total_cost_cny']}**")
     L.append(f"- 耗时：{meta['elapsed_sec']} 秒；失败格 {meta['failed_cells']}；重试 {meta['retried_cells']}；异常轮次 {meta['error_turns']}")
     L.append("- 干净库铁律：每个 (场景×钟×采样) 全新空库，初始好感度回初始值，跑完即删")
@@ -1893,14 +1908,16 @@ async def main() -> None:
         if (c.get("clean_state") or {}).get("clean") is False
     ]
 
+    _cfg_meta = make_config()
     data: Dict[str, Any] = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "card": CARD_DIR,
             "card_label": CARD_LABEL,
-            "model": "deepseek-v4-pro",
-            "thinking": "enabled (thinking_chat=true)",
-            "effort": "low (thinking_effort_chat=low)",
+            # 以实际配置为准（旧版写死 v4-pro，换模型跑分时报告会张冠李戴）
+            "model": _cfg_meta.llm.active().chat,
+            "thinking": f"{'enabled' if _cfg_meta.llm.thinking_chat else 'disabled'} (thinking_chat={str(_cfg_meta.llm.thinking_chat).lower()})",
+            "effort": f"{_cfg_meta.llm.thinking_effort_chat} (thinking_effort_chat={_cfg_meta.llm.thinking_effort_chat})",
             "runs": runs,
             "scenarios_run": keys,
             "clocks": {ck: CLOCKS[ck]["now"].strftime("%Y-%m-%d %H:%M") for ck in CLOCK_ORDER},

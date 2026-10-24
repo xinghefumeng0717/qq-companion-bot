@@ -10,16 +10,20 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from companion.affection import AffectionEngine
-from companion.db import Database, TIME_FORMAT, parse_dt, now_str
+from companion.datefmt import relativize_dates
+from companion.db import Database, TIME_FORMAT, parse_dt
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
-from companion.persona import Persona, holiday_span
+from companion.persona import Persona, holiday_span, is_sleep_activity
 from companion.prompts import (
     FACE_PROMPT_BLOCK,
+    face_prompt_block,
+    IMAGE_SEEN_INSTRUCTION,
     QUOTE_USAGE_EXAMPLES,
     QUOTE_USAGE_RULES,
     SYSTEM_PROMPT_TEMPLATE,
     VOICE_PROMPT_BLOCK,
+    VOICE_UNAVAILABLE_NOTE,
     format_numbered_batch,
     get_frustration_description,
     get_mood_description,
@@ -33,6 +37,26 @@ from companion.stickers import StickerManager
 logger = logging.getLogger(__name__)
 
 WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
+
+# 他的消息和上一句隔了这么久，就在消息前标上时间（历史里没有时间戳，隔两天和隔两分钟
+# 在模型眼里一样：多天测试实锤周六下午她说"快去睡"，把两天后的消息当成道完晚安折回来）
+GAP_NOTE_HOURS = 3.0
+
+
+def gap_note(now_dt: datetime, prev_dt: Optional[datetime], show_date: bool = True) -> str:
+    """"（10-17 15:01 星期六，离上一句已经过了 1 天 18 小时）"；间隔不够返回空串。
+    show_date=False（卡的 world.date_style = relative）：不带月日，只留星期和时刻。"""
+    if prev_dt is None:
+        return ""
+    hours = (now_dt - prev_dt).total_seconds() / 3600
+    if hours < GAP_NOTE_HOURS:
+        return ""
+    days, rest = divmod(int(hours), 24)
+    span = f"{days} 天 {rest} 小时" if days and rest else (f"{days} 天" if days else f"{rest} 小时")
+    weekday = f"星期{WEEKDAYS[now_dt.weekday()]}"
+    if not show_date:
+        return f"（{weekday} {now_dt.strftime('%H:%M')}，离上一句已经过了 {span}）\n"
+    return f"（{now_dt.strftime('%m-%d %H:%M')} {weekday}，离上一句已经过了 {span}）\n"
 
 
 class PromptAssembler:
@@ -58,6 +82,15 @@ class PromptAssembler:
         self._holidays_provider = holidays_provider
         # FIXES16 生活主线：可选注入，不传即整块省略（既有调用方零改动）
         self.arcs = arcs
+        # 动态示例（[reply].style_examples，默认关）：由 main 按配置挂上 StyleExampleBank，
+        # None 即整块省略，提示词与旧版逐字节一致
+        self.style_examples = None
+        # 自我记忆（[character].self_memory，默认关）：由 main 按配置置 True
+        self.self_memory = False
+        # 对他的看法（[character].impressions，默认关）：由 main 按配置置 True
+        self.impressions = False
+        # 线下见面（[character].meetup_recap，默认关）：由 main 挂上 MeetupManager
+        self.meetups = None
         self.last_assembled_prompt: str = ""
 
     def get_holidays(self) -> List[str]:
@@ -81,7 +114,12 @@ class PromptAssembler:
             if self.persona.habits:
                 habits = "；".join(self.persona.habits)
                 parts.append(f"她的生活习惯与小动作：{habits}。")
-            return " ".join(parts)
+            block = " ".join(parts)
+            # 世界书常驻概要：固定内容放在靠前位置，前缀缓存照样命中；没有世界书 = 逐字节不变
+            always = getattr(getattr(self.persona, "lorebook", None), "always", "")
+            if isinstance(always, str) and always:
+                block += f"\n【她的世界】{always}"
+            return block
         except Exception as e:
             logger.error(f"[Assembler] 生成角色块异常: {e}")
             return self.persona.core_description
@@ -99,15 +137,60 @@ class PromptAssembler:
             logger.error(f"[Assembler] 生成阶段块异常: {e}")
             return "日常相处阶段"
 
-    async def _build_facts_block(self) -> str:
+    async def _build_facts_block(self, user_message: str = "") -> str:
         try:
-            facts = await self.memory.get_all_facts()
+            facts = await self.memory.get_facts_for_prompt(query=user_message)
             if not facts:
                 return ""
             items = "\n".join([f"  - {f}" for f in facts])
-            return f"\n【关于他】\n{items}"
+            return f"\n【关于他】（括号里是记下的日期，里面的「明天/今天」按那天算）\n{items}"
         except Exception as e:
             logger.error(f"[Assembler] 生成语义事实块异常: {e}")
+            return ""
+
+    async def _build_lore_block(self, user_message: str) -> str:
+        book = getattr(self.persona, "lorebook", None)
+        if not getattr(book, "entries", None):
+            return ""
+        try:
+            turns = await self.memory.get_recent_turns(limit=book.scan_turns) if book.scan_turns else []
+            texts = [user_message] + [str(t.get("content") or "") for t in turns]
+            return book.build_block(texts)
+        except Exception as e:
+            logger.error(f"[Assembler] 生成世界书块异常: {e}")
+            return ""
+
+    async def _build_self_facts_block(self, user_message: str = "") -> str:
+        if self.self_memory is not True:
+            return ""
+        try:
+            items = await self.memory.get_self_facts_for_prompt(query=user_message)
+            if not items:
+                return ""
+            lines = "\n".join(f"  - {x}" for x in items)
+            return (
+                "\n【你说过的关于自己的事】（再聊到要对得上，不用主动提；"
+                f"真变了就自然地说变了，别装作没说过）\n{lines}"
+            )
+        except Exception as e:
+            logger.error(f"[Assembler] 生成自我记忆块异常: {e}")
+            return ""
+
+    async def _build_impressions_block(self) -> str:
+        if self.impressions is not True:
+            return ""
+        try:
+            rows = await self.memory.get_impressions()
+            if not rows:
+                return ""
+            words = {1: "有点感觉", 2: "比较确定", 3: "很确定"}
+            lines = "\n".join(f"  - {r['content']}（{words.get(r['confidence'], '有点感觉')}）" for r in rows)
+            return (
+                "\n【你对他的看法】（你自己的感觉，可能看错。用来决定怎么接他的话；"
+                f"不要说出口，也不要分析他）\n{lines}"
+            )
+        except Exception as e:
+            logger.error(f"[Assembler] 生成看法块异常: {e}")
             return ""
 
     async def _build_diaries_block(self, current_v: float) -> str:
@@ -123,37 +206,48 @@ class PromptAssembler:
 
     async def _build_followups_block(self) -> str:
         try:
-            current_time = now_str()
-            rows = await self.db.fetchall(
-                "SELECT topic FROM followups WHERE done = 0 AND remind_after <= ? ORDER BY id ASC",
-                (current_time,),
-            )
+            rows = await self.memory.get_open_followups(due_only=True, limit=5)
             if not rows:
                 return ""
-            items = "\n".join([f"  - {r['topic']}" for r in rows])
+            items = "\n".join([f"  - {self.memory.format_followup(r)}" for r in rows])
             return f"\n【待跟进】\n{items}"
         except Exception as e:
             logger.error(f"[Assembler] 生成待跟进块异常: {e}")
             return ""
 
-    async def _build_suppressed_block(self) -> str:
+    async def _build_meetups_block(self) -> str:
+        if self.meetups is None:
+            return ""
         try:
-            rows = await self.db.fetchall(
-                "SELECT id, content, created_at FROM suppressed_desires ORDER BY id DESC LIMIT 5"
-            )
+            rows = await self.meetups.pending()
             if not rows:
                 return ""
+        except Exception as e:
+            logger.error(f"[Assembler] 生成约定块异常: {e}")
+            return ""
+        now = datetime.now()
+        upcoming, passed = [], []
+        for r in rows:
+            when_dt = parse_dt(r.get("when_at"))
+            if when_dt is not None and when_dt < now:
+                passed.append(r)
+            else:
+                upcoming.append(r)
+        lines = []
+        # 过了时间但还没补纪要的约定不能和"还没到"混在一起：模型会把"昨天六点"当成未来的事，
+        # 追着问"待会儿见？"。两段分开放，措辞直接给出时态。
+        if upcoming:
+            lines.append("  还没到的（他提起时按将来的事说）：")
+            lines.extend(f"    - {self.meetups.describe(r)}" for r in upcoming)
+        if passed:
+            lines.append("  已经过了的（见面已经发生，提起来用过去时，不要再当成还没到的事）：")
+            lines.extend(f"    - {self.meetups.describe(r)}" for r in passed)
+        return "\n【约好的见面】（见面本身发生在聊天之外）\n" + "\n".join(lines)
 
-            valid_items = []
-            now_dt = datetime.now()
-            for r in rows:
-                c_dt = parse_dt(r["created_at"])
-                if c_dt and (now_dt - c_dt).total_seconds() > 48 * 3600:
-                    # 超过 48 小时清除
-                    await self.db.execute("DELETE FROM suppressed_desires WHERE id = ?", (r["id"],))
-                    continue
-                valid_items.append(r["content"])
-
+    async def _build_suppressed_block(self) -> str:
+        try:
+            # 时效规则（48h + "之后他又跟她聊过就作废"）收口在 memory.get_live_desires
+            valid_items = [r["content"] for r in await self.memory.get_live_desires(limit=5)]
             if not valid_items:
                 return ""
 
@@ -174,13 +268,21 @@ class PromptAssembler:
             return ""
 
     async def assemble_system_prompt(
-        self, user_message: str, voice_allowed: bool = False
+        self,
+        user_message: str,
+        voice_allowed: bool = False,
+        voice_gated_note: bool = False,
     ) -> str:
         """按 §6.2 组装完整的 System Prompt
 
         `voice_allowed`（FIXES22）：这一轮能不能发语音。**默认 False = 不注入
         语音能力说明**——所以既有调用方（测试/脚本/benchmark）零改动即得"语音关着"
         的行为，提示词里一个字都不会多。
+
+        `voice_gated_note`（FIXES27）：TTS 开着、但这一轮作息闸门没过时给一段
+        "这会儿只能打字"的实情说明（VOICE_UNAVAILABLE_NOTE）。三态优先级：
+        voice_allowed 的完整能力说明 > voice_gated_note 的不可用说明 > 空串。
+        默认 False，所以老调用方的输出与改造前逐字节一致。
         """
         now_dt = datetime.now()
         weekday_str = WEEKDAYS[now_dt.weekday()]
@@ -190,7 +292,7 @@ class PromptAssembler:
         holidays = self.get_holidays()
         span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
         if span:
-            current_time_str += holiday_prompt_note(span)
+            current_time_str += holiday_prompt_note(span, self.persona.world)
 
         # 1. 好感度与情绪状态
         aff_state = await self.affection.get_state()
@@ -198,7 +300,7 @@ class PromptAssembler:
         stage_idx = int(aff_state.get("stage", 0))
 
         # 组装前先更新一次情绪自然均值回归 (conv=0)
-        mood_state = await self.mood.update_mood(composite_affection=composite_aff)
+        mood_state = await self.mood.update_mood(composite_affection=composite_aff, stage=stage_idx)
         v = float(mood_state.get("v", 2.0))
         a = float(mood_state.get("a", 1.0))
         t = float(mood_state.get("t", 7.0))
@@ -210,8 +312,21 @@ class PromptAssembler:
         stage_block = self._build_stage_block(stage_idx)
 
         good_examples = "\n  - " + "\n  - ".join(self.persona.chat_style.good_examples)
-        bad_examples = "\n  - " + "\n  - ".join(self.persona.chat_style.bad_examples)
+        max_stage = self.persona.chat_style.good_examples_max_stage
+        if max_stage is not None and stage_idx > max_stage:
+            good_examples = "见下方【当前关系阶段】里这个阶段的语气示范"
+        # 反面教材可选：卡里没有就整段（含标题）不渲染，不留一个空的"错误示范（禁止）：-"
+        bad_examples_block = ""
+        if self.persona.chat_style.bad_examples:
+            bad_examples = "\n  - " + "\n  - ".join(self.persona.chat_style.bad_examples)
+            bad_examples_block = f"  错误示范（禁止）：{bad_examples}\n"
         chat_rules = "\n  - " + "\n  - ".join(self.persona.chat_style.rules)
+        # 世界书词条：扫他这句话 + 最近几轮聊天，命中关键词才带
+        lore_block = await self._build_lore_block(user_message)
+        # 主动消息传入空串，不检索
+        style_examples_block = ""
+        if self.style_examples is not None and user_message:
+            style_examples_block = self.style_examples.build_block(user_message)
 
         # 日常废话流基线（角色卡可选字段 plain_examples）：为空时整块（含标题）不渲染，
         # 组装结果与旧角色卡逐字节一致。
@@ -230,6 +345,11 @@ class PromptAssembler:
         routine_activity = self.persona.get_current_activity(
             now_dt.hour, now_dt.weekday(), holiday_span=span
         )
+        # FIXES27：他在跟她聊的轮次，她不可能真的睡着——作息文案命中睡眠词时补一句
+        # 醒着的事实，否则模型会一边"睡着"一边回话（生产上还让语音闸门自相矛盾：
+        # 系统当她睡着，她却说"我压根没睡"）。主动消息传空串，所以那条路不受影响。
+        if user_message and is_sleep_activity(routine_activity):
+            routine_activity += "（他这会儿在跟你聊天，你其实是醒着的）"
         mood_desc = get_mood_description(v, a)
         trust_desc = get_trust_description(t)
         frustration_desc = get_frustration_description(frustration)
@@ -237,9 +357,13 @@ class PromptAssembler:
 
         last_chat_str = f"；距上次聊天已 {int(hours_since_chat)} 小时" if hours_since_chat >= 1.0 else ""
 
-        facts_block = await self._build_facts_block()
+        facts_block = (
+            await self._build_facts_block(user_message)
+            + await self._build_impressions_block()
+            + await self._build_self_facts_block(user_message)
+        )
         diaries_block = await self._build_diaries_block(v)
-        followups_block = await self._build_followups_block()
+        followups_block = await self._build_followups_block() + await self._build_meetups_block()
         suppressed_block = await self._build_suppressed_block()
         life_arcs_block = await self._build_life_arcs_block()
 
@@ -251,18 +375,28 @@ class PromptAssembler:
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             role_block=role_block,
             user_address=self.persona.user_address,
+            chat_medium=self.persona.world.chat_medium,
+            chat_tail=self.persona.world.chat_tail,
             good_examples=good_examples,
-            bad_examples=bad_examples,
+            bad_examples_block=bad_examples_block,
             plain_examples_block=plain_examples_block,
             chat_rules=chat_rules,
+            style_examples_block=style_examples_block,
+            lore_block=lore_block,
             stickers_list=stickers_list,
-            face_block=FACE_PROMPT_BLOCK,
+            face_block=face_prompt_block(self.persona.world),
             quote_block=QUOTE_USAGE_RULES + "\n" + QUOTE_USAGE_EXAMPLES,
             # FIXES22：空串 = 不注入能力说明。语音默认关，模型就不该认识 [voice:]。
             # voice_allowed 由调用方（TurnHandler / ProactiveScheduler）问过
             # TTSManager 的闸门结论传进来——**显式参数而不是共享属性**：
             # 主动消息与主聊共用一个 assembler，共享可变开关会互相串味。
-            voice_block=VOICE_PROMPT_BLOCK if voice_allowed else "",
+            # FIXES27：三态。开着但闸门没过（voice_gated_note）时给"只能打字"的实情，
+            # 免得她答应了发语音却只发出文字；两个都 False 仍是空串，旧行为不变。
+            voice_block=(
+                VOICE_PROMPT_BLOCK
+                if voice_allowed
+                else (VOICE_UNAVAILABLE_NOTE if voice_gated_note else "")
+            ),
             stage_block=stage_block,
             routine_activity=routine_activity,
             mood_desc=mood_desc,
@@ -279,6 +413,9 @@ class PromptAssembler:
             safety_block=safety_block,
         )
 
+        # 游戏世界不说"10 月 22 号"：给她看的日期最后统一换成相对说法（内部计算不受影响）
+        if self.persona.world.relative_dates:
+            system_prompt = relativize_dates(system_prompt, now_dt)
         self.last_assembled_prompt = system_prompt
         return system_prompt
 
@@ -288,20 +425,34 @@ class PromptAssembler:
         image_data_url: Optional[str] = None,
         numbered_batch: Optional[List[Dict[str, Any]]] = None,
         voice_allowed: bool = False,
+        voice_gated_note: bool = False,
     ) -> Tuple[List[Dict[str, Any]], str]:
         """组装发送给 LLM 的全套 messages：system + 工作记忆 + 当前用户输入
 
         FIXES21 `numbered_batch`：本轮聚合批次（每条带 index/text/message_id）。
         **≥2 条才渲染编号块**——他只发一条时根本没有"指哪句"的问题，
         硬塞一个 `[1]` 只会诱使她无意义地引用。单条路径的提示词与改动前逐字一致。
+
+        FIXES27 `voice_gated_note`：透传给 assemble_system_prompt（语音开着但闸门
+        没过时的"只能打字"说明）；默认 False，既有调用方输出不变。
         """
-        system_prompt = await self.assemble_system_prompt(user_message, voice_allowed)
+        system_prompt = await self.assemble_system_prompt(
+            user_message, voice_allowed, voice_gated_note=voice_gated_note
+        )
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
         # 工作记忆（最近 10 轮）
         recent_turns = await self.memory.get_recent_turns(limit=10)
+        show_date = not self.persona.world.relative_dates
+        prev_dt: Optional[datetime] = None
         for turn in recent_turns:
-            messages.append({"role": turn["role"], "content": turn["content"]})
+            content = turn["content"]
+            turn_dt = parse_dt(turn.get("created_at"))
+            if turn["role"] == "user" and turn_dt is not None:
+                content = gap_note(turn_dt, prev_dt, show_date) + content
+            prev_dt = turn_dt or prev_dt
+            messages.append({"role": turn["role"], "content": content})
+        now_note = gap_note(datetime.now(), prev_dt, show_date)
 
         # 本轮用户输入
         block = format_numbered_batch(numbered_batch)
@@ -313,10 +464,12 @@ class PromptAssembler:
         else:
             # 单条消息的老路径：与 FIXES21 之前逐字一致
             user_text = user_message
+        user_text = now_note + user_text
 
         if image_data_url:
+            # 只有一步看图（[reply].vision_direct）才会带图进来：让她回完留一行【看到：…】给记录用
             user_content = [
-                {"type": "text", "text": user_text},
+                {"type": "text", "text": f"{user_text}\n{IMAGE_SEEN_INSTRUCTION}"},
                 {"type": "image_url", "image_url": {"url": image_data_url}},
             ]
             messages.append({"role": "user", "content": user_content})

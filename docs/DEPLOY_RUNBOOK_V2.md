@@ -77,7 +77,7 @@ cd "D:\qq-companion"
 ```powershell
 # 【本地电脑执行】
 cd "D:\qq-companion"
-.\venv\Scripts\python.exe -c "import json,os;d='characters/qingzi/stickers';idx=json.load(open(d+'/index.json',encoding='utf-8'));print('index 键数:',len(idx));print('引用但缺图片:',[k for k,v in idx.items() if not os.path.exists(os.path.join(d,v.get('file','')))] or '无');print('缺 meaning/usage:',[k for k,v in idx.items() if not v.get('meaning') or not v.get('usage')] or '无')"
+.\venv\Scripts\python.exe -c "import json,os;d='characters/example/stickers';idx=json.load(open(d+'/index.json',encoding='utf-8'));print('index 键数:',len(idx));print('引用但缺图片:',[k for k,v in idx.items() if not os.path.exists(os.path.join(d,v.get('file','')))] or '无');print('缺 meaning/usage:',[k for k,v in idx.items() if not v.get('meaning') or not v.get('usage')] or '无')"
 ```
 
 - 期望：`index 键数: 43`、`引用但缺图片: 无`、`缺 meaning/usage: 无`。
@@ -146,7 +146,7 @@ tar -tzf "characters-qingzi-v3-20261005.tar.gz" | Select-Object -First 3
 
 ```powershell
 # 【本地电脑执行】
-(Get-FileHash "D:\qq-companion\characters\qingzi\stickers\index.json" -Algorithm SHA256).Hash
+(Get-FileHash "D:\qq-companion\characters\example\stickers\index.json" -Algorithm SHA256).Hash
 ```
 
 期望值应与 2.6 记的 `70AF696F…7628` 一致。
@@ -243,7 +243,7 @@ tar -tzf "qq-companion-v2-20261005.tar.gz" | Select-String -Pattern "QQ chatter/
 ```powershell
 # 【本地电脑执行】检查 2：新模块与新卡都在包里
 cd "D:\"
-tar -tzf "qq-companion-v2-20261005.tar.gz" | Select-String -Pattern "companion/(arcs|faces|tts)\.py|characters/qingzi/stickers/index.json"
+tar -tzf "qq-companion-v2-20261005.tar.gz" | Select-String -Pattern "companion/(arcs|faces|tts)\.py|characters/example/stickers/index.json"
 ```
 
 - 期望：至少 4 行（`arcs.py`、`faces.py`、`tts.py`、`index.json`）。
@@ -278,7 +278,7 @@ sudo chown -R ubuntu:ubuntu /opt/qq-companion
 # 【服务器终端执行】
 cd /opt/qq-companion
 ls -l companion/arcs.py companion/faces.py companion/tts.py
-./venv/bin/python -c "import json;print('卡内 index 键数:', len(json.load(open('characters/qingzi/stickers/index.json',encoding='utf-8'))))"
+./venv/bin/python -c "import json;print('卡内 index 键数:', len(json.load(open('characters/example/stickers/index.json',encoding='utf-8'))))"
 diff /home/ubuntu/qqc-backup-config-toml-20261005.toml /opt/qq-companion/config.toml && echo "config.toml 未被改动（与备份逐字节一致）"
 ```
 
@@ -431,7 +431,7 @@ ls -lh /opt/qq-companion/data/backup/companion-before-sticker-cleanup-20261005.d
 cd /opt/qq-companion && ./venv/bin/python - <<'PY'
 import sqlite3, json
 db = "/opt/qq-companion/data/companion.db"
-keep = list(json.load(open("/opt/qq-companion/characters/qingzi/stickers/index.json", encoding="utf-8")))
+keep = list(json.load(open("/opt/qq-companion/characters/example/stickers/index.json", encoding="utf-8")))
 q = ",".join("?" * len(keep))
 c = sqlite3.connect(db); cur = c.cursor()
 cur.execute("SELECT COUNT(*) FROM stickers"); print("清理前:", cur.fetchone()[0])

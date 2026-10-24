@@ -698,7 +698,7 @@ python -m venv venv
 ### 11.4 NapCat：官方 Windows 一键包（差异：不装 Docker）
 
 1. 打开 `https://github.com/NapNeko/NapCatQQ/releases`，下载形如 **`NapCat.Shell.Windows.<版本>.zip`** 的一键包（**内置 QQ 本体**，所以不用自己装 QQ，也不用 Docker）；官方文档：`https://napneko.github.io`；
-2. 解压到 **`D:\napcat`**（**绝不能带中文或空格**，否则起不来；也不要在 `C:\Program Files\` 这种需要管理员权限的目录）；
+2. 解压到 **`D:\napcat`**（**绝不能带中文或空格**，否则起不来；也不要在 `C:\Program Files\` 这种需要高权限的目录）；
 3. 双击目录里的 **`launcher.bat`** 启动（文件名接近，以压缩包内实际文件为准；如果是 Windows 10，可能叫 **`launcher-win10.bat`**）。会弹出一个黑窗口，**这个窗口不能关**，关了她就掉线；
 4. 浏览器打开 `http://127.0.0.1:6099/webui` —— **端口、扫码登录、新建 WebSocket 服务端（端口 3001、填 Access Token、开消息上报）全部照路线 A 的 6.4 做**，一个字段都不差；
 5. OneBot 的 Access Token 在 Windows 上这样生成：

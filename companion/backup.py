@@ -17,7 +17,15 @@ from companion.db import TIME_FORMAT
 
 logger = logging.getLogger(__name__)
 
-BACKUP_PATTERN = re.compile(r"^companion-(\d{8}-\d{4})\.db$")
+# 每日备份是 companion-YYYYMMDD-HHMM.db；reset 前的备份带秒（-HHMMSS，防同一分钟撞名）。
+# 两种都要纳入 14 份轮转——旧正则只认到分钟，reset 备份永远不会被清理、一直累积。
+BACKUP_PATTERN = re.compile(r"^companion-(\d{8}-\d{4})(\d{2})?\.db$")
+
+
+def _backup_sort_key(fname: str) -> str:
+    """按时间排序（到分钟的补 00 秒，与带秒的放在同一刻度上比）"""
+    m = BACKUP_PATTERN.match(fname)
+    return (m.group(1) + (m.group(2) or "00")) if m else fname
 
 
 def run_daily_backup(
@@ -63,7 +71,7 @@ def run_daily_backup(
             daily_files.append(fname)
 
     # 按文件名升序排序（时间顺序）
-    daily_files.sort()
+    daily_files.sort(key=_backup_sort_key)
 
     if len(daily_files) > max_keep:
         to_delete = daily_files[:-max_keep]
@@ -98,7 +106,7 @@ def get_last_backup_time(backup_dir: str = "data/backup/daily") -> Optional[str]
             return datetime.fromtimestamp(mtime).strftime(TIME_FORMAT)
         return None
 
-    daily_files.sort()
+    daily_files.sort(key=_backup_sort_key)
     latest_name = daily_files[-1]
     match = BACKUP_PATTERN.match(latest_name)
     if match:

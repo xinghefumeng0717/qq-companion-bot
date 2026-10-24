@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>小窝</title>
+<style>
+@font-face{font-family:"QZKai";src:url("/assets/lxgw-wenkai-gb2312.woff2") format("woff2");font-display:swap}
+@font-face{font-family:"Outfit";src:url("/assets/outfit.woff2") format("woff2");font-weight:300 600;font-display:swap}
+@font-face{font-family:"Space Grotesk";src:url("/assets/space-grotesk.woff2") format("woff2");font-weight:500 600;font-display:swap}
+:root{
+  --paper:#F4EFE4;--paper-hi:#FBF7EE;--paper-lo:#EBE4D5;
+  --rule:#D9D0BE;--rule-strong:#C6BAA4;
+  --ink:#191919;--ink-2:#6A6152;--ink-3:#7C7364;
+  --signal:#FFFA00;--ok:#2F6B4F;--warn:#B4552D;--busy:#4E6B78;--money:#4E6B78;
+  --seal:#B8332A;--char:#E6E6E6;
+  --ease:cubic-bezier(.2,.8,.25,1);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:"Microsoft YaHei UI","PingFang SC","Noto Sans SC",system-ui,sans-serif;font-size:14px;overflow:hidden;-webkit-font-smoothing:antialiased}
+body::after{content:"";position:fixed;inset:0;z-index:9;pointer-events:none;opacity:.14;mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E")}
+.num{font-family:"Space Grotesk","Outfit",sans-serif;font-feature-settings:"tnum" 1;font-variant-numeric:tabular-nums}
+.micro{font-family:"Outfit",system-ui,sans-serif;font-size:11px;letter-spacing:.06em;color:var(--ink-2)}
+.serif{font-family:"Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",serif}
+.brush{font-family:"QZKai","STKaiti","KaiTi",serif}
+.wrap{display:grid;grid-template-columns:minmax(0,46%) minmax(0,1fr);height:100vh;height:100dvh}
+
+/* ---------- 左：画 ---------- */
+.art{position:relative;overflow:hidden;border-right:1px solid var(--rule);
+  background:radial-gradient(115% 80% at 76% 10%,rgba(255,255,255,.6),rgba(255,255,255,0) 58%),
+    radial-gradient(90% 70% at 6% 92%,rgba(184,51,42,.06),rgba(184,51,42,0) 62%),var(--paper)}
+.theme-endfield:not(.ink) .art{background-image:radial-gradient(rgba(25,25,25,.10) 1px,transparent 1px);background-size:16px 16px}
+.scene{position:absolute;inset:0;z-index:0;pointer-events:none}
+.scene svg{display:block;width:100%;height:100%}
+.sun{fill:var(--seal);opacity:.28;filter:url(#mist-sun)}
+.m-far{fill:#E4DFD4;filter:url(#mist)}
+.m-mid{fill:#D4CFC4;filter:url(#mist-mid)}
+.m-near{fill:#C3BEB3;filter:url(#mist-soft)}
+.ridge{fill:none;stroke:#8C8272;stroke-width:.9;opacity:.18}
+.moth{fill:var(--ink);opacity:.5}
+.big{position:absolute;left:28px;top:26px;z-index:2;font-size:176px;line-height:.9;letter-spacing:-.04em;color:var(--ink);font-weight:900}
+.ink .big{top:10px;font-weight:400;font-family:"QZKai","STKaiti","KaiTi",serif;opacity:.92}
+.chibi{position:absolute;right:26px;bottom:80px;width:178px;z-index:2;filter:drop-shadow(0 12px 18px rgba(62,48,32,.16))}
+.namebar{position:absolute;left:0;right:0;bottom:0;height:58px;padding:0 26px;z-index:3;display:flex;align-items:center;gap:12px;
+  background:var(--paper);border-top:1px solid var(--rule)}
+.subtitle{font-family:"Outfit",system-ui,sans-serif;font-size:12px;letter-spacing:.05em;color:var(--ink-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seal{position:absolute;left:216px;top:40px;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  width:33px;min-height:56px;padding:7px 0;background:var(--seal);color:#F7F2E7;border-radius:2px;transform:rotate(-3deg);
+  font-family:"QZKai","STKaiti","KaiTi",serif;font-size:19px;line-height:1;box-shadow:inset 0 0 0 2px rgba(247,242,231,.18)}
+.ink .seal.ink-only{display:flex}
+.ink .seal.ink-only:empty{display:none}
+.stagechip{margin-left:auto;font-family:"Space Grotesk",sans-serif;font-size:11.5px;font-weight:500;letter-spacing:.08em;
+  padding:3px 9px;background:var(--signal);color:#191919;border-radius:2px;white-space:nowrap}
+.stagechip:empty{display:none}
+.ink-only{display:none}
+.ink .ink-only{display:block}
+.ink .no-ink{display:none}
+
+/* ---------- 右：操作 ---------- */
+.side{display:flex;flex-direction:column;min-width:0;padding:24px 26px 18px;overflow:hidden}
+.sec-head{display:flex;align-items:baseline;gap:8px}
+.sec-head .idx{font-family:"Space Grotesk",sans-serif;font-size:10.5px;letter-spacing:.08em;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.sec-head .slash{font-size:10px;letter-spacing:-.08em;color:var(--rule-strong)}
+.sec-head .micro{font-size:10.5px;letter-spacing:.2em;text-transform:uppercase}
+.status{display:flex;align-items:center;gap:16px;margin:12px 0 18px}
+#statusFace{flex:0 0 auto;width:86px;height:86px;padding:4px;border-radius:50%;border:1px dashed var(--rule-strong);display:flex;align-items:center;justify-content:center}
+.status img{display:block;width:100%;height:100%;object-fit:contain}
+.status .face{width:100%;height:100%;border-radius:50%;background:var(--paper-lo);display:flex;align-items:center;justify-content:center;
+  font-family:"QZKai","KaiTi",serif;font-size:30px;font-weight:400;color:var(--ink)}
+.status .col{min-width:0;flex:1}
+.line{font-size:14.5px;line-height:1.76;margin-top:5px;color:#242424;text-wrap:pretty;max-width:32em}
+.ink .line{font-family:"Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",serif}
+.meta{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:6px;font-size:11px;letter-spacing:.03em;color:var(--ink-2)}
+.meta .sep{width:1px;height:9px;background:var(--rule-strong)}
+.meta .cost{color:var(--ink)}
+.lamps{margin-top:10px}
+.lamps .row{display:flex;justify-content:space-between;align-items:center;padding:13px 0;border-bottom:1px solid var(--rule)}
+.lamps .row:first-child{border-top:1px solid var(--rule)}
+.lamps .lbl{font-size:12.5px;letter-spacing:.05em;color:var(--ink-2)}
+.pill{display:inline-flex;align-items:center;gap:7px;height:23px;padding:0 9px;border-radius:3px;background:var(--paper-lo);
+  font-size:11.5px;letter-spacing:.02em;color:var(--ink)}
+.dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto;box-shadow:0 0 0 2px rgba(25,25,25,.05);transition:background-color .22s var(--ease)}
+.main-btn{margin-top:16px;width:100%;height:52px;border:1px solid var(--ink);border-radius:4px;background:var(--paper-hi);color:var(--ink);
+  font-family:inherit;font-size:15px;font-weight:600;letter-spacing:.02em;display:flex;align-items:center;gap:14px;padding:0 18px 0 6px;
+  cursor:pointer;text-align:left;transition:background-color .22s var(--ease),transform .14s var(--ease),box-shadow .22s var(--ease)}
+.main-btn:hover:not(:disabled){background:#FFFCF4;transform:translateY(-1px);box-shadow:0 3px 0 rgba(25,25,25,.12)}
+.main-btn:active:not(:disabled){transform:scale(.985);box-shadow:0 1px 0 rgba(25,25,25,.12)}
+.main-btn:disabled{cursor:progress;opacity:.55}
+.main-btn:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+.badge{width:40px;height:40px;border-radius:3px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;
+  transition:background-color .22s var(--ease),color .22s var(--ease)}
+.badge svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
+.acts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:14px;border:1px solid var(--rule);border-radius:4px;overflow:hidden;background:rgba(255,255,255,.16)}
+.act{display:flex;align-items:center;gap:10px;height:50px;padding:0 13px;background:transparent;color:var(--ink);border:0;
+  border-right:1px solid var(--rule);border-bottom:1px solid var(--rule);font-family:inherit;font-size:13.5px;font-weight:500;letter-spacing:.01em;
+  cursor:pointer;text-align:left;transition:background-color .22s var(--ease),transform .14s var(--ease)}
+.act:nth-child(2n){border-right:0}
+.act:nth-child(n+5){border-bottom:0}
+.act:hover{background:var(--paper-lo)}
+.act:active{transform:scale(.98)}
+.act:focus-visible{outline:2px solid var(--ink);outline-offset:-3px}
+.act svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto;opacity:.82}
+.act:hover svg{opacity:1}
+.foot{margin-top:auto;padding-top:12px}
+.log{display:flex;align-items:center;gap:9px;min-height:22px;border-top:1px solid var(--rule);padding-top:9px}
+.log .micro{font-size:11px;letter-spacing:.03em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reg{display:none;gap:3px;margin-left:auto;flex:0 0 auto}
+.reg i{display:block;width:12px;height:5px}
+.theme-endfield .reg{display:flex}
+.local{display:flex;align-items:center;gap:7px;margin-top:6px;font-family:"Outfit",system-ui,sans-serif;font-size:10px;letter-spacing:.11em;color:var(--ink-3)}
+.local i{width:3px;height:3px;border-radius:50%;background:var(--rule-strong)}
+@media (max-width:720px){.art{display:none}.wrap{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){*{transition-duration:.01ms!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <section class="art" aria-hidden="true">
+    <div class="scene">
+      <svg viewBox="0 0 460 660" preserveAspectRatio="xMidYMax slice">
+        <defs>
+          <filter id="mist" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="8"/></filter>
+          <filter id="mist-mid" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="5"/></filter>
+          <filter id="mist-soft" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="2"/></filter>
+          <filter id="mist-sun" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="6"/></filter>
+          <g id="moth">
+            <path d="M0 0C-4-8-13-10-13-4-13 2-5 4 0 0Z"/>
+            <path d="M0 0C4-8 13-10 13-4 13 2 5 4 0 0Z"/>
+            <path d="M0 0C-3 4-7 10-4 11-1 12 1 5 0 0Z"/>
+            <path d="M0 0C3 4 7 10 4 11 1 12-1 5 0 0Z"/>
+          </g>
+        </defs>
+        <circle class="sun" cx="340" cy="196" r="24"/>
+        <path class="m-far" d="M-20 602L-20 455Q40 425 95 448 150 470 205 430 260 392 315 425 370 458 420 438 450 426 480 438L480 602Z"/>
+        <path class="m-mid" d="M-20 602L-20 505Q30 460 75 468 120 476 160 515 195 548 235 500 275 455 315 480 355 505 395 492 435 480 480 508L480 602Z"/>
+        <path class="m-near" d="M-20 602L-20 545Q15 495 55 488 100 480 135 530 170 565 205 500 235 455 270 490 305 525 340 505 380 485 420 510 450 526 480 538L480 602Z"/>
+        <path class="ridge" d="M-20 545Q15 495 55 488 100 480 135 530 170 565 205 500 235 455 270 490 305 525 340 505 380 485 420 510 450 526 480 538"/>
+        <use class="moth" href="#moth" transform="translate(250 148) rotate(-12) scale(1.15)"/>
+        <use class="moth" href="#moth" transform="translate(332 300) rotate(14) scale(.8)" opacity=".34"/>
+        <use class="moth" href="#moth" transform="translate(196 244) rotate(-24) scale(.6)" opacity=".26"/>
+      </svg>
+    </div>
+    <div id="big" class="big"></div>
+    <img id="chibi" class="chibi ink-only" alt="">
+    <span id="seal" class="seal ink-only"></span>
+    <div class="namebar">
+      <span id="sub" class="subtitle"></span>
+      <span id="stagechip" class="stagechip no-ink"></span>
+    </div>
+  </section>
+  <main class="side">
+    <div class="sec-head"><span class="idx">01</span><span class="slash">///</span><span class="micro">STATUS</span></div>
+    <div class="status">
+      <span id="statusFace"></span>
+      <div class="col">
+        <div id="line" class="line">正在读取……</div>
+        <div class="meta">
+          <span id="lastLabel">上次聊天</span>
+          <span id="last" class="num">--</span>
+          <span class="sep" aria-hidden="true"></span>
+          <span>今日 <span id="cost" class="num cost">¥0.00</span></span>
+        </div>
+      </div>
+    </div>
+    <div class="sec-head"><span class="idx">02</span><span class="slash">///</span><span class="micro">CONNECTION</span></div>
+    <div class="lamps">
+      <div class="row"><span class="lbl">隧道</span><span class="pill"><span id="d1" class="dot"></span><span id="s1">--</span></span></div>
+      <div class="row"><span class="lbl">看板</span><span class="pill"><span id="d2" class="dot"></span><span id="s2">--</span></span></div>
+      <div class="row"><span id="botName" class="lbl">她</span><span class="pill"><span id="d3" class="dot"></span><span id="s3">--</span></span></div>
+    </div>
+    <button id="main" class="main-btn" type="button">
+      <span id="badge" class="badge"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9"/><path d="M6.5 6.5a8 8 0 1 0 11 0"/></svg></span>
+      <span id="mainLabel">连接服务器</span>
+    </button>
+    <div class="acts">
+      <button class="act" type="button" data-act="/api/open" data-path="/"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>打开看板</button>
+      <button class="act" type="button" data-act="/api/backup"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M4 20h16"/></svg><span id="bkLabel">拉取备份</span></button>
+      <button class="act" type="button" data-act="/api/sim"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg>沙盒里试聊</button>
+      <button class="act" type="button" data-act="/api/open" data-path="/logs"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14M5 9h14M5 14h10M5 19h7"/></svg>运行日志</button>
+      <button class="act" type="button" data-act="/api/open" data-path="/memory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v15H5z"/><path d="M9 9h6M9 13h6"/></svg>记忆档案</button>
+      <button class="act" type="button" data-act="/api/folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>项目目录</button>
+    </div>
+    <div class="foot">
+      <div class="log">
+        <svg class="ink-only" width="18" height="14" viewBox="0 0 40 30" aria-hidden="true" fill="#6A6152"><path d="M20 15C14 2 2 2 4 10c1 6 10 6 16 5zM20 15c6-13 18-13 16-5-1 6-10 6-16 5zM20 15c-5 3-12 11-8 12s7-7 8-12zM20 15c5 3 12 11 8 12s-7-7-8-12z"/></svg>
+        <span id="msg" class="micro" role="status">就绪</span>
+        <span class="reg" aria-hidden="true"><i style="background:#B8332A"></i><i style="background:#4E6B78"></i><i style="background:#C9A227"></i><i style="background:#8C8272"></i></span>
+      </div>
+      <div class="local" aria-hidden="true"><span>仅本机 127.0.0.1</span><i></i><span>口令随启动生成</span></div>
+    </div>
+  </main>
+</div>
+<script>
+var INFO = __HOME_INFO__;
+var $ = function (id) { return document.getElementById(id); };
+document.body.className = "theme-" + INFO.theme + (INFO.ink ? " ink" : "");
+document.title = INFO.name + "的小窝";
+document.documentElement.style.setProperty("--char", INFO.char_color || "#E6E6E6");
+$("big").textContent = INFO.name.slice(0, 1);
+if (INFO.ink) $("big").classList.add("brush");
+$("sub").textContent = INFO.subtitle || INFO.name;
+$("botName").textContent = INFO.name;
+$("lastLabel").textContent = (INFO.terms && INFO.terms.last_chat) || "上次聊天";
+if (INFO.art.hero) { $("chibi").src = INFO.art.hero; }
+var term = function (k, d) { return (INFO.terms && INFO.terms[k]) || d; };
+
+function lamp(dotId, txtId, ok, txtOk, txtBad, unknown) {
+  $(dotId).style.background = ok === null ? "#8A8A8A" : (ok ? "var(--ok)" : "var(--warn)");
+  $(txtId).textContent = ok === null ? unknown : (ok ? txtOk : txtBad);
+}
+function face(url, alt) {
+  var box = $("statusFace");
+  if (url) { box.innerHTML = ""; var im = document.createElement("img"); im.src = url; im.alt = alt; box.appendChild(im); }
+  else { box.innerHTML = ""; var f = document.createElement("div"); f.className = "face"; f.textContent = INFO.name.slice(0, 1); box.appendChild(f); }
+}
+function render(s) {
+  var busy = s.tunnel_busy, on = s.tunnel && !busy;
+  lamp("d1", "s1", busy ? null : !!s.tunnel, "已连接", "未连接", "连接中");
+  lamp("d2", "s2", busy ? null : !!s.dash, "可访问", "不可达", "等待中");
+  lamp("d3", "s3", s.bot === null || s.bot === undefined ? null : s.bot, "在线", "QQ 掉线了", "未知");
+  if (busy) $("d1").style.background = $("d2").style.background = "var(--busy)";
+  var h = s.home || {};
+  var line;
+  if (busy) line = term("connecting", "正在连接服务器……");
+  else if (!s.dash) line = term("offline", "没连上服务器，看不到她的状态。");
+  else line = (h.activity || "") + (h.arc ? "。心里挂着「" + h.arc + "」" : "") + (h.mood_label ? "。心情" + h.mood_label : "");
+  $("line").textContent = line;
+  $("last").textContent = h.last_chat || "--";
+  $("cost").textContent = "¥" + Number(s.today_cost || 0).toFixed(2);
+  var stage = h.stage_name || s.stage_name || "";
+  $("stagechip").textContent = stage ? (h.stage === undefined ? "" : ("0" + h.stage).slice(-2) + " ") + stage : "";
+  $("seal").innerHTML = ""; stage.slice(0, 2).split("").forEach(function (c) { var sp = document.createElement("span"); sp.textContent = c; $("seal").appendChild(sp); });
+  if (INFO.ink && INFO.art) {
+    var pic = busy ? INFO.art.busy : (s.dash ? (s.avatar || INFO.art.online) : INFO.art.offline);
+    face(pic || INFO.default_avatar, busy ? "连接中" : (s.dash ? "她现在的样子" : "没连上"));
+  } else face(s.avatar || INFO.default_avatar, "她");
+  var mine = s.tunnel_mine;
+  $("main").disabled = busy || (s.tunnel && !mine);  // 别处已连上隧道：这里不重复开
+  $("mainLabel").textContent = busy ? "连接中…" : (mine ? "断开连接" : (s.tunnel ? "服务器已连上" : "连接服务器"));
+  $("badge").style.background = mine || s.tunnel ? "#191919" : "var(--signal)";
+  $("badge").style.color = mine || s.tunnel ? "#FAFAFA" : "#191919";
+  var prefix = term("log_prefix", "");
+  $("msg").textContent = (prefix ? prefix + " · " : "") + (s.message || "");
+  $("bkLabel").textContent = s.last_backup ? "拉取备份（上次 " + s.last_backup + "）" : "拉取备份";
+}
+function post(path, body) {
+  return fetch(path, { method: "POST", headers: { "X-Home-Secret": INFO.secret, "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}) }).then(function (r) { return r.json(); }).then(render).catch(function () {});
+}
+function poll() { fetch("/api/state").then(function (r) { return r.json(); }).then(render).catch(function () {}); }
+$("main").addEventListener("click", function () { post("/api/tunnel"); });
+document.querySelectorAll(".act").forEach(function (b) {
+  b.addEventListener("click", function () { post(b.getAttribute("data-act"), { path: b.getAttribute("data-path") }); });
+});
+poll(); setInterval(poll, 3000);
+</script>
+</body>
+</html>

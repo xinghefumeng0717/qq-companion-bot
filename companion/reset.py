@@ -21,6 +21,10 @@ RELATIONSHIP_TABLES = [
     "diary",
     "diary_archive",
     "facts",
+    # 清档即遗忘：她对自己说过的话、对他的看法、约好的见面同样属于关系记忆
+    "self_facts",
+    "impressions",
+    "meetups",
     "followups",
     "suppressed_desires",
     "observer_scores",

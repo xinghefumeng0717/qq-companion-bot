@@ -63,7 +63,7 @@ def _replier() -> Replier:
 
 # 本轮聚合批次：3 条，编号 1~3 对应 message_id 1001~1003
 BATCH3: List[Dict[str, Any]] = [
-    {"index": 1, "text": "今天做完实验了", "message_id": 1001, "has_image": False},
+    {"index": 1, "text": "今天加班到现在", "message_id": 1001, "has_image": False},
     {"index": 2, "text": "晚上吃啥", "message_id": 1002, "has_image": False},
     {"index": 3, "text": "对了周六那个会你还去吗", "message_id": 1003, "has_image": False},
 ]
@@ -190,7 +190,7 @@ class TestMessageIdChain(_ConnectedCase):
         old_w, old_h = agg_mod.SILENCE_WINDOW, agg_mod.HARD_LIMIT
         agg_mod.SILENCE_WINDOW, agg_mod.HARD_LIMIT = 0.05, 1.0
         try:
-            await agg.push_message("今天做完实验了", None, 1001)
+            await agg.push_message("今天加班到现在", None, 1001)
             await agg.push_message("晚上吃啥", None, 1002)
             await agg.push_message("对了周六那个会你还去吗", None, 1003)
             self.assertTrue(await _wait_for(lambda: len(turns) == 1, timeout=8.0))
@@ -199,11 +199,11 @@ class TestMessageIdChain(_ConnectedCase):
             agg_mod.SILENCE_WINDOW, agg_mod.HARD_LIMIT = old_w, old_h
 
         text, _img, batch = turns[0]
-        self.assertEqual(text, "今天做完实验了\n晚上吃啥\n对了周六那个会你还去吗")
+        self.assertEqual(text, "今天加班到现在\n晚上吃啥\n对了周六那个会你还去吗")
         self.assertEqual([b["index"] for b in batch], [1, 2, 3])
         self.assertEqual([b["message_id"] for b in batch], [1001, 1002, 1003])
         self.assertEqual([b["text"] for b in batch], [
-            "今天做完实验了", "晚上吃啥", "对了周六那个会你还去吗",
+            "今天加班到现在", "晚上吃啥", "对了周六那个会你还去吗",
         ])
 
     async def test_纯空消息不进批次(self):
@@ -277,7 +277,7 @@ class TestMessageIdChain(_ConnectedCase):
 class TestNumberedBlock(unittest.TestCase):
     def test_三条渲染成编号块(self):
         block = format_numbered_batch(BATCH3)
-        self.assertIn("[1] 今天做完实验了", block)
+        self.assertIn("[1] 今天加班到现在", block)
         self.assertIn("[2] 晚上吃啥", block)
         self.assertIn("[3] 对了周六那个会你还去吗", block)
 
@@ -313,7 +313,7 @@ class TestNumberedBlock(unittest.TestCase):
 
         pairs = _re.findall(r"\[quote:(\d)\]「([^」]*)」", QUOTE_USAGE_EXAMPLES)
         self.assertGreaterEqual(len(pairs), 2, "示范里应至少有两个带引号的引用例子")
-        his_lines = ["今天做完实验了", "晚上吃啥 我请你", "对了周六那个会你还去吗"]
+        his_lines = ["今天加班到现在", "晚上吃啥 我请你", "对了周六那个会你还去吗"]
         for index, reply in pairs:
             with self.subTest(index=index):
                 self.assertTrue(reply.strip(), "示范里的回复不能是空的")
@@ -356,7 +356,7 @@ class TestNumberedBlockAssembler(unittest.IsolatedAsyncioTestCase):
             joined = "\n".join(b["text"] for b in BATCH3)
             messages, _ = await stack.assembler.assemble_messages(joined, None, BATCH3)
             user_msg = messages[-1]["content"]
-            self.assertIn("[1] 今天做完实验了", user_msg)
+            self.assertIn("[1] 今天加班到现在", user_msg)
             self.assertIn("[3] 对了周六那个会你还去吗", user_msg)
         finally:
             await close_db(db)
@@ -864,7 +864,7 @@ class _DummyObserver:
     def __init__(self):
         self.calls: List[Any] = []
 
-    async def settle_turn(self, user_message, assistant_reply, user_image_path=None):
+    async def settle_turn(self, user_message, assistant_reply, user_image_path=None, recent_turns=None):
         self.calls.append((user_message, assistant_reply))
         return {}
 

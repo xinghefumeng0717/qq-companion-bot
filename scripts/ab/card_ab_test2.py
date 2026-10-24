@@ -63,10 +63,10 @@ from companion.persona import Persona
 from companion.stickers import StickerManager
 
 # ── 路径与常量 ──
-OLD_CARD_SRC = "characters/qingzi/character.backup-before-fixes9.json"
+OLD_CARD_SRC = "characters/example/character.backup-before-fixes9.json"
 OLD_CARD_DIR = "data/ab_old_card"
-NEW_CARD_DIR = "characters/qingzi"
-STICKER_DIR = "characters/qingzi/stickers"
+NEW_CARD_DIR = "characters/example"
+STICKER_DIR = "characters/example/stickers"
 DB_SRC = "data/server-companion.db"
 WORK_DB_OLD = "data/ab2_work_old.db"
 WORK_DB_NEW = "data/ab2_work_new.db"

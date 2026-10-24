@@ -137,7 +137,7 @@
 
 **审查项**：核查 system prompt 各区块真实长度、上下文挤占情况、历史截断策略以及阶段 examples 是否位于最高优先级的末尾位置。
 
-#### 1. 真实数据装配测量（基于真实 `characters/qingzi` 与只读生产库）
+#### 1. 真实数据装配测量（基于真实 `characters/example` 与只读生产库）
 
 | 提示词区块 | 字符数 (chars) | 预估 Token 数 (按 /3 估算) | 占比 (%) | 评估说明 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -250,7 +250,7 @@
 ---
 
 ### 第 4 轮：发图与两段式识图（Flash 感知 + 表情包收藏判断）
-- **机主输入**：`看这个表情包` + 附图 [`characters/qingzi/stickers/cat_can_can_need.jpg`](file:///D:/qq-companion/characters/qingzi/stickers/cat_can_can_need.jpg)
+- **机主输入**：`看这个表情包` + 附图 [`characters/example/stickers/cat_can_can_need.jpg`](file:///D:/qq-companion/characters/example/stickers/cat_can_can_need.jpg)
 - **阶段一·Flash 视觉感知输出**：
   > “灰色圆脸猫咪简笔画，睁大眼睛，右侧有尾巴，下方写有“cancanneed”。”
 - **阶段二·主聊模型回复**：

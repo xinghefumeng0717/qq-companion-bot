@@ -5,6 +5,9 @@ __pycache__/
 venv/
 .venv/
 
+# 本地 GPT-SoVITS 推理运行环境（模型权重与虚拟环境，不入库）
+.gsv/
+
 # Project private data
 config.toml
 data/
@@ -15,6 +18,9 @@ STATUS.md
 characters/*
 !characters/example/
 
+# AI 记忆库（误删无法恢复，不入库）
+.dsh-meow/
+
 # OS and IDE files
 .DS_Store
 Thumbs.db
@@ -24,3 +30,6 @@ snapshots/
 
 # 图标候选稿（设计中间产物，母版已定稿进 companion/assets/ 与 launcher/assets/qingzi_anime.ico）
 launcher/assets/candidates/*.png
+
+# 小助手语音训练素材与模型（私有，不入库）
+小助手1/

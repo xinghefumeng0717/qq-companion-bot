@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,31 @@ class ModelPreset:
     tasks: str = ""
 
 
+# 配置里 api_key 为空或是脱敏占位符时，按 provider 从环境变量兜底取 key。
+# 真 key 写在 config.toml 里时完全不受影响（服务器行为不变）。
+API_KEY_ENV_BY_PROVIDER = {
+    "deepseek": "DEEPSEEK_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+}
+
+
+def _is_placeholder_key(key: str) -> bool:
+    k = (key or "").strip()
+    return not k or k.upper().startswith("REDACTED")
+
+
+def apply_env_api_keys(presets: Dict[str, "ModelPreset"]) -> None:
+    """占位 key → 环境变量（只补不改：配置里有真 key 一律保留）。"""
+    for name, preset in presets.items():
+        if not _is_placeholder_key(preset.api_key):
+            continue
+        env_name = API_KEY_ENV_BY_PROVIDER.get(preset.provider)
+        env_val = os.environ.get(env_name, "").strip() if env_name else ""
+        if env_val:
+            preset.api_key = env_val
+            logger.info(f"[Config] 预设 [{name}] 的 api_key 为空/占位，已从环境变量 {env_name} 读取")
+
+
 def _default_presets() -> Dict[str, ModelPreset]:
     return {
         "deepseek": ModelPreset(
@@ -119,6 +145,9 @@ class LLMConfig:
         "vision_perception",
         "proactive_message",
         "life_arc",
+        # 回复质检的改写稿直接发给他，同样是"用户看得见的字"（2026-10-19 v5 实测：不思考时
+        # 复述率只降到 11%、还会留半截话；开 low 降到 5.6%、改写通顺，耗时中位 +0.6s）
+        "reply_check",
     ]
 
     def __init__(
@@ -226,6 +255,16 @@ class LLMConfig:
 @dataclass
 class CharacterConfig:
     path: str = "characters/example"
+    # 人物档案（跟她聊天的那个人）：空 = 卡里用了 {user_name} 等占位符时找 profiles/default.json
+    user_profile: str = ""
+    # 自我记忆：观察者记下她说过的关于自己的事，聊天时提醒她对得上（新功能默认关）
+    self_memory: bool = False
+    # 对他的看法：每 8 轮更新几条"我觉得他……"（可能看错、会修正），只影响她怎么接话（默认关）
+    impressions: bool = False
+    # 关于他的事分层：核心常驻（超上限自动合并）+ 最近几条 + 相关几条，防止越记越长（默认关）
+    fact_layers: bool = False
+    # 线下见面：识别约定、见面后自动补一段纪要（默认关）
+    meetup_recap: bool = False
 
 
 @dataclass
@@ -233,6 +272,22 @@ class ReplyConfig:
     max_chunks: int = 5
     chunk_delay_min: float = 0.8
     chunk_delay_max: float = 2.2
+    # 生成后质检（low 思考的 flash 抓复述/点评和装饰性比喻并删掉），新功能默认关
+    self_check: bool = False
+    self_check_timeout: float = 10.0
+    # 首泡回声裁剪：第一个气泡在复述/点评他、后面还有话就删掉（零调用），默认关
+    trim_echo: bool = False
+    # 并行生成几条候选、挑没复述/点评/比喻的那条（1 = 不开），默认 1
+    candidates: int = 1
+    # 多候选毛病分打平后的决胜规则："warm"=挑更暖的（默认，暖卡既有行为）；
+    # "first"=取最先生成的，不做温度偏好（傲娇等"暖=人设磨损"的卡用）
+    candidate_tiebreak: str = "warm"
+    # 动态示例：按他这句话从真人聊天库挑几条类似情境的回法给模型参考，默认关
+    style_examples: bool = False
+    style_examples_path: str = "data/style_examples/real_chat.json"
+    # 一步看图：主聊模型直接看他发的图（要求主聊模型支持多模态），回复末尾顺手写一行
+    # 【看到：…】存进记录；发图那一轮只生成 1 条候选。默认关 = 老的两步（先看图写描述再聊）
+    vision_direct: bool = False
 
 
 @dataclass
@@ -242,6 +297,11 @@ class ProactiveConfig:
     wake_interval_max: int = 40
     quiet_hours: List[int] = field(default_factory=lambda: [0, 8])
     max_unanswered: int = 2
+    # 他长时间不回时降频：沉默满 slow_after_days 天后，两条主动消息至少隔
+    # slow_interval_hours；满 stop_after_days 天后不再主动发，他一回话即恢复。0 = 不启用该档
+    silence_slow_after_days: float = 2.0
+    silence_slow_interval_hours: float = 48.0
+    silence_stop_after_days: float = 5.0
 
 
 @dataclass
@@ -300,9 +360,14 @@ class TTSConfig:
     model: str = "speech-2.8-hd"          # t2a_v2 模型；接口只认官方枚举
     group_id: str = ""                    # 可选；t2a_v2 实测**不需要**（老接口才要）
     # ── 公共闸门 ──
-    daily_limit: int = 30                 # 每日语音条数上限（所有者 2026-10-05 二次拍板：30 条≈感觉不到
-                                          # 存在，但保留保险丝防模型抖动连发；不设无限）
+    daily_limit: int = 60                 # 每日语音条数上限（所有者 2026-10-22 三次拍板：30→60，
+                                          # 克隆音色已定稿，要让她多说；仍是保险丝防抖动连发，不设无限）
     max_chars: int = 90                   # 单条字数上限（≈30 秒；NapCat >35s 有失败报告，别再加）
+
+
+# 「[admin].theme 没写」的哨兵：dataclass 默认值无法区分"没传"与"传了 journal"，
+# 用哨兵把两种情况分开（Config.load 只在 TOML 里真有 theme 键时传值）。
+_THEME_UNSET = object()
 
 
 @dataclass
@@ -310,6 +375,112 @@ class AdminConfig:
     host: str = "127.0.0.1"
     port: int = 8080
     token: str = ""      # 管理页写操作鉴权令牌；空 = 仅 localhost 信任模式（向后兼容）
+    # 看板主题：journal = 原来的手账纸（默认）；plain = 通用；endfield = 科幻工业风。
+    # 角色卡有 theme/skin.json 时，plain / endfield 会叠上卡里的皮肤（头像、光标、水墨等）。
+    # 默认值用哨兵：要区分「config 没写 theme」与「显式写了 journal」——
+    # 没写时 admin.resolve_theme 会跟随卡里的皮肤，写了就严格用 config。
+    theme: str = field(default=_THEME_UNSET)  # type: ignore[assignment]
+    theme_explicit: bool = False
+
+    def __post_init__(self) -> None:
+        if self.theme is _THEME_UNSET:
+            self.theme = "journal"
+        else:
+            self.theme_explicit = True
+
+
+def _admin_theme(val: object) -> str:
+    """看板主题；认不得的值按默认手账纸处理，不让一个拼写错误把看板弄挂。"""
+    v = str(val or "").strip().lower()
+    return v if v in ("journal", "plain", "endfield") else "journal"
+
+
+# ============================================================================
+# 角色卡 features 自声明（config 显式写了以 config 为准）
+# ============================================================================
+# 卡里写 {"self_memory": true, ...} 表示"这个角色需要这些能力"。旧卡没有 features 段
+# 时这里整条跳过，所有开关保持代码默认值——提示词与行为逐字节不变。
+CARD_FEATURE_CHARACTER_BOOLS = ("self_memory", "fact_layers", "impressions", "meetup_recap")
+CARD_FEATURE_REPLY_BOOLS = ("trim_echo", "vision_direct")
+
+
+def load_card_features(char_dir: str) -> Dict[str, Any]:
+    """读角色卡顶层 features 段；卡缺失/坏/没有该段/不是对象 → 空字典（旧卡零变化）。"""
+    if not char_dir:
+        return {}
+    path = os.path.join(char_dir, "character.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:  # 卡坏了由 Persona.load 报，这里只是少一层自声明
+        logger.warning(f"[Config] 读角色卡 features 失败（按未声明处理）: {path} {e}")
+        return {}
+    features = data.get("features") if isinstance(data, dict) else None
+    if features is None:
+        return {}
+    if not isinstance(features, dict):
+        logger.warning(
+            f"[Config] 角色卡 features 不是 JSON 对象（{type(features).__name__}），按未声明处理"
+        )
+        return {}
+    return features
+
+
+def apply_card_features(
+    character: CharacterConfig,
+    reply: ReplyConfig,
+    character_data: Dict[str, Any],
+    reply_data: Dict[str, Any],
+    char_dir: str,
+) -> None:
+    """把卡里的 features 补进"config 没显式写"的开关。
+
+    character_data / reply_data 是 TOML 里 [character] / [reply] 的原始键集合：
+    **键存在即显式**（写了 false 也算显式，卡不许覆盖），没有才用卡里的值。
+    由 Config.load 在返回前调用，早于 main.py 的所有消费点。
+    """
+    features = load_card_features(char_dir)
+    if not features:
+        return
+
+    for name in CARD_FEATURE_CHARACTER_BOOLS:
+        if name in character_data or name not in features:
+            continue
+        value = features[name]
+        if isinstance(value, bool):
+            setattr(character, name, value)
+        else:
+            logger.warning(f"[Config] 角色卡 features.{name} 必须是布尔值，已忽略：{value!r}")
+
+    for name in CARD_FEATURE_REPLY_BOOLS:
+        if name in reply_data or name not in features:
+            continue
+        value = features[name]
+        if isinstance(value, bool):
+            setattr(reply, name, value)
+        else:
+            logger.warning(f"[Config] 角色卡 features.{name} 必须是布尔值，已忽略：{value!r}")
+
+    if "candidates" not in reply_data and "candidates" in features:
+        value = features["candidates"]
+        if isinstance(value, int) and not isinstance(value, bool):
+            reply.candidates = max(1, min(value, 4))
+        else:
+            logger.warning(
+                f"[Config] 角色卡 features.candidates 必须是整数，已忽略：{value!r}"
+            )
+
+    if "candidate_tiebreak" not in reply_data and "candidate_tiebreak" in features:
+        value = features["candidate_tiebreak"]
+        if value in ("warm", "first"):
+            reply.candidate_tiebreak = value
+        else:
+            logger.warning(
+                f"[Config] 角色卡 features.candidate_tiebreak 只认 warm/first，"
+                f"已忽略：{value!r}"
+            )
 
 
 @dataclass
@@ -399,6 +570,7 @@ class Config:
                 vision=str(llm_data.get("vision_model", "deepseek-flash")),
                 tasks=str(llm_data.get("observer_model", "deepseek-flash")),
             )
+        apply_env_api_keys(presets)
 
         llm = LLMConfig(
             current=current_name,
@@ -415,6 +587,11 @@ class Config:
         char_data = data.get("character", {})
         character = CharacterConfig(
             path=str(char_data.get("path", "characters/example")),
+            user_profile=str(char_data.get("user_profile", "")),
+            self_memory=bool(char_data.get("self_memory", False)),
+            impressions=bool(char_data.get("impressions", False)),
+            fact_layers=bool(char_data.get("fact_layers", False)),
+            meetup_recap=bool(char_data.get("meetup_recap", False)),
         )
 
         reply_data = data.get("reply", {})
@@ -422,7 +599,26 @@ class Config:
             max_chunks=int(reply_data.get("max_chunks", 5)),
             chunk_delay_min=float(reply_data.get("chunk_delay_min", 0.8)),
             chunk_delay_max=float(reply_data.get("chunk_delay_max", 2.2)),
+            self_check=bool(reply_data.get("self_check", False)),
+            self_check_timeout=float(reply_data.get("self_check_timeout", 10.0)),
+            trim_echo=bool(reply_data.get("trim_echo", False)),
+            candidates=max(1, min(int(reply_data.get("candidates", 1)), 4)),
+            style_examples=bool(reply_data.get("style_examples", False)),
+            style_examples_path=str(
+                reply_data.get("style_examples_path", "data/style_examples/real_chat.json")
+            ),
+            vision_direct=bool(reply_data.get("vision_direct", False)),
+            candidate_tiebreak=str(reply_data.get("candidate_tiebreak", "warm")),
         )
+        if reply.candidate_tiebreak not in ("warm", "first"):
+            logger.warning(
+                f"[Config] reply.candidate_tiebreak 只认 warm/first，已回退默认 warm："
+                f"{reply.candidate_tiebreak!r}"
+            )
+            reply.candidate_tiebreak = "warm"
+        # 卡里的 features 只补 config 没显式写的项；旧卡没有 features 段时整条跳过。
+        # 必须在 main.py 消费这些开关之前完成（Config.load 返回前，见 CompanionBot.__init__）。
+        apply_card_features(character, reply, char_data, reply_data, character.path)
 
         proactive_data = data.get("proactive", {})
         proactive = ProactiveConfig(
@@ -431,6 +627,11 @@ class Config:
             wake_interval_max=int(proactive_data.get("wake_interval_max", 40)),
             quiet_hours=list(proactive_data.get("quiet_hours", [0, 8])),
             max_unanswered=int(proactive_data.get("max_unanswered", 2)),
+            silence_slow_after_days=float(proactive_data.get("silence_slow_after_days", 2.0)),
+            silence_slow_interval_hours=float(
+                proactive_data.get("silence_slow_interval_hours", 48.0)
+            ),
+            silence_stop_after_days=float(proactive_data.get("silence_stop_after_days", 5.0)),
         )
 
         # FIXES15 回复时机：整节缺失时全部走 TimingConfig 代码默认值，
@@ -487,11 +688,16 @@ class Config:
             max_chars=int(tts_data.get("max_chars", _tts_d.max_chars)),
         )
         admin_data = data.get("admin", {})
-        admin = AdminConfig(
+        admin_kwargs: Dict[str, Any] = dict(
             host=str(admin_data.get("host", "127.0.0.1")),
             port=int(admin_data.get("port", 8080)),
             token=str(admin_data.get("token", "")),
         )
+        # 没写 theme 时不传（保持哨兵）→ AdminServer 跟随卡里的皮肤；
+        # 写了（哪怕写的 journal）就显式钉住，不再看卡。
+        if "theme" in admin_data:
+            admin_kwargs["theme"] = _admin_theme(admin_data["theme"])
+        admin = AdminConfig(**admin_kwargs)
 
         return cls(
             account=account,

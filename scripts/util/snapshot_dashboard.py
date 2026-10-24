@@ -85,7 +85,7 @@ def normalize_content(route: str, content: str) -> str:
     return content
 
 
-async def fetch_snapshots(port: int = 18080, char_dir: str = "characters/qingzi") -> Dict[str, str]:
+async def fetch_snapshots(port: int = 18080, char_dir: str = "characters/example") -> Dict[str, str]:
     """启动独立 AdminServer 并抓取全部页面"""
     prod_db = "data/companion.db"
     tmp_db = "data/snapshot_tmp.db"

@@ -181,7 +181,7 @@ async def run_smoke_test():
         # ----------------------------------------------------------------------
         print("\n" + "-" * 60)
         print("【第 4 轮：发图与两段式识图】")
-        test_img_path = "characters/qingzi/stickers/cat_can_can_need.jpg"
+        test_img_path = "characters/example/stickers/cat_can_can_need.jpg"
         t4_input_raw = "看这个表情包"
         print(f"用户: {t4_input_raw} [图片: {test_img_path}]")
 

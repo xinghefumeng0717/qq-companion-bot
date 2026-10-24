@@ -26,18 +26,18 @@ api_key = "sk-你的key"          # ← https://platform.deepseek.com → API ke
 # 其余保持默认（三个模型均为 deepseek-flash）
 
 [character]
-path = "characters/qingzi"     # ← 改成你的角色卡目录名
+path = "characters/example"     # ← 改成你的角色卡目录名
 ```
 
 可选：`[llm.pricing] holidays` 填入今年法定节假日（如 `["2026-10-01", "2026-10-02"]`），费用统计更准确。
 
 ### 0.2 确认角色卡
 
-- 角色卡目录（如 `characters/qingzi/`）里 `character.json` 和 `stickers/`（含 index.json 和图片）齐全；
+- 角色卡目录（如 `characters/example/`）里 `character.json` 和 `stickers/`（含 index.json 和图片）齐全；
 - 本地跑一下确认能加载：
 
 ```bash
-./venv/Scripts/python.exe -c "from companion.persona import Persona; p=Persona.load('characters/qingzi'); print('OK:', p.name, len(p.stages), '个阶段')"
+./venv/Scripts/python.exe -c "from companion.persona import Persona; p=Persona.load('characters/example'); print('OK:', p.name, len(p.stages), '个阶段')"
 ```
 
 ### 0.3 小号检查
@@ -88,14 +88,14 @@ sudo chown -R ubuntu:ubuntu /opt/qq-companion
 **方式 B：GitHub 中转（适合以后长期迭代）**
 
 ```bash
-# 本地：先确认 config.toml、data/、characters/qingzi/ 不在 git 跟踪里
+# 本地：先确认 config.toml、data/、characters/example/ 不在 git 跟踪里
 cd "/d/qq-companion" && git status --short
 # 然后提交推送，服务器上 git clone；
 # 注意：clone 后服务器上没有 config.toml 和你的私有角色卡，需单独 scp：
 # ⚠ 这两条 scp 只限**首次安装**（服务器上还没有 config.toml 时）执行；
 #   服务器已有 config.toml 时禁止覆盖，改动一律就地编辑（见方式 A 的死规则）。
 scp "/d/qq-companion/config.toml" ubuntu@服务器IP:/opt/qq-companion/
-scp -r "/d/qq-companion/characters/qingzi" ubuntu@服务器IP:/opt/qq-companion/characters/
+scp -r "/d/qq-companion/characters/example" ubuntu@服务器IP:/opt/qq-companion/characters/
 ```
 
 ---

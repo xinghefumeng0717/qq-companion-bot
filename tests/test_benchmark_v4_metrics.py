@@ -305,5 +305,13 @@ class TestCautionCountBoundary(unittest.TestCase):
         self.assertEqual(caution_clauses("到家了吗"), [])
 
 
+class TestDImageWords(unittest.TestCase):
+    def test_表情包名字不算点评图片(self):
+        from scripts.sim.benchmark_v4 import d_close_ok, d_img_words
+        self.assertEqual(d_img_words("[表情:乖巧嗯嗯]"), [])
+        self.assertTrue(d_close_ok("去吧去吧\n[表情:乖巧嗯嗯]"))
+        self.assertEqual(d_img_words("这表情也太乖了"), ["乖"])
+
+
 if __name__ == "__main__":
     unittest.main()

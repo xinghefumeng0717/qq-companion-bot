@@ -23,7 +23,7 @@
 - EMA 阻尼（ALPHA）与 delta 公式 `(raw-0.4)*4` **不动**（锚点已按此校准）。
 
 ### 1.2 阶段阈值重映射（核心求解任务）
-`STAGE_THRESHOLDS` 重排到 [0,100] 内。用仿真（场景：sd=5.0, rs=5.5, wa=6.0, re=5.5，30 轮/天，6 聊 1 歇，初态用 `characters/qingzi/character.json` 的 initial_dims）迭代求解阈值与阻力参数，使各阶段到达天数命中下表（**容差 ±25%**）：
+`STAGE_THRESHOLDS` 重排到 [0,100] 内。用仿真（场景：sd=5.0, rs=5.5, wa=6.0, re=5.5，30 轮/天，6 聊 1 歇，初态用 `characters/example/character.json` 的 initial_dims）迭代求解阈值与阻力参数，使各阶段到达天数命中下表（**容差 ±25%**）：
 
 | 阶段 | 名称 | 目标到达时间 |
 |---|---|---|

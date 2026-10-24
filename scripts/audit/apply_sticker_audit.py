@@ -18,7 +18,7 @@
     ./venv/Scripts/python.exe scripts/audit/apply_sticker_audit.py             # 真写
     ./venv/Scripts/python.exe scripts/audit/apply_sticker_audit.py --sync-card  # 同步到角色卡目录
 
-`--sync-card`：把 workdir 的 index.json + 图片同步到 `characters/qingzi/stickers/`
+`--sync-card`：把 workdir 的 index.json + 图片同步到 `characters/example/stickers/`
 （部署手册 0.2 节：角色卡目录里的 stickers/ 才是长期归宿，部署时同步到服务器）。
 workdir 里的 58 张图会一并带过去：其中 15 张已从索引移除但**图片保留**，
 这样"删掉某张"随时能加回来。同步前自动备份原 index.json。
@@ -100,7 +100,7 @@ def strip_note(text: str) -> Tuple[str, bool]:
 
 
 def sync_to_card(workdir_dir: str, stamp: str) -> int:
-    """把 workdir 的 index.json + 图片同步到 characters/qingzi/stickers/。
+    """把 workdir 的 index.json + 图片同步到 characters/example/stickers/。
 
     部署手册 0.2 节：角色卡目录里的 stickers/（含 index.json 和图片）才是长期归宿，
     部署时整体同步到服务器。workdir 里的 58 张图一并带过去（15 张已从索引移除但
@@ -108,7 +108,7 @@ def sync_to_card(workdir_dir: str, stamp: str) -> int:
     """
     import shutil
 
-    card_dir = "characters/qingzi/stickers"
+    card_dir = "characters/example/stickers"
     os.makedirs(card_dir, exist_ok=True)
 
     src_index = os.path.join(workdir_dir, "index.json")
@@ -146,7 +146,7 @@ def sync_to_card(workdir_dir: str, stamp: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只报告不写回")
-    ap.add_argument("--sync-card", action="store_true", help="同步到 characters/qingzi/stickers/")
+    ap.add_argument("--sync-card", action="store_true", help="同步到 characters/example/stickers/")
     args = ap.parse_args()
 
     if not os.path.exists(DOCX_FILE):
@@ -283,7 +283,7 @@ def main() -> int:
     if args.sync_card:
         print("\n--- 同步到角色卡目录 ---")
         rc = sync_to_card(os.path.dirname(INDEX_FILE), stamp)
-        report["synced_to_card_dir"] = "characters/qingzi/stickers"
+        report["synced_to_card_dir"] = "characters/example/stickers"
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         if rc != 0:

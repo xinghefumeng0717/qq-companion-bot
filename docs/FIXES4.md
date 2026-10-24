@@ -6,7 +6,7 @@
 > 全局约束：
 > 1. 不引入新第三方依赖（桌面 GUI 用标准库 tkinter；SSH/SCP 调系统命令）；
 > 2. **服务器 config.toml 已被冻结**：本次所有新增配置项必须在代码里给出默认值，旧 config.toml 缺省运行时行为正常（restart_notice 默认 true）；
-> 3. 禁止改动 `characters/qingzi/character.json`；提示词集中 prompts.py；LLM 调用集中 gateway.py；
+> 3. 禁止改动 `characters/example/character.json`；提示词集中 prompts.py；LLM 调用集中 gateway.py；
 > 4. 完成后 `./venv/Scripts/python.exe -m unittest discover -s tests -v` 全绿；
 > 5. 与 PLAN/FIXES 矛盾时停下报告。
 

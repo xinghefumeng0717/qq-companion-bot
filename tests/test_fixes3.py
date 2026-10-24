@@ -307,5 +307,70 @@ class TestTask3DataReset(unittest.TestCase):
         )
 
 
+class TestResetClearsExtendedMemory(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp_dir, "test.db")
+        self.backup_dir = os.path.join(self.tmp_dir, "backup")
+
+        async def seed():
+            db = Database(self.db_path)
+            await db.init_tables()
+            await db.execute("INSERT INTO self_facts (content) VALUES (?)", ("我怕黑",))
+            await db.execute("INSERT INTO impressions (content) VALUES (?)", ("他说话很直",))
+            await db.execute(
+                "INSERT INTO meetups (when_at, place, plan) VALUES (?, ?, ?)",
+                ("2026-11-01 15:00", "图书馆", "一起自习"),
+            )
+            await db.execute("INSERT INTO stickers (name, file) VALUES (?, ?)", ("cat", "cat.png"))
+            await db.execute("INSERT INTO llm_calls (purpose) VALUES (?)", ("chat",))
+            await db.close()
+
+        asyncio.run(seed())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_reset_clears_self_facts_impressions_meetups(self):
+        res = reset_database(
+            db_path=self.db_path,
+            backup_dir=self.backup_dir,
+            purge_all=False,
+        )
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            for tbl in ["self_facts", "impressions", "meetups"]:
+                self.assertIn(tbl, res["cleared_counts"])
+                self.assertEqual(res["cleared_counts"][tbl], 1)
+                cnt = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                self.assertEqual(cnt, 0, f"Table {tbl} should be empty after reset")
+
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM stickers").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+        self.assertNotIn("stickers", res["cleared_counts"])
+        self.assertNotIn("llm_calls", res["cleared_counts"])
+
+    def test_reset_survives_legacy_db_without_extended_memory(self):
+        """旧库还没这三张表，non-purge reset 必须照常跑完。"""
+        os.remove(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE turns (id INTEGER PRIMARY KEY, role TEXT, content TEXT, created_at TEXT);
+            CREATE TABLE counters (key TEXT PRIMARY KEY, value INTEGER);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        res = reset_database(self.db_path, self.backup_dir)
+        for tbl in ["self_facts", "impressions", "meetups"]:
+            self.assertNotIn(tbl, res["cleared_counts"])
+
+
 if __name__ == "__main__":
     unittest.main()

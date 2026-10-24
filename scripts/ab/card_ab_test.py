@@ -49,10 +49,10 @@ from companion.persona import Persona
 from companion.stickers import StickerManager
 
 # ── 路径与常量 ──
-OLD_CARD_SRC = "characters/qingzi/character.backup-before-fixes9.json"
+OLD_CARD_SRC = "characters/example/character.backup-before-fixes9.json"
 OLD_CARD_DIR = "data/ab_old_card"
-NEW_CARD_DIR = "characters/qingzi"
-STICKER_DIR = "characters/qingzi/stickers"
+NEW_CARD_DIR = "characters/example"
+STICKER_DIR = "characters/example/stickers"
 DB_SRC = "data/server-companion.db"
 WORK_DB_OLD = "data/ab_work_old.db"
 WORK_DB_NEW = "data/ab_work_new.db"
@@ -268,7 +268,7 @@ def build_report(raw: Dict[str, Any], old_m: Dict[str, Any], new_m: Dict[str, An
     if failed_calls:
         lines.append(f"- 失败调用：{failed_calls} 条（按纪律重试一次后仍失败，记 [失败]，已从统计分母中剔除）")
     lines.append(f"- 提示词长度（字符数）：旧卡 system {prompts['old']} / 新卡 system {prompts['new']}（探针 1 实测）")
-    lines.append("- 说明：本报告正文中的「新卡 = FIXES9 大修后的 `characters/qingzi/character.json`」；旧卡内容取自 `character.backup-before-fixes9.json`，放入临时目录 `data/ab_old_card/` 由 `Persona.load` 加载。")
+    lines.append("- 说明：本报告正文中的「新卡 = FIXES9 大修后的 `characters/example/character.json`」；旧卡内容取自 `character.backup-before-fixes9.json`，放入临时目录 `data/ab_old_card/` 由 `Persona.load` 加载。")
     lines.append("")
     lines.append("---")
     lines.append("")

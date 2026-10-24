@@ -35,7 +35,7 @@ REPORT_FILE = "data/smoke_fixes17_report.json"
 # 不能拿生产目录的图当代价。键名→文件名映射改取生产 index——workdir 那份是改名前的历史副本，
 # 用它会拿着新键名找不到旧文件。
 WORKDIR = "data/sticker_audit_workdir/stickers"
-PROD_DIR = "characters/qingzi/stickers"
+PROD_DIR = "characters/example/stickers"
 INDEX_FILE = os.path.join(PROD_DIR, "index.json")
 
 # 挑三张有代表性的：模板角色（已知含义容易塌）、静物、需要脑补情绪的

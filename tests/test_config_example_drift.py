@@ -69,10 +69,10 @@ class TestThinkingPurposesInExample(unittest.TestCase):
         self.assertIn("life_arc", purposes, "漏了 life_arc 会让主线生成静默退回不思考（E-8）")
         self.assertEqual(sorted(purposes), sorted(LLMConfig.DEFAULT_THINKING_PURPOSES))
 
-    def test_注释不再自称三项(self):
+    def test_注释项数与代码一致(self):
         text = _example_text()
         self.assertNotIn("下列三项", text)
-        self.assertIn("四项", text)
+        self.assertIn("五项", text)
         self.assertIn("life_arc", text.split("thinking_tasks_purposes")[0], "须在列表前写明要含 life_arc")
 
 

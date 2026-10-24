@@ -36,7 +36,7 @@ from companion.replier import Replier, is_inner_narration_line
 
 REPORT_FILE = "data/smoke_fixes19_report.json"
 SANDBOX_DB = "data/smoke_fixes19_sandbox.db"
-DUO_SIM = os.path.join("scripts", "duo_sim.py")
+DUO_SIM = os.path.join("scripts", "sim", "duo_sim.py")
 
 # S1 局第 9 轮的真实翻车原句（整行形态），B 段直接拿它当必含旁白的输入
 REAL_NARRATION = "这人嘴硬，我折回去看看。"

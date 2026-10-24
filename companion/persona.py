@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from companion.lorebook import Lorebook
+
 logger = logging.getLogger(__name__)
 
 # 法定节假日按"周末节奏"匹配作息时使用的星期索引（5 = 周六，与 daily_routine 的 days 约定一致）
@@ -197,6 +199,10 @@ class ChatStyle:
     bad_examples: List[str] = field(default_factory=list)
     # 日常废话流基线示例（可选字段；旧角色卡没有该字段时为空列表）
     plain_examples: List[str] = field(default_factory=list)
+    # 全局正确示范只在阶段 ≤ 这个值时显示（可选；不填 = 所有阶段都显示）。
+    # 全局示范多取自刚认识时的真实聊天，熟了以后还挂着会把语气拉回"相识"，
+    # 这时改由阶段块自己的示范定语气（v5 阶段盲猜：依恋阶段的回复多数被判成相识）
+    good_examples_max_stage: Optional[int] = None
 
 
 @dataclass
@@ -223,6 +229,239 @@ class PersonalMemory:
 
 
 @dataclass
+class AffectionSettings:
+    """角色卡可选字段 affection：这个角色的关系节奏。不填的项用代码默认标定（affection.py）。"""
+
+    start_stage: Optional[int] = None                    # 开局阶段（0~9），覆盖 initial_dims
+    stage_thresholds: Optional[List[float]] = None       # 10 个递增门槛，第一个必须是 0
+    decay_per_day: Optional[Dict[str, float]] = None     # 各维每天衰减点数（只覆盖写了的维）
+
+
+_DIMS = ("warmth", "trust", "intimacy", "intrigue", "patience", "tension")
+
+
+def parse_affection_settings(raw: Any) -> AffectionSettings:
+    """解析卡里的 affection 段；单项不合法就丢掉那一项（打警告），其余照用。"""
+    if not isinstance(raw, dict):
+        return AffectionSettings()
+    out = AffectionSettings()
+    st = raw.get("start_stage")
+    if isinstance(st, int) and not isinstance(st, bool) and 0 <= st <= 9:
+        out.start_stage = st
+    elif st is not None:
+        logger.warning(f"角色卡 affection.start_stage 必须是 0~9 的整数，已忽略：{st!r}")
+    th = raw.get("stage_thresholds")
+    if th is not None:
+        ok = (
+            isinstance(th, list) and len(th) == 10
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in th)
+            and th[0] == 0 and all(a < b for a, b in zip(th, th[1:])) and th[-1] <= 100
+        )
+        if ok:
+            out.stage_thresholds = [float(x) for x in th]
+        else:
+            logger.warning(f"角色卡 affection.stage_thresholds 必须是 10 个从 0 开始严格递增、不超过 100 的数，已忽略：{th!r}")
+    dec = raw.get("decay_per_day")
+    if isinstance(dec, dict):
+        good = {k: float(v) for k, v in dec.items()
+                if k in _DIMS and isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0}
+        if len(good) != len(dec):
+            logger.warning(f"角色卡 affection.decay_per_day 里有不认识的维度或负数，已忽略这些项：{dec!r}")
+        out.decay_per_day = good or None
+    return out
+
+
+def parse_stage_max_drop(raw: Any) -> Optional[int]:
+    """角色卡 stage_max_drop：非负整数（0~9）；缺省/null/非法值 = None（不设地板）。"""
+    if raw is None:
+        return None
+    if isinstance(raw, int) and not isinstance(raw, bool) and 0 <= raw <= 9:
+        return raw
+    logger.warning(f"角色卡 stage_max_drop 必须是 0~9 的整数，已忽略：{raw!r}")
+    return None
+
+
+@dataclass
+class World:
+    """她所在世界的几句话设定（角色卡可选字段 world）。
+
+    代码里的通用提示词只从这里取"她是谁、在哪聊、过不过现实节假日"，
+    不再写死"女大学生/学期/手机QQ"。每项默认值就是改造前写死的原文，
+    所以不填 world 的旧卡，生成的提示词逐字节不变。
+    """
+
+    her_identity: str = "一个女大学生"          # 质检/记忆合并等后台提示词里怎么称呼她
+    life_identity: str = "一个真实的大学生"      # 生活主线生成器里她的身份
+    chat_medium: str = "手机QQ"                 # 你们用什么聊天
+    calendar_label: str = "学期节奏锚点"         # 生活主线里日历锚点的叫法
+    calendar_kind: str = "校历"
+    seed_pool_label: str = "课程、场所、烦恼与乐团规矩"
+    small_things: str = "读书报告、pre、体测预约、琴房抢位、DDL、乐跑打卡、食堂排队、演出走台"
+    title_example: str = "乐团节目审查"
+    stake_example: str = "紧张，低音部那段还没合齐"
+    follow_public_holidays: bool = True          # 是否跟着现实的法定节假日放假/回家
+    date_style: str = "absolute"                 # "relative" = 给她看的日期一律换成"今天/前天/3 天前"（见 datefmt.py）
+    chat_tail: str = "手机聊天"                   # 主聊收尾句"现在像平常{chat_tail}一样"
+    typing_habit: str = "手机打字习惯"            # 主动消息"符合{typing_habit}"
+    holiday_note_short: str = "，今天是法定节假日（学校放假，不上课）"
+    holiday_note_long: str = "，今天是法定节假日（放长假，她不在学校）"
+    long_holiday_activity: str = "放长假中，回老家，不在学校"
+    face_word: str = "QQ"                        # 表情说明里"QQ系统表情"的 QQ
+    face_usage: str = "normal"                   # "rare" = 基本不用小黄脸（一天顶天一两次），默认 normal 保持原样
+
+    # "不适合发语音"的场景词（可选；卡里写了用卡里的，没写 = 代码内置词表）
+    # None 与空元组语义不同：None = 卡没声明（走 tts.BLOCK_KEYWORDS 旧词表），
+    # () = 卡明确声明"没有忙闲场景词"（闸门只保留例外白名单）。
+    voice_busy_words: Optional[Tuple[str, ...]] = None
+    # 「轻忙」场景词（FIXES27，可选）：手上有事但嘴闲着的活动（对账/逛市集/吃火锅…）。
+    # 与 voice_busy_words 的区别：他正在跟她聊的轮次里（awake_override）这些词放行，
+    # 没人聊时（主动消息）照样拦。None = 卡没声明（没有轻忙词，全部照硬拦）。
+    voice_light_busy_words: Optional[Tuple[str, ...]] = None
+
+    @property
+    def relative_dates(self) -> bool:
+        return self.date_style == "relative"
+
+
+# 上面 World 的默认值是改造前写死的原文（校园设定），只留给**没有 world 段的旧卡**用，
+# 保证旧卡提示词逐字节不变。卡里写了 world 段的（新卡），没写到的项一律用下面这套
+# 和角色无关的中性说法，不会再冒出"女大学生/校历/乐团/手机QQ"。
+NEUTRAL_WORLD: Dict[str, Any] = {
+    "her_identity": "她",
+    "life_identity": "一个有自己日子要过的人",
+    "chat_medium": "聊天软件",
+    "calendar_label": "近期安排",
+    "calendar_kind": "日程",
+    "seed_pool_label": "她日常的事务、常去的地方和小烦恼",
+    "small_things": "手头的小差事、约好的事、日常的小麻烦",
+    "title_example": "月底要交的一件差事",
+    "stake_example": "有点烦，还没弄完",
+    "chat_tail": "聊天",
+    "typing_habit": "打字聊天的习惯",
+    "holiday_note_short": "，今天是法定节假日",
+    "holiday_note_long": "，今天是法定节假日（放长假）",
+    "long_holiday_activity": "放长假中",
+    "face_word": "",
+    "face_usage": "normal",
+}
+
+
+# 睡眠类作息词：人在睡觉是不可能回消息的——所以他正在跟她聊的轮次里，
+# 作息表命中这些词说明"该睡的点上她其实醒着"（熬夜/被吵醒），而不是真睡着。
+# 用途：①语音闸门的作息腿在对话中轮次对睡眠词放行（tts.activity_allows_voice
+# 的 awake_override）；②提示词里的作息文案加"你其实醒着"注记（assembler），
+# 修掉"她说没睡、系统当她睡了"的自相矛盾（生产实测 2026-10-23：她 00:20 说
+# "我压根没睡"，但语音闸门整夜因"睡着"关闭）。
+SLEEP_WORDS: Tuple[str, ...] = ("睡着", "赖床", "睡下", "就寝", "入睡", "午睡", "打呼噜")
+
+
+def is_sleep_activity(activity: str) -> bool:
+    """作息文案是否命中睡眠类词（与 SLEEP_WORDS 同一份口径）。"""
+    text = (activity or "").strip()
+    return any(w in text for w in SLEEP_WORDS)
+
+
+def parse_voice_busy_words(raw: Any) -> Optional[Tuple[str, ...]]:
+    """解析卡里 world.voice_busy_words："此刻不方便说话"的活动词。
+
+    None = 卡里没写（调用方回落到 tts.BLOCK_KEYWORDS 内置词表）；
+    非空元组 = 用卡里的词；空元组 = 卡明确声明没有这类词。
+    数组里非字符串/空白成员逐条跳过并告警；整体类型不认识按"没写"处理，
+    不让一个手滑把语音闸门整条弄失效。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        logger.warning(
+            f"[Persona] world.voice_busy_words 不是数组（{type(raw).__name__}），按未声明处理"
+        )
+        return None
+    words = tuple(str(x).strip() for x in raw if isinstance(x, str) and x.strip())
+    if len(words) != len(raw):
+        logger.warning(
+            f"[Persona] world.voice_busy_words 含 {len(raw) - len(words)} 条非字符串/空白成员，已跳过"
+        )
+    return words
+
+
+def build_world(world_data: Any) -> World:
+    """卡里没有 world 段 → 旧卡默认（原文）；有 world 段 → 中性默认 + 卡里写的。"""
+    if not isinstance(world_data, dict) or not world_data:
+        return World()
+    fields = World.__dataclass_fields__
+    merged = {
+        **NEUTRAL_WORLD,
+        **{
+            k: v
+            for k, v in world_data.items()
+            if k in fields and k not in ("voice_busy_words", "voice_light_busy_words")
+        },
+    }
+    world = World(**merged)
+    world.voice_busy_words = parse_voice_busy_words(world_data.get("voice_busy_words"))
+    # FIXES27：轻忙词表与忙闲词表同一份解析纪律（非数组按未声明、非字符串成员跳过）
+    world.voice_light_busy_words = parse_voice_busy_words(
+        world_data.get("voice_light_busy_words")
+    )
+    return world
+
+
+@dataclass
+class UserProfile:
+    """跟她聊天的那个人（人物档案）。角色卡里用 {user_name} {user_given_name}
+    {user_address} 占位，加载时用这里的值填进去；换人只改档案，换角色只换卡。"""
+
+    name: str = ""
+    given_name: str = ""
+    address: str = ""            # 她平时怎么叫他；空 = 用卡里的 user_address
+    identity: str = "一个男生（同校朋友）"   # 后台提示词里怎么称呼他（老档案没写时的原文）
+
+    @classmethod
+    def load(cls, path: str) -> "UserProfile":
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return cls.from_dict(d)
+
+    @classmethod
+    def from_dict(cls, d: Any) -> "UserProfile":
+        """从 JSON 对象建档案：独立档案文件与卡里的 user 段共用同一结构。"""
+        if not isinstance(d, dict):
+            logger.warning(f"[Persona] 人物档案不是 JSON 对象（{type(d).__name__}），按空档案处理")
+            return cls()
+        return cls(
+            name=str(d.get("name", "")),
+            given_name=str(d.get("given_name", "")),
+            address=str(d.get("address", "")),
+            identity=str(d.get("identity", "") or cls.identity),
+        )
+
+
+PROFILE_PLACEHOLDERS = ("{user_name}", "{user_given_name}", "{user_address}")
+
+
+def fill_profile(obj: Any, profile: UserProfile, address: str) -> Any:
+    """把卡里所有字符串中的人物占位符换成档案里的值（只做这三个替换，不碰别的花括号）。"""
+    if isinstance(obj, str):
+        return (
+            obj.replace("{user_name}", profile.name or address)
+            .replace("{user_given_name}", profile.given_name or profile.name or address)
+            .replace("{user_address}", address)
+        )
+    if isinstance(obj, list):
+        return [fill_profile(x, profile, address) for x in obj]
+    if isinstance(obj, dict):
+        return {k: fill_profile(v, profile, address) for k, v in obj.items()}
+    return obj
+
+
+def find_default_profile(char_dir: str) -> str:
+    """没指定人物档案时的默认位置：项目根目录 profiles/default.json（不存在返回空串）。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "profiles", "default.json")
+    return path if os.path.exists(path) else ""
+
+
+@dataclass
 class Persona:
     name: str
     user_address: str
@@ -242,9 +481,22 @@ class Persona:
     calendar_anchors: List[Tuple[str, str, str]] = field(default_factory=list)
     # 生活主线生成器的取材范围（整段文本）；空串 = 无素材，主线生成整条跳过（见 arcs.py）。
     life_arc_seed_pool: str = ""
+    world: World = field(default_factory=World)
+    user: UserProfile = field(default_factory=UserProfile)
+    # 阶段地板：关系阶段最多比"历史最高阶段"低几阶（如 1 = 老朋友一个月不聊最多退一阶，
+    # 不会退回陌生人）。None = 不设地板（旧行为：阶段完全跟着复合分走）。见 affection.resolve_stage。
+    stage_max_drop: Optional[int] = None
+    affection: AffectionSettings = field(default_factory=AffectionSettings)
+    lorebook: Lorebook = field(default_factory=Lorebook)
 
     @classmethod
-    def load(cls, char_dir: str) -> Persona:
+    def load(cls, char_dir: str, user_profile: str = "") -> Persona:
+        """user_profile：人物档案路径，优先级 config 显式指定 > 卡里的 user 段 > default.json。
+
+        · 非空 = config 显式写了 [character].user_profile，照用（旧行为）；
+        · 空但卡顶层有 user 对象 = 档案内嵌在卡里，换角色只交一张卡；
+        · 都没有 = 卡里用了占位符时找 profiles/default.json（旧卡行为不变）。
+        """
         json_path = os.path.join(char_dir, "character.json")
         if not os.path.exists(json_path):
             raise FileNotFoundError(f"角色卡文件不存在: {json_path}")
@@ -252,12 +504,34 @@ class Persona:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        if user_profile:
+            user = UserProfile.load(user_profile)
+        elif isinstance(data.get("user"), dict):
+            user = UserProfile.from_dict(data["user"])
+        else:
+            raw_text = json.dumps(data, ensure_ascii=False)
+            profile_path = (
+                find_default_profile(char_dir)
+                if any(ph in raw_text for ph in PROFILE_PLACEHOLDERS)
+                else ""
+            )
+            user = UserProfile.load(profile_path) if profile_path else UserProfile()
+        address = user.address or str(data.get("user_address", "") or "你")
+        data = fill_profile(data, user, address)
+        data["user_address"] = address
+        world = build_world(data.get("world"))
+
         chat_style_data = data.get("chat_style", {})
         chat_style = ChatStyle(
             rules=list(chat_style_data.get("rules", [])),
             good_examples=list(chat_style_data.get("good_examples", [])),
             bad_examples=list(chat_style_data.get("bad_examples", [])),
             plain_examples=list(chat_style_data.get("plain_examples", [])),
+            good_examples_max_stage=(
+                int(chat_style_data["good_examples_max_stage"])
+                if chat_style_data.get("good_examples_max_stage") is not None
+                else None
+            ),
         )
 
         stages_raw = data.get("stages", [])
@@ -300,10 +574,15 @@ class Persona:
 
         # 可选字段：卡里没填就落到"功能关掉"的默认值（旧卡零改动、行为不炸）。
         long_holiday_activity = str(
-            data.get("long_holiday_activity", "") or DEFAULT_LONG_HOLIDAY_ACTIVITY
-        ).strip() or DEFAULT_LONG_HOLIDAY_ACTIVITY
+            data.get("long_holiday_activity", "") or world.long_holiday_activity
+        ).strip() or world.long_holiday_activity
         calendar_anchors = parse_calendar_anchors(data.get("calendar_anchors"))
         life_arc_seed_pool = parse_life_arc_seed_pool(data.get("life_arc_seed_pool"))
+
+        aff_raw = data.get("affection") if isinstance(data.get("affection"), dict) else {}
+        affection = parse_affection_settings(aff_raw)
+        # stage_max_drop 可写在 affection 段里，也兼容早先的顶层写法
+        stage_max_drop = parse_stage_max_drop(aff_raw.get("stage_max_drop", data.get("stage_max_drop")))
 
         initial_dims = {
             "warmth": float(data.get("initial_dims", {}).get("warmth", 40.0)),
@@ -329,6 +608,11 @@ class Persona:
             long_holiday_activity=long_holiday_activity,
             calendar_anchors=calendar_anchors,
             life_arc_seed_pool=life_arc_seed_pool,
+            world=world,
+            user=user,
+            stage_max_drop=stage_max_drop,
+            affection=affection,
+            lorebook=Lorebook.load(char_dir, data),
         )
 
     def calendar_anchor_note(self, date_str: str, lookahead: int = 1) -> str:

@@ -223,7 +223,7 @@ async def main(args=None):
     db = Database(db_path)
     await db.init_tables()
     config = Config.load("config.example.toml")
-    persona_dir = "characters/qingzi" if os.path.exists("characters/qingzi") else config.character.path
+    persona_dir = "characters/example" if os.path.exists("characters/example") else config.character.path
     persona = Persona.load(persona_dir)
     affection = AffectionEngine(db, persona.initial_dims)
     mood = MoodEngine(db)

@@ -233,7 +233,14 @@ class _FakeTTS:
     class config:  # noqa: N801 - 对齐 TTSManager.config 的鸭子类型
         max_chars = 60
 
-    async def check_gate(self, activity: str):
+    async def check_gate(
+        self,
+        activity: str = "",
+        awake_override: bool = False,
+        user_requested: bool = False,
+    ):
+        # FIXES27：签名与 TTSManager.check_gate 对齐——handle_turn 现在会传
+        # awake_override/user_requested（对话中轮次恒醒着 + 他点名要语音的判断）。
         return True, "测试桩：闸门恒开"
 
 

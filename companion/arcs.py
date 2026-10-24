@@ -213,10 +213,16 @@ class LifeArcManager:
         if not anchor_note:
             # 查不到锚点（卡里没配锚点 / 当天不在任何区间）不是致命的：
             # 留空让模型只靠"现在几月"判断，仍比没有强
-            anchor_note = "（本条校历锚点缺失，请只按当前月份的一般节奏来定）"
+            anchor_note = f"（本条{self.persona.world.calendar_kind}锚点缺失，请只按当前月份的一般节奏来定）"
 
+        w = self.persona.world
         user_prompt = LIFE_ARC_GENERATE_PROMPT.format(
-            character_core=self.persona.core_description or "（角色卡未提供）",
+            life_identity=w.life_identity, calendar_label=w.calendar_label,
+            calendar_kind=w.calendar_kind, seed_pool_label=w.seed_pool_label,
+            title_example=w.title_example, stake_example=w.stake_example, small_things=w.small_things,
+            character_core=(self.persona.core_description or "（角色卡未提供）") + (
+                f"\n她的世界：{self.persona.lorebook.always}" if self.persona.lorebook.always else ""
+            ),
             current_date=now.strftime("%Y-%m-%d 星期") + "一二三四五六日"[now.weekday()],
             calendar_note=anchor_note,
             seed_pool=seed_pool,

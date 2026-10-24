@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 from datetime import datetime
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
@@ -14,12 +15,22 @@ from companion.assembler import PromptAssembler
 from companion.config import Config, TimingConfig
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
-from companion.observer import Observer
+from companion.observer import MEETUP_HISTORY_TURNS, Observer
 from companion.persona import holiday_span
 from companion.proactive import ProactiveScheduler
 from companion.prompts import VISION_PERCEPTION_PROMPT
+from companion.meetups import MeetupManager
+from companion.reply_check import (
+    CANDIDATE_GRACE_SECONDS,
+    check_reply,
+    gather_candidates,
+    pick_candidate,
+    trim_echo_lead,
+)
 from companion.replier import (
     Replier,
+    count_today_faces,
+    face_daily_budget,
     is_silence_output,
     strip_face_markers,
     typing_text_from_chunks_or_record,
@@ -27,6 +38,85 @@ from companion.replier import (
 from companion.stickers import image_to_base64_data_url
 
 logger = logging.getLogger("companion")
+
+
+def _identities(assembler: Any) -> Dict[str, str]:
+    """质检提示词里她/他的身份，取自角色卡 world 与人物档案；拿不到就用默认说法。"""
+    persona = getattr(assembler, "persona", None)
+    world, user = getattr(persona, "world", None), getattr(persona, "user", None)
+    out: Dict[str, str] = {}
+    if isinstance(getattr(world, "her_identity", None), str):
+        out["her_identity"] = world.her_identity
+    if isinstance(getattr(user, "identity", None), str):
+        out["his_identity"] = user.identity
+    return out
+
+
+# 一步看图时她回复末尾的那行描述。提示词约定写【看到：…】，实际模型会换括号写法
+# （（看到：…）、(看到: …)、『看到：…』），也可能把括号写反（【看到：…)）或漏写闭合符。
+# 只认"括号紧跟看到+冒号"这一形态：正文里不带括号的"看到"（"我刚看到你说的"）不命中。
+_SEEN_NOTE_START_RE = re.compile(r"[【\[（(『「][ \t]*看到[ \t]*[：:][ \t]*")
+_SEEN_NOTE_OPENERS = frozenset("【[（(『「")
+_SEEN_NOTE_CLOSERS = frozenset("】]）)』」")
+
+# FIXES27：他这一句是不是在讨要语音（"发个语音""让我听听你""唱一句"）。
+# 只给作息闸门开一个口子：开关关着、日上限到了，点名也发不出去（见 TTSManager.check_gate）。
+_VOICE_REQUEST_RE = re.compile(r"语音|声音|听听你|唱[一句段个首]")
+
+
+def _seen_note_span(text: str, start: int) -> Tuple[str, int]:
+    """从描述正文起点找这一行描述的边界，返回 (描述正文, 描述结束下标)。
+
+    描述里的嵌套括号按深度计数（"红油火锅（微辣），冒着热气"不会在第一个）收口），
+    括号写反了（【看到：…)）也在那个闭合符收口；整行一个闭合符都没有 = 漏写，
+    按"这行写在回复末尾"的约定一路剥到文本末尾——描述残尾漏到屏幕上就是上屏事故，
+    宁可多剥也不漏。收口处紧跟的一串闭合符/空白一并吃掉，避免留下" ）"残渣。
+    """
+    depth, i = 1, start
+    while i < len(text):
+        ch = text[i]
+        if ch == "\n":
+            break
+        if ch in _SEEN_NOTE_OPENERS:
+            depth += 1
+        elif ch in _SEEN_NOTE_CLOSERS:
+            depth -= 1
+            if depth <= 0:
+                end = i + 1
+                while end < len(text) and (text[end] in _SEEN_NOTE_CLOSERS or text[end] in " \t"):
+                    end += 1
+                if end < len(text) and text[end] != "\n":
+                    end = i + 1
+                return text[start:i], end
+        i += 1
+    closers = "".join(_SEEN_NOTE_CLOSERS)
+    return text[start:].rstrip().rstrip(closers).rstrip(), len(text)
+
+
+def split_seen_note(text: str) -> Tuple[str, str]:
+    """剥掉回复里的【看到：…】描述行，返回 (发给他的回复, 图片描述)。有多行取最后一条。"""
+    text = text or ""
+    spans: List[Tuple[int, int, str]] = []
+    pos = 0
+    while True:
+        m = _SEEN_NOTE_START_RE.search(text, pos)
+        if m is None:
+            break
+        note, end = _seen_note_span(text, m.end())
+        spans.append((m.start(), end, note))
+        pos = end
+    if not spans:
+        return text, ""
+
+    kept, cursor = [], 0
+    for start, end, _ in spans:
+        kept.append(text[cursor:start])
+        cursor = end
+    kept.append(text[cursor:])
+    # 剥完的行尾空白、只剩空白的行、行首残留缩进都不该上屏
+    lines = (line.strip() for line in "".join(kept).split("\n"))
+    reply = "\n".join(line for line in lines if line)
+    return reply, spans[-1][2].strip()[:120]
 
 
 def _sync_image_desc_to_batch(batch: List[Dict[str, Any]], user_text: str) -> None:
@@ -130,6 +220,20 @@ class TurnHandler:
         elapsed = (datetime.now() - last_dt).total_seconds()
         return elapsed >= window
 
+    def _holidays(self) -> List[str]:
+        """节假日走 assembler 的门控来源：follow_public_holidays=false 时它返回空表。"""
+        getter = getattr(self.assembler, "get_holidays", None)
+        if not callable(getter):
+            return []
+        try:
+            holidays = getter()
+        except Exception as e:
+            logger.warning(f"[Timing] 读取节假日列表失败，按无节假日处理: {e}")
+            return []
+        if not isinstance(holidays, list):
+            return []
+        return [d for d in holidays if isinstance(d, str)]
+
     def current_busy_state(self) -> Tuple[str, bool]:
         """此刻她忙不忙：返回 (活动文案, is_busy)。
 
@@ -141,12 +245,7 @@ class TurnHandler:
         if persona is None or not hasattr(persona, "get_current_activity_detail"):
             return "未知（取不到作息表）", False
         now_dt = datetime.now()
-        try:
-            holidays = self.config.get_holidays()
-        except Exception as e:
-            logger.warning(f"[Timing] 读取节假日列表失败，按无节假日处理: {e}")
-            holidays = []
-        span = holiday_span(now_dt.strftime("%Y-%m-%d"), holidays)
+        span = holiday_span(now_dt.strftime("%Y-%m-%d"), self._holidays())
         return persona.get_current_activity_detail(
             now_dt.hour, now_dt.weekday(), holiday_span=span
         )
@@ -257,7 +356,7 @@ class TurnHandler:
         except (TypeError, ValueError):
             return 60
 
-    async def _check_voice_gate(self) -> Tuple[bool, str]:
+    async def _check_voice_gate(self, user_text: str = "") -> Tuple[bool, str]:
         """语音能不能用：开关 → 日上限 → 作息场景（FIXES22 任务3 第1条）
 
         作息文案取**这一轮提示词里已经算好的那一份**（`last_assembled_prompt` 里的
@@ -265,6 +364,12 @@ class TurnHandler:
         这里再算一遍要复现那些参数才对得上。取不到就按"允许"处理（宁可多试一次，
         合成失败也会降级）。
         拿不到 TTSManager（老调用方/测试）时一律 False：默认关 = 安全。
+
+        FIXES27：`awake_override=True` 是这里的**语义常量**，不是开关——本方法只在
+        handle_turn 里被调用，也就是他正在跟她聊的轮次，她不可能是睡着的；卡里写
+        "在缘缘庄睡着"只是作息表的措辞，不能当成"她没空说话"（生产上它把语音整夜关死）。
+        `user_requested` 看他这句话有没有点名要语音：点名了就再开作息那扇门，
+        但开关与日上限照常拦。
         """
         tts = getattr(self, "tts", None)
         if tts is None:
@@ -274,13 +379,17 @@ class TurnHandler:
             activity = await self._current_activity_text()
         except Exception as e:  # 作息查不到不该挡住主流程
             logger.debug(f"[Timing] 取作息文案失败（语音闸门按允许处理）: {e}")
-        return await tts.check_gate(activity)
+        return await tts.check_gate(
+            activity,
+            awake_override=True,
+            user_requested=bool(_VOICE_REQUEST_RE.search(user_text or "")),
+        )
 
     async def _current_activity_text(self) -> str:
         """当前活动文案（与 assembler 同一份口径：节假日段长也算进去）"""
         now_dt = datetime.now()
         today = now_dt.strftime("%Y-%m-%d")
-        span = holiday_span(today, self.config.get_holidays())
+        span = holiday_span(today, self._holidays())
         return self.assembler.persona.get_current_activity(
             now_dt.hour, now_dt.weekday(), holiday_span=span
         )
@@ -328,7 +437,10 @@ class TurnHandler:
                 await self.send_chunk_fn({"type": "text", "content": err})
                 return
 
-            if self.config.llm.vision_model:
+            if getattr(self.config.reply, "vision_direct", False) is True:
+                # 一步看图：图直接给主聊模型，描述等她回完从【看到：…】里取（见第 4.1 步）
+                image_data_url = data_url
+            elif self.config.llm.vision_model:
                 try:
                     logger.info("[Bot] 使用 Flash 视觉模型提取图片场景细节...")
                     desc_resp = await self.gateway.chat(
@@ -357,16 +469,34 @@ class TurnHandler:
 
             # FIXES21：视觉描述也要写回**对应那一条**的编号条目。
             # 不写回的话编号块里那条是空的（她只看到"他发了张图"却不知道是哪一条），
-            # 引用一条空条目没有意义。
-            _sync_image_desc_to_batch(batch, user_text)
+            # 引用一条空条目没有意义。一步看图时描述要等回复出来，到第 4.1 步再写回
+            if not image_data_url:
+                _sync_image_desc_to_batch(batch, user_text)
+
+        # 2.9 线下见面：到点的约定先补纪要，这样他这句"昨天那锅底"她接得住（没到点不发 API）
+        meetups = getattr(self.assembler, "meetups", None)
+        if isinstance(meetups, MeetupManager):
+            try:
+                await meetups.process_due()
+            except Exception as e:
+                logger.warning(f"[Bot] 见面纪要处理异常: {e}")
 
         # 3. 提示词组装（编号块由 quote_targets 生成）
         #    FIXES22：**先问语音闸门再组装**——提示词层要不要写语音能力说明，
         #    取决于这一轮闸门开不开（关着时模型连 [voice:] 都不该认识）。
         #    所以闸门结论同时喂给 assemble_messages 与后面的 parse_reply。
-        voice_allowed, voice_why = await self._check_voice_gate()
+        voice_allowed, voice_why = await self._check_voice_gate(user_text)
+        # FIXES27：TTS 装着且开着、闸门却没过（比如真在合练）时，提示词里要告诉她
+        # "这会儿只能打字"——否则她会答应了发语音却只发出文字，自己还浑然不觉。
+        # getattr 防御：老测试装配的 handler 没有 tts 属性。
+        tts_cfg = getattr(getattr(self, "tts", None), "config", None)
+        voice_gated_note = bool(getattr(tts_cfg, "enabled", False))
         messages, sys_prompt = await self.assembler.assemble_messages(
-            user_text, image_data_url, numbered_batch=batch, voice_allowed=voice_allowed
+            user_text,
+            image_data_url,
+            numbered_batch=batch,
+            voice_allowed=voice_allowed,
+            voice_gated_note=voice_gated_note,
         )
         logger.info(f"[Bot] 语音闸门: {'可用' if voice_allowed else '不可用'}（{voice_why}）")
 
@@ -375,13 +505,38 @@ class TurnHandler:
         # 这条要求在本实现里由结构保证（开 typing 的代码在生成之后），不存在开着打字
         # 走进兜底分支的路径。
         reply_parts = []
-        try:
+        # [reply].candidates > 1：并行生成几条，挑没复述/点评/比喻的那条（等待时间≈最慢的那条）
+        n_cand = getattr(self.config.reply, "candidates", 1)
+        n_cand = n_cand if isinstance(n_cand, int) and n_cand > 1 else 1
+        if image_data_url:
+            n_cand = 1  # 一步看图：同一张图看三遍费用翻三倍，这一轮只生成一条
+
+        async def _generate_one() -> str:
+            parts = []
             async for piece in self.gateway.stream_chat(
                 messages=messages,
                 model=target_model,
                 purpose="main_chat",
             ):
-                reply_parts.append(piece)
+                parts.append(piece)
+            return "".join(parts)
+
+        try:
+            if n_cand > 1:
+                texts = await gather_candidates(
+                    _generate_one, n_cand, grace=CANDIDATE_GRACE_SECONDS
+                )
+                picked, cand_info = pick_candidate(
+                    user_text, texts,
+                    tiebreak=getattr(self.config.reply, "candidate_tiebreak", "warm"),
+                )
+                logger.info(
+                    f"[Bot] 多候选择优: 收到 {len(texts)}/{n_cand} 条，毛病数 {cand_info['flaws']}"
+                    f" → 选第 {cand_info['picked'] + 1} 条"
+                )
+                reply_parts = [picked]
+            else:
+                reply_parts = [await _generate_one()]
         except Exception as e:
             logger.error(f"[Bot] 调用 LLM 异常: {e}")
             # 兜底文案不能含括号/星号，否则会被旁白剥离正则整块剥除导致用户端静默
@@ -390,15 +545,44 @@ class TurnHandler:
         full_reply = "".join(reply_parts).strip()
         logger.info(f"[Bot] LLM 回复全文: {full_reply}")
 
+        # 4.1 一步看图：剥掉【看到：…】，描述并进他这句话的记录（下一轮和观察者靠它知道他发过什么）
+        if image_data_url:
+            full_reply, seen = split_seen_note(full_reply)
+            if seen:
+                user_text = f"{user_text} [发来一张照片：{seen}]".strip()
+            else:
+                user_text = f"{user_text} [发来一张图片]".strip()
+            _sync_image_desc_to_batch(batch, user_text)
+
+        # 4.4 首泡回声裁剪（[reply].trim_echo，默认关）：第一个气泡在复述/点评他、后面还有话就删掉它
+        if getattr(self.config.reply, "trim_echo", False) is True and reply_parts != ["刚刚走神了……你再说一次？"]:
+            full_reply, cut = trim_echo_lead(user_text, full_reply)
+            if cut:
+                logger.info(f"[Bot] 首泡回声裁剪: 《{cut}》")
+
+        # 4.5 生成后质检（[reply].self_check，默认关）：抓"助手腔"并改写；失败一律照发原稿
+        if getattr(self.config.reply, "self_check", False) is True and reply_parts != ["刚刚走神了……你再说一次？"]:
+            full_reply, _ = await check_reply(
+                self.gateway, user_text, full_reply,
+                timeout=getattr(self.config.reply, "self_check_timeout", 10.0),
+                **_identities(self.assembler),
+            )
+
         # 5. 回复管道切段与打字延迟发送
         #    FIXES21：把批次传下去，编号才能翻译成 message_id
         #    FIXES22：voice_allowed 是第 3 步问出来的同一份结论（两次问会各读一次
         #    日计数；同一轮内不会变，用缓存的那份）。
+        # 小黄脸日额度（卡 world.face_usage = "rare"）：问库拿今日已用量换算剩余额度
+        face_budget = None
+        if getattr(self.assembler.persona.world, "face_usage", "normal") == "rare":
+            used_faces = await count_today_faces(self.memory.db)
+            face_budget = face_daily_budget(self.assembler.persona.world, used_faces)
         chunks, clean_record_text = self.replier.parse_reply(
             full_reply,
             quote_targets=batch,
             voice_allowed=voice_allowed,
             voice_max_chars=self._voice_max_chars(),
+            face_budget=face_budget,
         )
         if self.replier.is_silence_decision(full_reply, batch):
             # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，
@@ -439,10 +623,18 @@ class TurnHandler:
         await self.memory.reinforce_memories(user_text)
 
         # 8. 观察者异步结算（不阻塞）
+        #    见面识别：约定常跨轮说完（她提议地点、他下一轮才定时间），把最近几轮原文一起递过去，
+        #    观察者才看得到地点和事。读失败不影响结算（observer 侧拿不到就按本轮两句判）。
+        try:
+            recent_turns = await self.memory.get_recent_turns(limit=MEETUP_HISTORY_TURNS)
+        except Exception as e:
+            logger.warning(f"[Bot] 读取近期轮次失败，见面识别按本轮两句判: {e}")
+            recent_turns = None
         asyncio.create_task(
             self.observer.settle_turn(
                 user_message=user_text,
                 assistant_reply=clean_record_text,
                 user_image_path=image_path,
+                recent_turns=recent_turns,
             )
         )

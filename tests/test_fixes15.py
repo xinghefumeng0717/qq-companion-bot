@@ -761,6 +761,46 @@ class TestGracefulDegradation(unittest.TestCase):
         self.assertIn("未知", activity)
 
 
+class TestHolidayGate(unittest.TestCase):
+    """卡不过现实节假日（follow_public_holidays=false）时，忙闲判定与语音闸门
+    用的活动文案都不许按现实节假日走：节假日一律取 assembler 的门控来源。"""
+
+    _HOLIDAYS = ["2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07"]
+
+    def _run(self, gated_holidays):
+        async def _go():
+            db = await make_db()
+            try:
+                events: List[tuple] = []
+                handler, _ = _handler(
+                    db, pieces=["好呀"], timing=TimingConfig(), events=events
+                )
+                handler.assembler.get_holidays = MagicMock(return_value=gated_holidays)
+                with patch("companion.turn_handler.datetime", _FakeDatetime), patch.object(
+                    Config, "get_holidays", return_value=self._HOLIDAYS
+                ):
+                    return (
+                        handler.current_busy_state(),
+                        await handler._current_activity_text(),
+                    )
+            finally:
+                await close_db(db)
+
+        return asyncio.run(_go())
+
+    def test_卡不过节假日时按平日作息判忙(self):
+        (activity, is_busy), activity_text = self._run([])
+        self.assertEqual(activity, "在琴房练琴")
+        self.assertTrue(is_busy)
+        self.assertEqual(activity_text, "在琴房练琴")
+
+    def test_卡过节假日时长假照常生效(self):
+        (activity, is_busy), activity_text = self._run(self._HOLIDAYS)
+        self.assertEqual(activity, DEFAULT_LONG_HOLIDAY_ACTIVITY)
+        self.assertFalse(is_busy)
+        self.assertEqual(activity_text, DEFAULT_LONG_HOLIDAY_ACTIVITY)
+
+
 # ==========================================
 # 7. 沉默权优先
 # ==========================================

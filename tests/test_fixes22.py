@@ -74,8 +74,8 @@ class TestDefaultOff(unittest.TestCase):
     def test_默认配置是关的(self):
         cfg = TTSConfig()
         self.assertFalse(cfg.enabled)
-        # 日上限 3→8→30：所有者 2026-10-05 二次拍板（30 ≈ 感觉不到存在，保险丝保留）
-        self.assertEqual(cfg.daily_limit, 30)
+        # 日上限 3→8→30→60：所有者 2026-10-22 三次拍板（克隆音色定稿，要她多说；保险丝保留）
+        self.assertEqual(cfg.daily_limit, 60)
         # 60→90：≈30 秒，仍低于 NapCat >35s 失败区
         self.assertEqual(cfg.max_chars, 90)
         self.assertEqual(cfg.voice, "zh-CN-XiaoxiaoNeural")
@@ -131,6 +131,7 @@ class TestDefaultOff(unittest.TestCase):
         cases = list(taught) + [
             "在呢[voice:]睡啦[/voice]",      # 带右括号写法
             "在呢[voice:睡啦[/voice]",        # 无右括号写法
+            "在呢[voice:睡啦][/voice]",       # 正文后多一个右括号（2026-10-23 生产事故）
             "在呢[voice：睡啦[/voice]",        # 全角冒号
             "在呢[voice: 睡啦 [/voice]",      # 带空格
         ]
@@ -139,6 +140,19 @@ class TestDefaultOff(unittest.TestCase):
                 chunks, record = _replier().parse_reply(raw, voice_allowed=True)
                 self.assertIn("voice", _types(chunks),
                               f"这种写法没被认出来：{raw}")
+
+    def test_提示词只示范一种语音写法(self):
+        import re as _re
+
+        from companion.prompts import VOICE_PROMPT_BLOCK
+
+        openings = list(_re.finditer(r"\[voice[:：]", VOICE_PROMPT_BLOCK, _re.IGNORECASE))
+        self.assertTrue(openings)
+        for opening in openings:
+            self.assertEqual(
+                VOICE_PROMPT_BLOCK[opening.end():opening.end() + 1], "]",
+                "提示词只能示范 [voice:]正文[/voice]，避免模型混合不同写法",
+            )
 
 
 # ==========================================
@@ -165,23 +179,72 @@ class TestVoiceSyntax(unittest.TestCase):
         self.assertEqual(_types(chunks), ["voice"])
         self.assertEqual(record, "（语音消息）睡啦 明天聊")
 
-    def test_未闭合当普通文字(self):
+    def test_生产事故_正文后右括号也发语音(self):
+        chunks, record = _replier().parse_reply(
+            "嗯，去吧\n[voice:晚安，明天再聊][/voice]", voice_allowed=True
+        )
+        self.assertEqual(_types(chunks), ["text", "voice"])
+        self.assertEqual(chunks[1]["content"], "晚安，明天再聊")
+        self.assertEqual(record, "嗯，去吧\n（语音消息）晚安，明天再聊")
+
+    def test_未闭合剥标记留正文(self):
         raw = "在呢[voice:刚练完琴 你说啥"
         chunks, record = _replier().parse_reply(raw, voice_allowed=True)
         self.assertEqual(_types(chunks), ["text"])
-        self.assertEqual(record, raw)
+        self.assertEqual(record, "在呢刚练完琴 你说啥")
 
-    def test_只有闭标记当普通文字(self):
+    def test_只有闭标记剥掉留正文(self):
         raw = "在呢[/voice]你说啥"
         chunks, record = _replier().parse_reply(raw, voice_allowed=True)
         self.assertEqual(_types(chunks), ["text"])
-        self.assertEqual(record, raw)
+        self.assertEqual(record, "在呢你说啥")
 
-    def test_空内容不建语音段(self):
+    def test_空内容不建语音段也不漏标记(self):
         raw = "在呢[voice:][/voice]"
         chunks, record = _replier().parse_reply(raw, voice_allowed=True)
         self.assertEqual(_types(chunks), ["text"])
+        self.assertEqual(record, "在呢")
+
+    def test_残留语音语法永远不上屏(self):
+        for allowed in (True, False):
+            for raw in (
+                "[voice:晚安",
+                "[VOICE:晚安",
+                "[voice：晚安",
+                "[voice]晚安",
+                "[voice ]晚安",
+                "[voice :晚安",
+                "[voice晚安[/voice]",
+                "[voice:晚安[/voice ]",
+                "在呢[ /voice]晚安",
+                "[voice:][/voice]",
+                "[voice:今天[face:doge]好累[/voice]",
+            ):
+                with self.subTest(raw=raw, allowed=allowed):
+                    _chunks, record = _replier().parse_reply(raw, voice_allowed=allowed)
+                    self.assertNotRegex(record, r"(?i)\[\s*/?\s*voice")
+                    self.assertTrue(all(c.get("content", "x") for c in _chunks), "兜底制造了空气泡")
+                    if "晚安" in raw:
+                        self.assertIn("晚安", record)
+                    if "今天" in raw:
+                        self.assertIn("今天", record)
+                        self.assertIn("好累", record)
+
+    def test_英文普通文本不误伤(self):
+        raw = "I like [voices] and voice"
+        _chunks, record = _replier().parse_reply(raw, voice_allowed=True)
         self.assertEqual(record, raw)
+
+    def test_空语音本身不制造空气泡(self):
+        chunks, record = _replier().parse_reply("[voice:][/voice]", voice_allowed=True)
+        self.assertEqual(chunks, [])
+        self.assertEqual(record, "")
+
+    def test_残留兜底不破坏换行硬边界(self):
+        chunks, _ = _replier().parse_reply("在呢\n[/voice][face:doge]", voice_allowed=True)
+        self.assertEqual(_types(chunks), ["text", "face"])
+        chunks, _ = _replier().parse_reply("在呢[/voice][face:doge]", voice_allowed=True)
+        self.assertEqual(_types(chunks), ["combo"])
 
     def test_中文冒号容错(self):
         chunks, _ = _replier().parse_reply("[voice：睡了[/voice]", voice_allowed=True)
@@ -362,6 +425,8 @@ class TestDegradation(unittest.TestCase):
             ("在呢[voice:刚练完 手指都快断了[/voice]你说啥", "在呢刚练完 手指都快断了你说啥"),
             ("[voice:睡啦 明天聊[/voice]", "睡啦 明天聊"),
             ("我在[voice:练琴呢[/voice]门口", "我在练琴呢门口"),
+            ("在呢[voice:刚练完][/voice]你说啥", "在呢刚练完你说啥"),
+            ("[voice:晚安，明天再聊][/voice]", "晚安，明天再聊"),
         ):
             with self.subTest(raw=raw):
                 chunks, record = _replier().parse_reply(raw, voice_allowed=False)
@@ -730,7 +795,9 @@ class TestVoicePrompt(unittest.TestCase):
     def test_纪律句含三个要点(self):
         # 2026-10-05 所有者二次拍板：日上限 8→30，"一天最多几条"从提示词撤下
         # （与放宽后的上限矛盾），次数纪律改由机制层 daily_limit 单独承担
-        for kw in ("一小段", "适合说话的时候", "不是把整段回复念出来"):
+        # FIXES27（2026-10-23 所有者拍板「想多听听她的语音」）：使用时机从
+        # 「只在躺下/走路/睡前」放宽为「情绪到位就用」，断言同步换新措辞
+        for kw in ("一小段", "情绪到位", "不是把整段回复念出来"):
             with self.subTest(kw=kw):
                 self.assertIn(kw, VOICE_USAGE_RULES)
 
@@ -768,7 +835,7 @@ class TestVoicePrompt(unittest.TestCase):
 
         prompt = asyncio.run(run())
         self.assertIn("[voice:", prompt)
-        self.assertIn("适合说话的时候", prompt)
+        self.assertIn("情绪到位", prompt)  # FIXES27：措辞放宽后断言跟着换
 
     def test_她此刻仍独立成行(self):
         """FIXES21 踩过：【她此刻】被插进来的块挤到行中间，既有守卫报过一次。"""

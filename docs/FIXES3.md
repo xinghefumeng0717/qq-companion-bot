@@ -144,4 +144,4 @@ tasks = "doubao-seed-2-1-turbo-260628"
 2. 全量测试（含新增）通过；
 3. 更新 README：chat/reset 用法、模型预设切换方法；
 4. 报告未能完成或需人工决定的事项；
-5. **不要**动 characters/qingzi/character.json（角色卡另有专人维护）。
+5. **不要**动 characters/example/character.json（角色卡另有专人维护）。

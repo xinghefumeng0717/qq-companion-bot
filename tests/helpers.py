@@ -159,7 +159,7 @@ def card_path() -> str:
 
     优先级：
     1. 环境变量 QQC_TEST_CARD（显式指定，外人环境可设 characters/example）；
-    2. characters/qingzi 存在则用它（所有者本机，保持原有覆盖）；
+    2. characters/example 存在则用它（所有者本机，保持原有覆盖）；
     3. 回落 characters/example（仓库自带的公开模板卡）。
     """
     env_card = os.environ.get("QQC_TEST_CARD", "").strip()

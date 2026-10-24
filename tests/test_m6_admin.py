@@ -119,5 +119,60 @@ class TestM6Admin(AioHTTPTestCase):
         self.assertIn("里程碑时间线:", text)
 
 
+class TestM6AdminEndfield(AioHTTPTestCase):
+    """同一批页面在 endfield 主题下换成新组件：中文小标题保留，旧样式表不再出现。"""
+
+    async def get_application(self):
+        self.test_db_path = f"data/test_m6_ef_{id(self)}.db"
+        self.db = await make_db(self.test_db_path)
+        stack = make_engine_stack(
+            self.db,
+            include_proactive=True,
+            include_admin=True,
+            admin_config=AdminConfig(host="127.0.0.1", port=8080, theme="endfield"),
+        )
+        self.admin = stack.admin
+        app = web.Application()
+        app.router.add_get("/", self.admin.handle_overview)
+        app.router.add_get("/memory", self.admin.handle_memory)
+        app.router.add_get("/debug", self.admin.handle_debug)
+        app.router.add_get("/costs", self.admin.handle_costs)
+        app.router.add_get("/stickers", self.admin.handle_stickers)
+        app.router.add_get("/logs", self.admin.handle_logs)
+        app.router.add_get("/admin", self.admin.handle_admin)
+        return app
+
+    async def tearDownAsync(self):
+        await close_db(self.db, self.test_db_path)
+        await super().tearDownAsync()
+
+    @unittest_run_loop
+    async def test_五页中文小标题在新主题下保留(self):
+        checks = {
+            "/costs": ("总费用汇总", "按业务用途分组统计", "最近 20 次调用明细"),
+            "/debug": ("观察者打分分布", "最近一次完整 System Prompt"),
+            "/stickers": ("表情包图库",),
+            "/logs": ("运行日志",),
+            "/admin": ("管理控制台", "立即备份数据库"),
+        }
+        for path, anchors in checks.items():
+            with self.subTest(path=path):
+                resp = await self.client.request("GET", path)
+                self.assertEqual(resp.status, 200)
+                text = await resp.text()
+                self.assertIn("theme-endfield", text)
+                for anchor in anchors:
+                    self.assertIn(anchor, text)
+
+    @unittest_run_loop
+    async def test_新主题页面不再背旧手账样式表(self):
+        for path in ("/debug", "/costs", "/stickers", "/logs", "/admin"):
+            with self.subTest(path=path):
+                text = await (await self.client.request("GET", path)).text()
+                self.assertNotIn(".section-block", text)
+                self.assertNotIn(".diary-tape", text)
+                self.assertNotIn(' style="', text)
+
+
 if __name__ == "__main__":
     unittest.main()
