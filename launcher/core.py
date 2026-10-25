@@ -1,4 +1,4 @@
-"""青梓小窝桌面控制台 核心纯逻辑模块 (launcher/core.py)
+"""QQ 伴侣小窝桌面控制台 核心纯逻辑模块 (launcher/core.py)
 无 GUI 依赖的纯函数：状态解析、持久化、命令构造，便于单元测试与自动化验证。
 """
 
@@ -76,9 +76,11 @@ def save_sync_state(file_path: str, state: Dict[str, Any]) -> None:
 def get_backup_command(
     remote_host: str = DEFAULT_REMOTE_HOST,
     remote_path: str = "/opt/qq-companion/data/backup/daily/latest.db",
-    local_dest: str = r"D:\qq-companion\data\backups\\",
+    local_dest: Optional[str] = None,
 ) -> List[str]:
     """生成 SCP 拉取备份的命令行参数列表"""
+    if local_dest is None:
+        local_dest = os.environ.get("QQC_LOCAL_BACKUP_DIR", os.path.join("data", "backups", ""))
     return ["scp", f"{remote_host}:{remote_path}", local_dest]
 
 

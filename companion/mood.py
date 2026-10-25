@@ -5,12 +5,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import random
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 from companion.affection import determine_stage
 from companion.db import Database, STATE_KEY_MOOD, TIME_FORMAT, parse_dt
@@ -76,7 +75,7 @@ class MoodEngine:
     async def save_state(self, state: Dict[str, Any]) -> None:
         await self.db.set_state_json(STATE_KEY_MOOD, state)
 
-    async def get_hours_since_last_chat(self) -> float:
+    async def get_hours_since_last_chat(self, now: Optional[datetime] = None) -> float:
         """获取距机主最近一次发言的小时数（只看 user 行，机器人主动消息不计）"""
         row = await self.db.fetchone(
             "SELECT created_at FROM turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
@@ -85,7 +84,7 @@ class MoodEngine:
             return 0.0
         last_dt = parse_dt(row["created_at"])
         if last_dt:
-            delta_sec = (self._now() - last_dt).total_seconds()
+            delta_sec = ((now or self._now()) - last_dt).total_seconds()
             return max(0.0, delta_sec / 3600.0)
         return 0.0
 

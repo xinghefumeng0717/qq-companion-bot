@@ -18,7 +18,7 @@
     ./venv/Scripts/python.exe scripts/audit/apply_sticker_audit.py             # 真写
     ./venv/Scripts/python.exe scripts/audit/apply_sticker_audit.py --sync-card  # 同步到角色卡目录
 
-`--sync-card`：把 workdir 的 index.json + 图片同步到 `characters/example/stickers/`
+`--sync-card`：把 workdir 的 index.json + 图片同步到角色卡表情包目录
 （部署手册 0.2 节：角色卡目录里的 stickers/ 才是长期归宿，部署时同步到服务器）。
 workdir 里的 58 张图会一并带过去：其中 15 张已从索引移除但**图片保留**，
 这样"删掉某张"随时能加回来。同步前自动备份原 index.json。
@@ -51,7 +51,7 @@ REPORT_FILE = "data/apply_sticker_audit_report.json"
 #   所有者仍选此项，按所有者口径执行。仅从 index.json 移除，磁盘图片不删。
 DELETE_STICKERS = [
     "你不要过来呀", "吃东西", "吃惊", "听我说谢谢你", "干饭", "气鼓鼓",
-    "没生气哦", "示例大学菲比", "绫华优雅", "绫华微笑", "菲比乖巧",
+    "没生气哦", "浙大菲比", "绫华优雅", "绫华微笑", "菲比乖巧",
     "蓝发厨娘", "让我康康", "赞", "馋了",
 ]
 
@@ -99,8 +99,8 @@ def strip_note(text: str) -> Tuple[str, bool]:
     return s, changed
 
 
-def sync_to_card(workdir_dir: str, stamp: str) -> int:
-    """把 workdir 的 index.json + 图片同步到 characters/example/stickers/。
+def sync_to_card(workdir_dir: str, stamp: str, card_dir: str = "characters/example/stickers") -> int:
+    """把 workdir 的 index.json + 图片同步到目标角色卡表情包目录。
 
     部署手册 0.2 节：角色卡目录里的 stickers/（含 index.json 和图片）才是长期归宿，
     部署时整体同步到服务器。workdir 里的 58 张图一并带过去（15 张已从索引移除但
@@ -108,7 +108,7 @@ def sync_to_card(workdir_dir: str, stamp: str) -> int:
     """
     import shutil
 
-    card_dir = "characters/example/stickers"
+    card_dir = getattr(args, "card_dir", None) or os.environ.get("CARD_STICKERS_DIR", "characters/example/stickers")
     os.makedirs(card_dir, exist_ok=True)
 
     src_index = os.path.join(workdir_dir, "index.json")
@@ -146,7 +146,8 @@ def sync_to_card(workdir_dir: str, stamp: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只报告不写回")
-    ap.add_argument("--sync-card", action="store_true", help="同步到 characters/example/stickers/")
+    ap.add_argument("--sync-card", action="store_true", help="同步到角色卡表情包目录")
+    ap.add_argument("--card-dir", default=None, help="目标角色卡 stickers 目录（默认 characters/example/stickers）")
     args = ap.parse_args()
 
     if not os.path.exists(DOCX_FILE):
@@ -283,7 +284,7 @@ def main() -> int:
     if args.sync_card:
         print("\n--- 同步到角色卡目录 ---")
         rc = sync_to_card(os.path.dirname(INDEX_FILE), stamp)
-        report["synced_to_card_dir"] = "characters/example/stickers"
+        report["synced_to_card_dir"] = target_card_dir
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         if rc != 0:

@@ -146,7 +146,7 @@ def build_report(raw: Dict[str, Any], blocks: Dict[str, str]) -> str:
     L.append(f"- 数据库：`{meta['db']}`（只读拉取后按探针复制快照，两卡同源同态）")
     L.append(f"- 对照：旧卡 `{meta['old_card']}`（FIXES9 前） vs 新卡 `{meta['new_card']}`（本轮追加后）")
     L.append(f"- 样本：探针 {len(EMO_PROBES)} 个 × 每卡 {meta['runs_per_card']} 次 = 每卡 {new_m['total']} 条，两卡合计 {meta['runs_per_card'] * len(EMO_PROBES) * 2} 条")
-    L.append(f"- 本轮改动：`characters/example/character.json` 的 `chat_style.rules[13]` 句尾追加一句称呼频率硬上限（其余一字未动）")
+    L.append(f"- 本轮改动：角色卡的 `chat_style.rules` 追加一句称呼频率硬上限（其余一字未动）")
     if meta.get("failed_calls"):
         L.append(f"- 失败调用：{meta['failed_calls']} 条（已从统计分母剔除）")
     L.append(f"- 调用耗时：{meta.get('elapsed_sec', 0)} 秒")

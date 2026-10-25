@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import re
@@ -131,6 +130,20 @@ def calc_diary_strength(
     return strength, tau_effective
 
 
+def third_person(text: str) -> str:
+    """只改明确的观察者角色称谓，不做全词表替换。
+
+    旧事实多以"机主/伴侣"开头；介词后的"给伴侣/告诉伴侣"等也是明确角色位置。
+    "咖啡伴侣/灵魂伴侣/生活伴侣"等普通词不在这些位置，必须原样保留。
+    """
+    if not text:
+        return ""
+    prefix = r"(\s*(?:[-*•]\s+|\d+[.、]\s+)?)"
+    res = re.sub(r"(?m)^" + prefix + r"机主", r"\1他", text or "")
+    res = re.sub(r"(?m)^" + prefix + r"伴侣(?=说|今天|最近|现在|目前|心情|喜欢|想|在|已|正|又|还|没|不|会|要|将|刚)", r"\1她", res)
+    return re.sub(r"(?<=[给陪和跟对让向问告诉知])伴侣", "她", res)
+
+
 class MemoryManager:
     def __init__(
         self,
@@ -247,9 +260,9 @@ class MemoryManager:
     # 1.5 待跟进 / 欲言又止的时效（提示词与主动消息的唯一取数口）
     # ==========================================
 
-    async def expire_stale_followups(self) -> int:
+    async def expire_stale_followups(self, now: Optional[datetime] = None) -> int:
         """提醒时间已过 FOLLOWUP_EXPIRE_HOURS 仍未完成的待跟进，置为过期（done=2）。"""
-        cutoff = (datetime.now() - timedelta(hours=FOLLOWUP_EXPIRE_HOURS)).strftime(TIME_FORMAT)
+        cutoff = ((now or datetime.now()) - timedelta(hours=FOLLOWUP_EXPIRE_HOURS)).strftime(TIME_FORMAT)
         cur = await self.db.execute(
             "UPDATE followups SET done = ? WHERE done = 0 AND remind_after < ?",
             (FOLLOWUP_EXPIRED, cutoff),
@@ -259,14 +272,14 @@ class MemoryManager:
             logger.info(f"[Memory] {n} 条待跟进超过 {FOLLOWUP_EXPIRE_HOURS} 小时没下文，已按过期处理")
         return n
 
-    async def get_open_followups(self, due_only: bool = False, limit: int = 5) -> List[Dict[str, Any]]:
+    async def get_open_followups(self, due_only: bool = False, limit: int = 5, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """未完成且未过期的待跟进（先顺手清掉过期的）。due_only=True 只要提醒时间已到的。"""
-        await self.expire_stale_followups()
+        await self.expire_stale_followups(now=now)
         if due_only:
             rows = await self.db.fetchall(
                 "SELECT id, topic, remind_after, created_at FROM followups "
                 "WHERE done = 0 AND remind_after <= ? ORDER BY id ASC LIMIT ?",
-                (now_str(), limit),
+                ((now or datetime.now()).strftime(TIME_FORMAT), limit),
             )
         else:
             rows = await self.db.fetchall(
@@ -287,7 +300,7 @@ class MemoryManager:
         day = mmdd_of(row.get("created_at"))
         return f"{row['topic']}（{day} 他说的）" if day else str(row["topic"])
 
-    async def get_live_desires(self, limit: int = 5) -> List[Dict[str, Any]]:
+    async def get_live_desires(self, limit: int = 5, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """还作数的欲言又止念头（新到旧）。
 
         两条作废规则：
@@ -300,7 +313,7 @@ class MemoryManager:
             "SELECT id, content, created_at FROM suppressed_desires ORDER BY id DESC LIMIT ?",
             (limit,),
         )
-        now_dt = datetime.now()
+        now_dt = now or datetime.now()
         last_user = await self.get_last_user_turn_time()
         live: List[Dict[str, Any]] = []
         for r in rows:
@@ -564,7 +577,7 @@ class MemoryManager:
         if reinforced:
             logger.info(f"[Memory] 汉字共现回忆加固 {reinforced} 条")
 
-    async def get_active_diaries(self, current_valence: float = 2.0) -> List[str]:
+    async def get_active_diaries(self, current_valence: float = 2.0, now: Optional[datetime] = None) -> List[str]:
         """按遗忘曲线计算记忆强度，返回按强度降序且分级前缀格式化的日记列表（最多 15 条）"""
         rows = await self.db.fetchall(
             """
@@ -575,7 +588,7 @@ class MemoryManager:
         if not rows:
             return []
 
-        now_dt = datetime.now()
+        now_dt = now or datetime.now()
         scored_diaries: List[Tuple[float, float, str]] = []
 
         for r in rows:
@@ -691,7 +704,8 @@ class MemoryManager:
         out = []
         for r in rows:
             day = mmdd_of(r["created_at"])
-            out.append(f"{r['content']}（{day} 记下）" if day else r["content"])
+            content = third_person(r["content"])
+            out.append(f"{content}（{day} 记下）" if day else content)
         return out
 
     # ==========================================
@@ -730,10 +744,27 @@ class MemoryManager:
                 best = (r["id"], r["content"], sim, int(r["core"] or 0))
         return best
 
+    @staticmethod
+    def _is_ephemeral_self_fact(content: str) -> bool:
+        """是否属于提示词明确禁止长期保存的当天状态/行程安排。
+
+        长期偏好、习惯和身份可能也会用“现在”表达，先排除这些稳定语义；
+        只对“时间词 + 行踪/当下动作”命中，避免误伤真正的长期记忆。
+        """
+        text = (content or "").strip()
+        if not text or re.search(r"喜欢|讨厌|偏好|习惯|老家|家人|身份|爱吃|不吃|学会", text):
+            return False
+        if not re.search(r"今天|今日|刚才|刚刚|现在|正在|今晚|今早|这顿|这会儿|目前|当下|眼前", text):
+            return False
+        return bool(re.search(r"在|去|逛|吃|忙|赶|睡|做|买|看|走|玩|回|到|待|呆|出门|出发|抵达|打算|计划|安排", text))
+
     async def add_self_fact(self, content: str, core: bool = False) -> None:
         """记一条她说过的关于自己的事；近义（字符 Jaccard ≥ 0.6）只刷新时间、核心标记取或。"""
         content = (content or "").strip()
         if not content:
+            return
+        if not core and self._is_ephemeral_self_fact(content):
+            logger.info(f"[Memory] 跳过当天状态类自我记忆（不进入长期注入）: {content}")
             return
         best_id, best_text, sim, best_core = await self._closest_self_fact(content)
         if best_id is not None and sim >= 0.6:
@@ -752,6 +783,9 @@ class MemoryManager:
         """她改口了：删掉旧说法，新说法带上 prev（人会变，但要知道自己变过）。"""
         new_content = (new_content or "").strip()
         if not new_content:
+            return False
+        if self._is_ephemeral_self_fact(new_content):
+            logger.info(f"[Memory] 改口内容属于当天状态，不写入长期自我记忆: {new_content}")
             return False
         best_id, best_text, sim, best_core = await self._closest_self_fact((old_content or "").strip())
         if best_id is None or sim < 0.4:

@@ -28,7 +28,7 @@ Thumbs.db
 .idea/
 snapshots/
 
-# 图标候选稿（设计中间产物，母版已定稿进 companion/assets/ 与 launcher/assets/qingzi_anime.ico）
+# 图标候选稿（设计中间产物，母版已定稿进 companion/assets/ 与 launcher/assets/app.ico）
 launcher/assets/candidates/*.png
 
 # 小助手语音训练素材与模型（私有，不入库）

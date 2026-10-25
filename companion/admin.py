@@ -105,7 +105,7 @@ __all__ = [
 
 
 # 皮肤对应的看板主题：skin.json 可以写 "theme" 显式声明（plain / endfield）；
-# 没写时按 endfield——科幻工业风是专门承接角色卡皮肤的那套外壳。
+# 没写时按 endfield——终末地工业风是专门承接角色卡皮肤的那套外壳。
 SKIN_DEFAULT_THEME = "endfield"
 
 

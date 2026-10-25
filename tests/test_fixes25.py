@@ -159,7 +159,7 @@ class TestDesireLiveness(_MemHarness):
 
     async def test_念头之后他又聊过天就作废(self):
         await self._add_desire("说说自己明天背着报告回学校", ago_h=20)
-        await self.add_turn("user", "我回示例大学了", ago_h=5)
+        await self.add_turn("user", "我回浙大了", ago_h=5)
         self.assertEqual(await self.memory.get_live_desires(), [])
 
     async def test_他没再说话时念头仍然作数(self):
@@ -177,7 +177,7 @@ class TestDesireLiveness(_MemHarness):
     async def test_主动消息素材不取作废念头(self):
         stack = make_engine_stack(self.db, include_proactive=True, proactive_config=ProactiveConfig())
         await self._add_desire("说说自己明天背着报告回学校", ago_h=20)
-        await self.add_turn("user", "我回示例大学了", ago_h=5)
+        await self.add_turn("user", "我回浙大了", ago_h=5)
         material = await stack.proactive._select_topic_material()
         self.assertNotIn("回学校", material)
 
@@ -291,14 +291,14 @@ class TestBackupRotation(unittest.TestCase):
 
 
 class TestSmokeScriptPaths(unittest.TestCase):
-    def test_仿真器路径都存在(self):
+    def test_通用沙箱与冒烟路径都存在(self):
         root = os.path.join(os.path.dirname(__file__), "..")
-        for name in ("smoke_fixes19", "smoke_fixes20", "smoke_fixes21"):
-            path = os.path.join(root, "scripts", "smoke", f"{name}.py")
+        for rel in ("scripts/sim/full_sandbox.py", "scripts/smoke/smoke_continuity.py"):
+            path = os.path.join(root, rel)
             with open(path, encoding="utf-8") as f:
                 src = f.read()
-            self.assertIn('os.path.join("scripts", "sim", "duo_sim.py")', src, name)
-        self.assertTrue(os.path.exists(os.path.join(root, "scripts", "sim", "duo_sim.py")))
+            self.assertIn("companion", src, rel)
+        self.assertTrue(os.path.exists(os.path.join(root, "scripts", "sim", "full_sandbox.py")))
 
 
 class TestObserverTopicFacts(_MemHarness):

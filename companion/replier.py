@@ -30,6 +30,11 @@ NARRATION_PATTERN = re.compile(
 # 只剥首行会让第二行标签粘在第二条气泡上发出去。
 # 只认行首且只认这三个字，正文中偶然出现的【】不受影响。
 DIRECTION_TAG_PATTERN = re.compile(r"^[ \t]*【[起收接]】[ \t\n]*", re.MULTILINE)
+# 没有编号的残缺引用只是标记残渣，不像 [quote:2] 那样包含可执行目标。
+MALFORMED_QUOTE_PATTERN = re.compile(
+    r"^[ \t]*[\[【［]\s*quote\s*[:：]?\s*[\]】］][ \t]*",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def strip_direction_tag(text: str) -> str:
@@ -39,13 +44,11 @@ def strip_direction_tag(text: str) -> str:
         logger.warning("[Replier] 触发方向标签剥离: %s", text.strip()[:30])
     return stripped
 
-# 表情包标记正则（同时兼容 [sticker:xxx]、[表情:xxx] 以及中英文冒号）
-STICKER_PATTERN = re.compile(r"\[(?:sticker|表情)[:：]([^\]]+)\]", re.IGNORECASE)
 
 # QQ 系统表情标记正则（FIXES20 任务3）：[face:标签名]
 # 刻意不用裸标签 [旺柴]——那是收侧翻出来的**读**侧形态（她读他消息用），
 # 裸标签在发侧分不清"这句是她要写给他看的字"还是"她要发的脸"，会撞车。
-FACE_PATTERN = re.compile(r"\[face[:：]([^\]]+)\]", re.IGNORECASE)
+FACE_PATTERN = re.compile(r"[\[［]face[:：]([^\］\]]+)[\]］]", re.IGNORECASE)
 
 # 四类标记合并成一条正则，一次扫描切出全部段：
 # group(1) = sticker，group(2) = face，group(3) = quote，group(4) = voice。
@@ -60,13 +63,25 @@ FACE_PATTERN = re.compile(r"\[face[:：]([^\]]+)\]", re.IGNORECASE)
 # 两条气泡，而模型写的是一行、不可用时它本该一个字都不改地照发。
 _MIXED_BASE = (
     r"\[(?:sticker|表情)[:：]([^\]]+)\]"
-    r"|\[face[:：]([^\]]+)\]"
+    r"|[\[［]face[:：]([^\］\]]+)[\]］]"
     r"|^[ \t]*\[quote[:：](\d+)\]"
 )
 # 三种生产写法同源共用：
 # [voice:正文[/voice] / [voice:]正文[/voice] / [voice:正文][/voice]。
 # 最后一种是 2026-10-23 真实事故：闭合标记前多一个 ]，漏成普通文字。
 _VOICE_PATTERN_SOURCE = r"\[voice[:：]\]?\s*([^\[\]]*?)\s*\]?\s*\[/voice\]"
+# 生产上还出现过一种行尾简写：[voice:正文]（漏了 [/voice]）。
+# 只认整行，避免把普通行内方括号文本误判成语音。
+_VOICE_LINE_SHORTHAND = re.compile(
+    r"^[ \t]*[\[【［]\s*voice[:：]\]?\s*([^\[\]【】［］\n]*?)\s*[\]】］][ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# 行内简写：[voice:正文]后面还接着别的话（沙箱实测："[voice:嗓子还没开呢 将就听]刚睡醒…"），
+# 正文非空、且这一行后面没有 [/voice] 收尾——补成成对标记，余下的话照常按文字发
+_VOICE_INLINE_SHORTHAND = re.compile(
+    r"[\[【［]\s*voice[:：]\s*([^\[\]【】［］\n]+?)\s*[\]】］](?![^\n]*\[/voice)",
+    re.IGNORECASE,
+)
 MIXED_SEGMENT_PATTERN = re.compile(
     _MIXED_BASE + "|" + _VOICE_PATTERN_SOURCE,
     re.IGNORECASE | re.MULTILINE,
@@ -90,7 +105,12 @@ FACE_RARE_DAILY_BUDGET = 2
 
 def enforce_face_daily_budget(text: str, budget: Optional[int]) -> str:
     """只保留当日额度内的 [face:] 标记，超出的剥标记留正文。None = 不限（默认旧行为）。"""
-    if budget is None or ("[face" not in text and "[FACE" not in text):
+    if budget is None or (
+        "[face" not in text
+        and "[FACE" not in text
+        and "［face" not in text
+        and "［FACE" not in text
+    ):
         return text
     seen = 0
 
@@ -131,6 +151,12 @@ NON_TEXT_CHUNK_CHARS = 5
 # DEEP_AUDIT B-7：**单独占一行**的 [沉默]（整条还有别的内容）按标记剥掉，
 # 不当气泡发上屏；串在别的文字里的（"[沉默] 哈哈"）一个字节都不动（见 drop_silence_marker_lines）。
 SILENCE_TOKEN = "[沉默]"
+# 模型偶尔把同一个决定写成英文标记；与中文一样只在整行/整条时生效。
+SILENCE_TOKEN_ALIASES = frozenset({SILENCE_TOKEN, "[SILENT]", "[SILENCE]"})
+
+
+def _is_silence_token(text: str) -> bool:
+    return (text or "").strip().upper() in SILENCE_TOKEN_ALIASES
 
 # 引用标记（FIXES21）：行首的 [quote:N]
 QUOTE_PATTERN = re.compile(r"^[ \t]*\[quote[:：](\d+)\]", re.IGNORECASE | re.MULTILINE)
@@ -160,6 +186,41 @@ _VOICE_RECORD_LINE_PREFIX = re.compile(
 )
 
 
+_VOICE_OPEN_TAG_VARIANT = re.compile(
+    r"[\[【［]\s*(?:voice|语音)\s*[:：][ \t]*[\]】］]?", re.IGNORECASE
+)
+_VOICE_CLOSE_TAG_VARIANT = re.compile(
+    r"[\[【［]\s*/\s*(?:voice|语音|语音消息)\s*[\]】］]", re.IGNORECASE
+)
+_VOICE_BARE_TAG_VARIANT = re.compile(
+    r"[\[【［]\s*(?:voice|语音)\s*[\]】］]", re.IGNORECASE
+)
+_VOICE_RECORD_TAG_VARIANT = re.compile(r"[【［]\s*语音消息\s*[】］]")
+
+
+def normalize_voice_syntax_variants(text: str) -> str:
+    """把常见全角/中文 voice 写法统一成 ASCII 成对标记。
+
+    只转换明确的标签，不碰正文里的普通方括号；这样后续解析、残留清理和
+    历史渲染都共用同一套格式，不会在各自分支漏掉一种写法。
+    """
+    if not text:
+        return text or ""
+    text = _VOICE_RECORD_TAG_VARIANT.sub("[语音消息]", text)
+    text = _VOICE_OPEN_TAG_VARIANT.sub("[voice:", text)
+    text = _VOICE_CLOSE_TAG_VARIANT.sub("[/voice]", text)
+
+    def _bare(m: "re.Match[str]") -> str:
+        raw = m.group(0)
+        if "语音" in raw and "voice" not in raw.lower():
+            if "[/voice]" in text:
+                return "[voice:"
+            return "[语音消息]" if "语音消息" in raw else "[语音]"
+        return "[voice:"
+
+    return _VOICE_BARE_TAG_VARIANT.sub(_bare, text)
+
+
 def rewrite_voice_record_prefix(text: str, voice_allowed: bool) -> str:
     """把行首"（语音消息）内容"翻译回语音意图；语音不可用时剥前缀留正文。
 
@@ -180,6 +241,108 @@ def rewrite_voice_record_prefix(text: str, voice_allowed: bool) -> str:
         return content
 
     return _VOICE_RECORD_LINE_PREFIX.sub(_sub, text)
+
+
+def _sub_inline(m: "re.Match[str]") -> str:
+    body = m.group(1).strip()
+    if not body:
+        return m.group(0)
+    logger.info("[Replier] 补全行内语音简写标记（[voice:正文] 后接文字）")
+    return f"[voice:]{body}[/voice]\n"
+
+
+def repair_voice_line_shorthand(text: str) -> str:
+    """把整行 ``[voice:正文]`` 补成标准成对标记。
+
+    这是模型在真实生产里写出的形态。补全后，语音可用时仍能走正常 voice 段；
+    不可用时则沿用既有的剥标记降级，句末孤立 ``]`` 不会漏到 QQ 上。
+    """
+    text = normalize_voice_syntax_variants(text)
+    if not text or "voice" not in text.lower():
+        return text or ""
+
+    def _sub(m: "re.Match[str]") -> str:
+        body = m.group(1).strip()
+        if not body:
+            return ""
+        logger.info("[Replier] 补全行尾语音简写标记（缺少 [/voice]）")
+        return f"[voice:]{body}[/voice]"
+
+    text = _VOICE_LINE_SHORTHAND.sub(_sub, text)
+    return _VOICE_INLINE_SHORTHAND.sub(_sub_inline, text)
+
+
+_VOICE_HISTORY_PREFIX = re.compile(
+    r"^[（(]\s*语音消息\s*[）)]\s*", re.MULTILINE
+)
+
+
+def strip_voice_record_prefix_for_history(text: str) -> str:
+    """给她读历史时去掉 assistant 语音的存档前缀，保留正文。"""
+    return _VOICE_HISTORY_PREFIX.sub("", normalize_voice_syntax_variants(text))
+
+
+_VOICE_INTENT_RE = re.compile(r"\[voice\b|（语音消息）|\[语音(?:消息)?\]", re.IGNORECASE)
+_VOICE_RESEND_RE = re.compile(r"再(?:发|传)(?:一遍|一次)")
+_VOICE_HEARD_RE = re.compile(r"(?:听见|听到)(?:了)?(?:吧|没有|没)")
+_VOICE_RECEIPT_RE = re.compile(r"收到就好|听到了就好|听见就好")
+_VOICE_SENT_RE = re.compile(
+    r"我[^，。！？\n]{0,8}(?:发|传)[^，。！？\n]{0,6}(?:了|的|过去|出去)"
+    r"|(?:^|[，。！？\s])(?:发|传)(?:过去|出去|了)"
+)
+_VOICE_NON_AUDIO_OBJECT_RE = re.compile(r"图片|照片|表情|文件|截图|视频|链接|歌曲|歌词")
+_VOICE_PROMISE_RE = re.compile(
+    r"给你(?:一|两|这)?条|给你(?:一|两)?段|给你(?:一|两)?句|"
+    r"(?:发|传|念|唱)(?:一|两)?(?:条|句|段)(?:语音)?|听好了|就这一(?:句|遍)|收着吧"
+)
+
+
+def has_voice_intent(text: str) -> bool:
+    """回复里是否出现语音发送意图（包括误写成存档格式的情况）。"""
+    normalized = repair_voice_line_shorthand(normalize_voice_syntax_variants(text))
+    return bool(_VOICE_INTENT_RE.search(normalized))
+
+
+def has_voice_promise(text: str) -> bool:
+    """是否在没有语音语法时口头许诺“给你一条/收着吧”。"""
+    return bool(_VOICE_PROMISE_RE.search(text or ""))
+
+
+def sanitize_voice_claims(
+    text: str,
+    *,
+    voice_allowed: bool,
+    previous_voice_sent: bool = False,
+    voice_context: bool = False,
+) -> str:
+    """未确认语音投递时，去掉明显的“已经发了/再发一遍”断言。
+
+    只在语音上下文中触发，且只在整行命中时删除，避免误伤普通“发图片”等聊天。
+    上一条语音确实发出过时，对那条语音的回顾可以保留；“再发一遍”则必须有本轮
+    语音能力，否则仍然是不能兑现的承诺。这里只负责清理假话，不替模型写统一兜底话术。
+    """
+    if voice_allowed or not text or not voice_context:
+        return text
+    kept: List[str] = []
+    dropped = False
+    for line in text.split("\n"):
+        is_resend = bool(_VOICE_RESEND_RE.search(line))
+        # 只有明确指向语音的承诺才清理；“给你一条毛巾/唱一句/听好了”不属此处。
+        is_promise = has_voice_promise(line) and bool(re.search(r"语音|音频|声音", line))
+        is_receipt_claim = bool(_VOICE_RECEIPT_RE.search(line)) and not previous_voice_sent
+        is_heard_claim = bool(_VOICE_HEARD_RE.search(line)) and not previous_voice_sent
+        is_sent_claim = (
+            bool(_VOICE_SENT_RE.search(line))
+            and not previous_voice_sent
+            and not _VOICE_NON_AUDIO_OBJECT_RE.search(line)
+        )
+        if is_resend or is_promise or is_receipt_claim or is_heard_claim or is_sent_claim:
+            dropped = True
+            continue
+        kept.append(line)
+    if not dropped:
+        return text
+    return "\n".join(kept).strip()
 
 
 def strip_leading_quote(text: str) -> Tuple[str, Optional[int]]:
@@ -203,8 +366,8 @@ def strip_leading_quote(text: str) -> Tuple[str, Optional[int]]:
 
 
 def is_silence_output(text: str) -> bool:
-    """模型完整输出（strip 后）是否恰好等于 [沉默]"""
-    return text.strip() == SILENCE_TOKEN
+    """模型完整输出（strip 后）是否恰好是中英文沉默标记。"""
+    return _is_silence_token(text)
 
 
 def drop_silence_marker_lines(text: str) -> str:
@@ -221,10 +384,10 @@ def drop_silence_marker_lines(text: str) -> str:
         继续按普通文本走（防滥用条款）。
     命中时记 INFO，事后能看出模型写了它。
     """
-    if not text or SILENCE_TOKEN not in text:
+    if not text or not any(token in text.upper() for token in SILENCE_TOKEN_ALIASES):
         return text
     lines = text.split("\n")
-    kept = [line for line in lines if line.strip() != SILENCE_TOKEN]
+    kept = [line for line in lines if not _is_silence_token(line)]
     if len(kept) == len(lines):
         return text
     if not "".join(kept).strip():
@@ -500,12 +663,15 @@ def fit_chunks(chunks: List[Dict[str, Any]], max_chunks: int) -> List[Dict[str, 
     if max_chunks <= 0 or len(chunks) <= max_chunks:
         return chunks
 
-    # 内容类段（表情包 / QQ 表情 / 混排气泡 / 语音）优先保
+    # 内容类段（表情包 / QQ 表情 / 混排气泡 / 语音）优先保；语音不被末尾位置挤掉
     rich_types = ("sticker", "face", "combo", "voice")
     rich = [c for c in chunks if c["type"] in rich_types]
     if len(rich) >= max_chunks:
-        # 内容类自身就超限：只能按顺序取前 max_chunks 个，文字段全部让位
-        return rich[:max_chunks]
+        voice = [c for c in rich if c["type"] == "voice"]
+        others = [c for c in rich if c["type"] != "voice"]
+        selected = (voice + others)[:max_chunks]
+        selected_ids = {id(c) for c in selected}
+        return [c for c in rich if id(c) in selected_ids]
 
     text_quota = max_chunks - len(rich)
     kept: List[Dict[str, Any]] = []
@@ -582,7 +748,12 @@ def normalize_face_markers(text: str) -> str:
 
     只处理非法标记，合法标记一个字节都不动（下游按标记正常解析）。
     """
-    if "[face" not in text and "[FACE" not in text and "［face" not in text:
+    if (
+        "[face" not in text
+        and "[FACE" not in text
+        and "［face" not in text
+        and "［FACE" not in text
+    ):
         return text  # 绝大多数回复没这个标记，省一次全串扫描
 
     out: List[str] = []
@@ -606,7 +777,9 @@ def normalize_face_markers(text: str) -> str:
 
 
 # 裸表情标签：[doge] / [[汪汪]]（方括号里没有冒号，长度很短）
-BARE_FACE_TAG_PATTERN = re.compile(r"\[\[([^\[\]:：\n]{1,10})\]\]|\[([^\[\]:：\n]{1,10})\]")
+BARE_FACE_TAG_PATTERN = re.compile(
+    r"\[\[([^\[\]:：\n]{1,10})\]\]|\[([^\[\]:：\n]{1,10})\]|［([^［］:：\n]{1,10})］"
+)
 
 
 def normalize_bare_face_tags(text: str) -> str:
@@ -620,11 +793,11 @@ def normalize_bare_face_tags(text: str) -> str:
     改写后交给 normalize_face_markers 走既有白名单：清单内的变真表情，
     清单外的（[汪汪]、黑名单 [微笑]）剥掉标记只留正文。
     """
-    if not text or "[" not in text:
+    if not text or ("[" not in text and "［" not in text):
         return text
 
     def _sub(m: "re.Match[str]") -> str:
-        name = (m.group(1) or m.group(2) or "").strip()
+        name = (m.group(1) or m.group(2) or m.group(3) or "").strip()
         if face_id_by_name(name) is None:
             return m.group(0)
         return f"[face:{name}]"
@@ -1081,6 +1254,11 @@ def chunk_record_text(chunk: Dict[str, Any]) -> str:
     return ""
 
 
+def record_text_from_chunks(chunks: List[Dict[str, Any]]) -> str:
+    """从最终实际发送段生成落库文本（发送后语音降级也会反映在这里）。"""
+    return "\n".join(chunk_record_text(c) for c in chunks).strip()
+
+
 class Replier:
     def __init__(
         self,
@@ -1230,6 +1408,8 @@ class Replier:
 
         # 1. 字面量 \n 还原为真换行（模型常把换行写成两个字符）
         clean_text = unescape_literal_newlines(raw_text)
+        clean_text = MALFORMED_QUOTE_PATTERN.sub("", clean_text)
+        clean_text = normalize_voice_syntax_variants(clean_text)
 
         # 1.5 DEEP_AUDIT B-7：单独占一行的 [沉默] 剥掉（其余内容照发）。
         #     第 0 步已经把"整条恰为 [沉默] / [quote:N]+[沉默]"的沉默权判完并返回，
@@ -1244,6 +1424,7 @@ class Replier:
 
         # 2.5 她把存档格式（语音消息）当发送语法写时，抢在旁白剥离之前翻译回语音意图
         clean_text = rewrite_voice_record_prefix(clean_text, voice_allowed)
+        clean_text = repair_voice_line_shorthand(clean_text)
 
         # 3. 旁白剥离
         clean_text = strip_narration(clean_text)
@@ -1468,10 +1649,7 @@ class Replier:
         final_chunks = fit_chunks(final_chunks, self.config.max_chunks)
 
         # 10. 记录与实发一致：每段一条，段间用换行对齐 QQ 上的多条气泡
-        record_parts = [
-            chunk_record_text(c) for c in final_chunks
-        ]
-        clean_record_text = "\n".join(record_parts).strip()
+        clean_record_text = record_text_from_chunks(final_chunks)
         return final_chunks, clean_record_text
 
     async def send_reply_chunks(

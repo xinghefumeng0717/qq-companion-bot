@@ -10,7 +10,7 @@ D3 中午（跨日时钟推进），把第二轮所有功能逼到同一份 tran
 与 DEEP_AUDIT 静态审计组成双闸，缺一不可。
 
 复用而非重写
-  · 青梓侧：`DuoSimulator.setup()` 那条生产同构接线（TurnHandler + 七引擎 + 临时库
+  · 小艾侧：`DuoSimulator.setup()` 那条生产同构接线（TurnHandler + 七引擎 + 临时库
     + 时钟伪装），本脚本只在其上叠"多日时钟"和"剧本调度"，不碰任何生产代码语义；
   · 用户侧：仍是 v4-pro 扮演"他"，system prompt 复用 `duo_sim.build_user_system_prompt`
     （每个 act 换一张 Scene 卡）；
@@ -894,7 +894,7 @@ class FinalRehearsal(D.DuoSimulator):
     async def _preset_memory(self) -> None:
         """预置若干 facts / diary：让【她最近的生活】与记忆区块开局就有内容。"""
         facts = [
-            "阿俊在示例大学读农学，大二",
+            "阿俊在浙大读农学，大二",
             "他这周实验课很多，经常在地里做试验",
             "他聊天写得短，很少打标点",
             "他在食堂吃过一次临湖的红烧肉，说好吃",
@@ -990,7 +990,7 @@ class FinalRehearsal(D.DuoSimulator):
         self.sent_chunks.append(rec)
         self.all_chunks.append(rec)
 
-    # ---------- 青梓侧（标注 act/day + 留痕） ----------
+    # ---------- 小艾侧（标注 act/day + 留痕） ----------
 
     async def _her_turn(self, idx: int, user_text: str, act: str = "", label: str = "") -> Any:
         act = act or self._cur_act
@@ -1289,7 +1289,7 @@ def render_rehearsal(sim: "FinalRehearsal") -> str:
     A(f"- 成本实报：¥{getattr(sim, '_final_cost', 0.0):.4f}")
     A(f"- 主动消息周期：{len(sim.proactive_log)} 次 ｜ 凌晨维护钩子：{len(sim.maintenance_events)} 次")
     A("")
-    A("> 左列是他（v4-pro 按真人画像扮演），右列是她（青梓全管道实跑）。"
+    A("> 左列是他（v4-pro 按真人画像扮演），右列是她（小艾全管道实跑）。"
       "`[沉默]` = 本轮她选择不回。未发出的主动消息周期与维护钩子以引用块留痕。")
 
     open_block = False

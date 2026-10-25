@@ -21,7 +21,8 @@ from companion.mood import MoodEngine
 from companion.persona import Persona
 from companion.stickers import StickerManager
 
-SI = os.path.join("characters", "si")
+# 公开仓库默认卡
+EXAMPLE_CARD = os.path.join("characters", "example")
 
 
 class TestThemeConfig(unittest.TestCase):
@@ -45,15 +46,28 @@ class TestSkin(unittest.TestCase):
                 f.write("{坏")
             self.assertIsNone(dashboard.load_skin(d))
 
-    @unittest.skipUnless(os.path.isdir(os.path.join(SI, "theme")), "小助手的皮肤只在私人仓库")
-    def test_si_skin(self):
-        skin = dashboard.load_skin(SI)
-        self.assertTrue(skin.ink)
-        self.assertTrue(skin.avatar_for("欣喜"))
-        self.assertEqual(skin.avatar_for("没这个心情"), skin.avatar["default"])
-        self.assertEqual(skin.avatar_for("欣喜", asleep=True), skin.avatar["asleep"])
-        for rel in list(skin.avatar.values()) + list(skin.cursor.values()) + list(skin.art.values()):
-            self.assertIsNotNone(dashboard.skin_file(skin, rel), rel)
+    def test_custom_skin(self):
+        with tempfile.TemporaryDirectory() as d:
+            theme_dir = os.path.join(d, "theme")
+            os.makedirs(theme_dir)
+            with open(os.path.join(theme_dir, "skin.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "ink": True,
+                    "avatar": {"default": "a.png", "欣喜": "happy.png", "asleep": "sleep.png"},
+                    "cursor": {"default": "c.png"},
+                    "art": {"badge": "b.png"}
+                }, f)
+            for f_name in ("a.png", "happy.png", "sleep.png", "c.png", "b.png"):
+                with open(os.path.join(theme_dir, f_name), "wb") as f:
+                    f.write(b"x")
+            skin = dashboard.load_skin(d)
+            self.assertIsNotNone(skin)
+            self.assertTrue(skin.ink)
+            self.assertTrue(skin.avatar_for("欣喜"))
+            self.assertEqual(skin.avatar_for("没这个心情"), skin.avatar["default"])
+            self.assertEqual(skin.avatar_for("欣喜", asleep=True), skin.avatar["asleep"])
+            for rel in list(skin.avatar.values()) + list(skin.cursor.values()) + list(skin.art.values()):
+                self.assertIsNotNone(dashboard.skin_file(skin, rel), rel)
 
     def test_skin_file_stays_inside_theme_dir(self):
         with tempfile.TemporaryDirectory() as d:
@@ -73,10 +87,10 @@ def _overview_data(**over):
     from datetime import datetime
 
     d = {
-        "now": datetime(2026, 10, 22, 21, 4), "name": "小助手<script>", "stage": 5, "n_stages": 10,
-        "stage_name": "伙伴", "tone": "傲娇在意", "next_name": "偏爱", "progress": 0.62, "floor_name": "旧识",
+        "now": datetime(2026, 10, 22, 21, 4), "name": "测试<script>", "stage": 5, "n_stages": 10,
+        "stage_name": "伙伴", "tone": "温和日常", "next_name": "偏爱", "progress": 0.62, "floor_name": "旧识",
         "dims": [(zh, 80.0) for _, zh in dashboard.DIM_ORDER], "mood_label": "愉悦", "mood_desc": "心情不错",
-        "activity": "在缘缘庄对账", "asleep": False, "arc": ("月底对账", "有点烦"), "last_chat": "3 小时前",
+        "activity": "在自习室看书", "asleep": False, "arc": ("准备期末", "有点忙"), "last_chat": "3 小时前",
         "days_known": 31, "turns": 842, "impressions": ["<b>坏</b>"], "meetups": [], "followups": [],
         "desires": [], "unanswered": 0, "max_unanswered": 2, "onebot": True,
         "cost_today": 0.42, "cost_month": 9.8, "backup": "今天 04:00",
@@ -90,20 +104,20 @@ class TestRender(unittest.TestCase):
         page = dashboard.render_overview(_overview_data(), None, "")
         self.assertNotIn("<script>", page)
         self.assertNotIn("<b>坏</b>", page)
-        self.assertIn("心里挂着「月底对账」", page)
+        self.assertIn("心里挂着「准备期末」", page)
         self.assertIn("最近没有约好的见面", page)
 
     def test_shell_marks_theme_and_nav(self):
-        html = dashboard.render_shell("总览", "/", "<p>x</p>", "endfield", None, "?token=t", "小助手")
+        html = dashboard.render_shell("总览", "/", "<p>x</p>", "endfield", None, "?token=t", "测试")
         self.assertIn('class="theme-endfield"', html)
         self.assertIn('href="/memory?token=t"', html)
         self.assertIn('aria-current="page"', html)
 
     def test_shell_uses_small_font_and_mobile_title(self):
-        html = dashboard.render_shell("总览", "/", "<p>x</p>", "endfield", None, "", "小助手")
+        html = dashboard.render_shell("总览", "/", "<p>x</p>", "endfield", None, "", "测试")
         self.assertIn(f'/assets/{dashboard.DASHBOARD_KAI_FONT_FILE}', html)
         self.assertIn('"QZKai Full"', html)
-        self.assertIn('content="小助手的小窝"', html)
+        self.assertIn('content="测试的小窝"', html)
         self.assertIn('/assets/lxgw-wenkai-gb2312.woff2', html)
 
     def test_only_overview_refreshes_in_background(self):
@@ -191,7 +205,7 @@ class TestNewPageComponents(unittest.TestCase):
             "debug": pages.render_debug(_debug_data()),
             "stickers": pages.render_stickers(
                 {"now": _now(), "items": [
-                    {"name": "小助手<script>", "desc": "<b>坏</b>", "url": "/stickers/img/x?token=t"},
+                    {"name": "测试<script>", "desc": "<b>坏</b>", "url": "/stickers/img/x?token=t"},
                 ]}
             ),
             "logs": pages.render_logs(_logs_data()),
@@ -216,7 +230,7 @@ class TestNewPageComponents(unittest.TestCase):
     def test_内容转义(self):
         block = pages.render_stickers(
             {"now": _now(), "items": [
-                {"name": "小助手<script>", "desc": "<b>坏</b>", "url": "/u?x=1"},
+                {"name": "测试<script>", "desc": "<b>坏</b>", "url": "/u?x=1"},
             ]}
         )
         self.assertNotIn("<script>", block)
@@ -304,7 +318,7 @@ class TestRoutes(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 db = Database(os.path.join(tmp, "t.db"))
                 await db.init_tables()
-                card = SI if os.path.isdir(SI) else os.path.join("characters", "example")
+                card = EXAMPLE_CARD
                 persona = Persona.load(card)
                 aff = AffectionEngine.from_persona(db, persona)
                 mood = MoodEngine(db)

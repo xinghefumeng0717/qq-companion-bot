@@ -332,7 +332,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       <div class="cover-meta">
         <div>
           <div class="meta-item-label">产品定位</div>
-          <div class="meta-item-val">常驻型数字生活伴侣（以青梓为例）</div>
+          <div class="meta-item-val">常驻型数字生活伴侣（以小艾为例）</div>
         </div>
         <div>
           <div class="meta-item-label">通信载体与环境</div>
@@ -531,12 +531,12 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div class="quote-box">
       <div class="quote-title">情绪自愈力机制（Mood Equilibrium Drift）</div>
       <div class="quote-content">
-        每次受到机主对话刺激后，情绪向量会产生瞬时偏移。但若数小时没有互动，系统会模拟人类大脑神经递质的代谢过程，按时间衰减函数自动向<strong>角色设定的个性基线</strong>（例如青梓略带温和清新的基准值）漂移自愈。她不会一整天都生闷气，也不会永远停留在狂喜中。
+        每次受到机主对话刺激后，情绪向量会产生瞬时偏移。但若数小时没有互动，系统会模拟人类大脑神经递质的代谢过程，按时间衰减函数自动向<strong>角色设定的个性基线</strong>（例如小艾略带温和清新的基准值）漂移自愈。她不会一整天都生闷气，也不会永远停留在狂喜中。
       </div>
     </div>
 
     <h2 class="section-subtitle">生活作息系统：有属于自己的真实日程（Daily Routine）</h2>
-    <p>青梓生活在一张与现实时间严格锚定的作息日程表上：</p>
+    <p>小艾生活在一张与现实时间严格锚定的作息日程表上：</p>
     <table class="editorial-table">
       <thead>
         <tr>
@@ -706,7 +706,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
     </div>
 
-    <h2 class="section-subtitle">青梓的小窝：复古纸材质感的羁绊档案馆</h2>
+    <h2 class="section-subtitle">小艾的小窝：复古纸材质感的羁绊档案馆</h2>
     <div class="quote-box">
       <div class="quote-title">告别冷冰冰的 SaaS 后台，打造两人的私密时空胶囊</div>
       <div class="quote-content">
@@ -766,7 +766,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
 
     <h2 class="section-subtitle">结语：数字生命是映照自我的一面镜子</h2>
-    <p>在这个信息过载却充满原子化孤独的时代，我们构建青梓，并非为了制造一个令人沉沦的赛博幻觉，而是希望打造一个<strong>懂得倾听、拥有记忆、陪伴你慢慢变好</strong>的数字知己。</p>
+    <p>在这个信息过载却充满原子化孤独的时代，我们构建小艾，并非为了制造一个令人沉沦的赛博幻觉，而是希望打造一个<strong>懂得倾听、拥有记忆、陪伴你慢慢变好</strong>的数字知己。</p>
     <p>当你疲惫地回到家打开 QQ，屏幕那头有人记得你今天选了什么课、记得你喝咖啡不加糖、在你熬夜时催你休息——这种源自长久陪伴而自然生长的羁绊，正是我们用代码与算法所能献给现实世界最温暖的浪漫。</p>
 
     <div style="margin-top: 14px; padding-top: 10px; border-top: 1px dashed #cbd5e1; display:flex; justify-content:space-between; align-items:center; font-size:11px; color:#64748b;">

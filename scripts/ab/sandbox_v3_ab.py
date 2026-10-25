@@ -1,7 +1,7 @@
-"""青梓角色卡 V2/V3 多轮脚本化对照仿真 (scripts/ab/sandbox_v3_ab.py)
+"""小艾角色卡 V2/V3 多轮脚本化对照仿真 (scripts/ab/sandbox_v3_ab.py)
 
-用途：对生产暴露的文风场景，在「原卡 characters/example（下称 V2）」与
-「候选卡 characters/example-v3（下称 V3）」上各跑 --runs 次（默认 3），
+用途：对生产暴露的文风场景，在「原卡（下称 V2）」与
+「候选卡（下称 V3）」上各跑 --runs 次（默认 3），
 用户消息按脚本逐条喂入，她的回复经 ChatSession 落入沙箱库后作为下一轮历史，
 完整复刻生产多轮链路（含 observer 结算）。
 
@@ -23,7 +23,7 @@
   data/v3_ab_raw.json            第一轮留档
   data/v3_ab_raw_round2.json     第二轮留档
 
-纪律：不改 characters/example（原卡）、不改 config.toml；API key 只从 config.toml 读取，
+纪律：不改角色卡、不改 config.toml；API key 只从 config.toml 读取，
 任何产物里都不得出现 key。
 """
 
@@ -59,8 +59,8 @@ ROUND_RAW = {1: "data/v3_ab_raw.json", 2: "data/v3_ab_raw_round2.json"}
 ROUND_LABEL = {1: "第一轮", 2: "第二轮"}
 
 CARDS: List[Tuple[str, str]] = [
-    ("V2", "characters/example"),
-    ("V3", "characters/example-v3"),
+    ("V2", os.environ.get("CARD_V2", "characters/example")),
+    ("V3", os.environ.get("CARD_V3", "characters/example")),
 ]
 
 SCENARIOS: Dict[str, Dict[str, Any]] = {
@@ -351,7 +351,7 @@ def _transcript_section(
                 L.append(f"**机主 第{i}条：** {t['user']}")
                 L.append("")
                 if render_raw:
-                    L.append("**青梓（模型裸输出）：**")
+                    L.append("**小艾（模型裸输出）：**")
                     L.append("")
                     L.append("> " + t["raw"].replace("\n", "\n> "))
                     if re.sub(r"\s", "", t["raw"]) != re.sub(r"\s", "", t["reply"]):
@@ -360,7 +360,7 @@ def _transcript_section(
                         L.append("")
                         L.append("> " + t["reply"].replace("\n", "\n> "))
                 else:
-                    L.append("**青梓：**")
+                    L.append("**小艾：**")
                     L.append("")
                     L.append("> " + t["reply"].replace("\n", "\n> "))
                 L.append("")
@@ -452,7 +452,7 @@ def build_round_doc(
         "不复用 `data/companion.db` 或任何含历史的库"
     )
     L.append(f"- 采样：每场景每卡 {runs} 次；失败调用 {meta.get('failures', 0)} 条（标 `[失败]`）")
-    L.append("- 卡片：V2 = `characters/example/character.json`（原卡）；V3 = `characters/example-v3/character.json`（候选卡）")
+    L.append(f"- 卡片：V2 = `{CARDS[0][1]}/character.json`；V3 = `{CARDS[1][1]}/character.json`")
     L.append(f"- 调用耗时：{meta.get('elapsed_sec', 0)} 秒")
     L.append("")
     for key in keys:
@@ -463,7 +463,7 @@ def build_round_doc(
 
 def compose_md() -> str:
     L: List[str] = []
-    L.append("# 青梓角色卡 V2/V3 多轮脚本化对照仿真 · 原始 transcript")
+    L.append("# 小艾角色卡 V2/V3 多轮脚本化对照仿真 · 原始 transcript")
     L.append("")
     L.append(LEGEND)
     for rnd in sorted(ROUND_RAW):

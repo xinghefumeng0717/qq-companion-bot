@@ -1,4 +1,4 @@
-"""青梓小窝 · 桌面控制台 (launcher/qingzi_home.py)
+"""QQ 伴侣小窝 · 通用桌面控制台 (launcher/qingzi_home.py)
 用于 Windows 本地一键连接远端伴侣机器人、监控状态灯、打开看板、拉取备份与启动沙箱仿真。
 无第三方依赖，纯标准库 tkinter 实现。
 """
@@ -76,19 +76,17 @@ ACCENT_BLUE = "#89b4fa"
 ACCENT_YELLOW = "#f9e2af"
 
 
-class QingziHomeApp:
+class CompanionHomeApp:
     def __init__(self, root: tk.Tk, scale: float = 1.0):
         self.root = root
-        self.root.title("青梓小窝")
+        self.root.title("QQ 伴侣小窝")
         # 物理尺寸随系统 DPI 缩放（420x560 为 96DPI 基准），固定尺寸不拉伸
         self.root.geometry(f"{int(420 * scale)}x{int(560 * scale)}")
         self.root.resizable(False, False)
         self.root.configure(bg=BG_COLOR)
 
         # 尝试设置应用图标
-        ico_path = os.path.join(os.path.dirname(__file__), "assets", "qingzi_anime.ico")
-        if not os.path.exists(ico_path):
-            ico_path = os.path.join(os.path.dirname(__file__), "assets", "app.ico")
+        ico_path = os.path.join(os.path.dirname(__file__), "assets", "app.ico")
         if os.path.exists(ico_path):
             try:
                 self.root.iconbitmap(ico_path)
@@ -112,7 +110,7 @@ class QingziHomeApp:
 
         self.title_label = tk.Label(
             header_frame,
-            text="青梓小窝",
+            text="QQ 伴侣小窝",
             font=("Microsoft YaHei UI", 16, "bold"),
             fg=TEXT_COLOR,
             bg=BG_COLOR,
@@ -379,7 +377,7 @@ class QingziHomeApp:
         webbrowser.open(f"http://localhost:8080/logs{TOKEN_QUERY}")
 
     def open_project_folder(self) -> None:
-        proj_dir = os.path.abspath(r"D:\qq-companion")
+        proj_dir = PROJECT_ROOT
         if os.path.exists(proj_dir):
             if sys.platform == "win32":
                 os.startfile(proj_dir)
@@ -403,7 +401,7 @@ class QingziHomeApp:
 
     def _fetch_backup_worker(self) -> None:
         self._set_status_msg("正在从远端拉取最新备份 latest.db...")
-        dest_dir = os.path.abspath(r"D:\qq-companion\data\backups")
+        dest_dir = os.path.join(PROJECT_ROOT, "data", "backups")
         os.makedirs(dest_dir, exist_ok=True)
         dest_path = os.path.join(dest_dir, "latest.db")
 
@@ -546,7 +544,7 @@ class QingziHomeApp:
             now_ts = time.time()
             if now_ts - self.last_disconnect_alert >= 600:  # 每 10 分钟最多提醒一次
                 self.last_disconnect_alert = now_ts
-                messagebox.showwarning("掉线提醒", "青梓掉线了，该去 NapCat 扫码了")
+                messagebox.showwarning("掉线提醒", "伴侣机器人掉线了，请检查 NapCat 连接")
 
     def on_close(self) -> None:
         self._stop_tunnel()
@@ -575,7 +573,7 @@ def main() -> None:
                 scale = dpi / 96.0
         except Exception:
             pass
-    app = QingziHomeApp(root, scale=scale)
+    app = CompanionHomeApp(root, scale=scale)
     root.mainloop()
 
 

@@ -271,26 +271,26 @@ class TestReplierChunkLimit(unittest.TestCase):
 class TestFileUriToPath(unittest.TestCase):
     def test_posix_form(self):
         self.assertEqual(
-            file_uri_to_path("file:///opt/qq-companion/data/voice/a.silk"),
-            "/opt/qq-companion/data/voice/a.silk",
+            file_uri_to_path("file:///opt/companion/data/voice/a.silk"),
+            "/opt/companion/data/voice/a.silk",
         )
 
     def test_windows_drive_three_slashes(self):
         self.assertEqual(
-            file_uri_to_path("file:///D:/qq-companion/data/voice/a.silk"),
-            "D:/qq-companion/data/voice/a.silk",
+            file_uri_to_path("file:///D:/companion/data/voice/a.silk"),
+            "D:/companion/data/voice/a.silk",
         )
 
     def test_windows_drive_two_slashes(self):
         self.assertEqual(
-            file_uri_to_path("file://D:/qq-companion/data/voice/a.silk"),
-            "D:/qq-companion/data/voice/a.silk",
+            file_uri_to_path("file://D:/companion/data/voice/a.silk"),
+            "D:/companion/data/voice/a.silk",
         )
 
     def test_percent_encoding_and_query(self):
         self.assertEqual(
-            file_uri_to_path("file:///D:/qq-companion/a.silk?x=1"),
-            "D:/qq-companion/a.silk",
+            file_uri_to_path("file:///D:/companion/a.silk?x=1"),
+            "D:/companion/a.silk",
         )
 
     def test_non_file_uri_untouched(self):
@@ -348,7 +348,7 @@ class TestProcessVoiceFileUri(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_missing_file_uri_degrades(self):
-        result = await self.processor.process_voice("file:///opt/qq-companion/voice/nope.silk")
+        result = await self.processor.process_voice("file:///opt/companion/voice/nope.silk")
         self.assertEqual(result, FALLBACK_VOICE_TEXT)
 
 

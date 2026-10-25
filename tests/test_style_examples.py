@@ -74,8 +74,9 @@ class TestBank(unittest.TestCase):
 
 
 class TestRealBank(unittest.TestCase):
-    @unittest.skipUnless(os.path.exists(BANK_PATH), "真实聊天示例库仅私人仓库")
     def test_库里没有她的招牌口头禅和长英文(self):
+        if not os.path.exists(BANK_PATH):
+            self.skipTest("私有示例库未随公开仓库提供")
         with open(BANK_PATH, encoding="utf-8") as f:
             items = json.load(f)
         self.assertGreater(len(items), 300)

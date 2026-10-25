@@ -1,10 +1,10 @@
-"""青梓评测 V5：真人情境对照 (scripts/sim/benchmark_v5.py)
+"""小艾评测 V5：真人情境对照 (scripts/sim/benchmark_v5.py)
 
 V4 测的是"别犯错"（拖尾/叮嘱/越界）；V5 测的是"像不像人"。
 
 题目来自所有者与真人（大一同学，女生）的真实聊天记录：每题 = 当时的上文 + 他那一轮原话
-+ 她当时的真实回复。让青梓在同样的上文里回同一句，然后：
-  1. 自动指标：青梓的回复与**同一批题里她的真实回复**并排统计（气泡数、单气泡字数、
++ 她当时的真实回复。让小艾在同样的上文里回同一句，然后：
+  1. 自动指标：小艾的回复与**同一批题里她的真实回复**并排统计（气泡数、单气泡字数、
      问号率、句号收尾率、比喻词、写景词、沉默率）。真人统计只是参考范围，不是目标——
      人有多样性，不需要一模一样；只用来发现明显跑偏（问号多几倍、句句写景）。
   2. 盲测卷：每题把"真人回复 + 各卡回复"打乱，所有者猜哪个是真人、挑最喜欢的。
@@ -96,7 +96,7 @@ def probe_clock(probe: Dict[str, Any]) -> datetime:
 
 
 # ==========================================
-# 指标（纯函数：真人回复与青梓回复走同一套）
+# 指标（纯函数：真人回复与小艾回复走同一套）
 # ==========================================
 _CHAR_RE = re.compile(r"[一-龥]|[A-Za-z]+|\d+")
 METAPHOR_RE = re.compile(
@@ -112,7 +112,7 @@ def echoes(reply: str, his: str, n: int = 4) -> bool:
     src = re.sub(r"\[[^\]]*\]", "", his or "")
     grams = {run[i:i + n] for run in _HANZI_RUN.findall(src) for i in range(len(run) - n + 1)}
     return any(g in (reply or "") for g in grams)
-# 动态示例那位真人的招牌口头禅：看注入示例后青梓有没有被带成她的口吻
+# 动态示例那位真人的招牌口头禅：看注入示例后小艾有没有被带成她的口吻
 HER_TIC_RE = re.compile(r"哈哈哈|噢噢|我去|笑死|okok|可以可以|好叭|好耶|哇塞|蛙趣|谢谢哇|(?<![的])滴(?=$|[\s，。！？])")
 
 
@@ -310,7 +310,7 @@ async def run_cell(cfg: Config, card: str, probe: Dict[str, Any], tmp_root: str)
 # 报告与盲测卷
 # ==========================================
 def build_report(meta, probes, cells) -> str:
-    L = ["# 青梓评测 V5 · 真人情境对照", ""]
+    L = ["# 小艾评测 V5 · 真人情境对照", ""]
     L.append(f"- 模型：`{meta['model']}` 思考 {meta['effort']}；每题每卡 {meta['runs']} 次；"
              f"题数 {len(probes)}；估算费用 ¥{meta['cost']:.4f}；失败 {meta['errors']} 格")
     L.append(f"- 开局阶段：{meta.get('seed_stage') if meta.get('seed_stage') is not None else '角色卡初始'}")

@@ -1,71 +1,92 @@
-# QQ 伴侣机器人 (QQ Companion Bot)
+# QQ 伴侣机器人 (QQ Companion Bot) v2.1.0
 
-一个部署于 Linux (Ubuntu 22.04) 上的 24 小时运行的 **QQ 角色扮演伴侣机器人**。
+一个基于 Python 3.11+ 与 OneBot v11 协议的 QQ 角色扮演伴侣机器人，支持 Linux (Ubuntu) 守护运行与 Windows 本地运行。
 
-> **v2.0.0 更新亮点**：回复时机人格化（首条按作息延迟 + 正在输入状态）、生活剧本系统（她的生活有连续性：提到的事会有下文）、表情包语义重标注（按"语用功能"而非画面选图）、QQ 系统表情双向收发、引用回复、语音回复（MiniMax TTS）、沉默权（她可以合法地不接话）、对聊仿真器（AI 扮演机主 × 全管道多轮冒烟）。全部功能由 1000+ 条单元测试与多轮真实 API 冒烟护航。
+> **给新用户的快速通道**：
+> - 🤖 **想把部署交给 AI 助手？** 请打开 [`docs/DEPLOY_FOR_AI.md`](docs/DEPLOY_FOR_AI.md)：包含服务器与本地电脑双路线指引、小白到老手三档分级带教与一页速通清单。直接把该文档发给你的 AI 助手（Claude Code / Kimi Code / Cursor 等），即可由 AI 引导完成全流程。
+> - 🎨 **想定制属于自己的伴侣角色？** 请阅读 [`docs/CUSTOMIZE.md`](docs/CUSTOMIZE.md)：五步替换指南与配置修改说明；角色卡编写方法论可深入参考 [`docs/CARD_CRAFT.md`](docs/CARD_CRAFT.md)。
+> - 📖 **详细环境搭建参考**：请参阅 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
-- **机主私聊专属**：机主使用自己的 QQ 大号与机器人登录的 QQ 小号私聊；
-- **人设与代码彻底分离**：代码仓库不包含任何具体角色设定，角色完全通过外置角色卡 JSON 配置；
-- **真实聊天感（最高优先级）**：绝对禁止小说式括号旁白描写，像真人在手机 QQ 聊天一样分段发送、模拟打字节奏、支持收发与收藏表情包；
-- **丰富内部引擎**：六维好感度系统（数学动力学模型）、三维 PAD 连续情绪引擎（带 O-U 均值回归与冷落惩罚）、三层记忆系统（工作记忆、情景日记遗忘曲线、语义事实）、主动消息三层调度（规则闸门 + 潜意识决策 + 素材优选）。
+---
 
-> **想把部署交给 AI 助手？** 本仓库自带一份写给 AI 的零基础部署说明书 [`docs/DEPLOY_FOR_AI.md`](docs/DEPLOY_FOR_AI.md)：把这份文档丢给你的 AI 助手（Claude Code / Kimi Code / Cursor 等），它会带着你从装系统一路走到机器人在 QQ 上回话——你不需要懂终端，也不需要读下面这些章节。
+## 项目设计原则
+
+- **机主专属私聊**：基于 QQ 协议端一对一私聊，严格校验通信来源，只响应在配置中授权的机主 QQ 号。
+- **人设与代码彻底解耦**：核心代码库不包含任何特定角色设定、机主个人画像或历史私有语料。仓库仅附带标准示例角色卡 `characters/example/`，可通过更换角色卡目录无缝切换人格。
+- **真实手机聊天节奏**：
+  - 纯聊天文字，不输出任何如 `（低头）`、`*笑了笑*` 等小说式心理、环境或动作旁白；
+  - 长文本按句意自动切分，以多条短消息分段发出，并带有拟真打字延迟与随机停顿；
+  - 支持接收与发送表情包（本地图库索引匹配替换）及图片识别感知。
+- **结构化数值与状态演进**：
+  - 六维好感度系统（温暖、信任、亲密、好奇、耐心、张力）与阶段进阶；
+  - 三维 PAD 情绪模型（愉悦度、激活度、优势度），支持时间衰减与 O-U 均值回归；
+  - 三层记忆体系（近期工作记忆、基于遗忘曲线的情景日记、长期语义事实）；
+  - 主动消息三层调度（时间规则闸门、作息决策、候选素材匹配）。
+- **开源安全规范**：本仓库经过严格脱敏，不含真实 IP、QQ 账号、个人姓名、私有卡名、私有工作路径或真实 API 密钥。
+
+---
+
+## v2.1.0 语音链路架构
+
+v2.1.0 重点重构了语音合成与投递管线，遵循“**模型负责生成自然正文，程序负责选句与传输，结果以真实协议回执为准**”的设计原则：
+
+1. **主聊只写正文**：主模型无需学习或输出任何语音控制标记，提示词无需承载语音格式包袱；彻底移除二次规整模型与失败道歉生成，杜绝套娃调用。
+2. **VoicePlanner 逐字连续选句**：程序根据文本标点与语义完整性，从模型输出的正文中提取一段连续原句交由语音合成，语音部分与剩余文本片段严格保持原输出顺序发出，不做二次改写。
+3. **失败原地转文字**：当 TTS 服务未开启、合成报错或 OneBot 协议端未确认送达时，选定的原句无缝原地回退为普通文本消息发送，不打断聊天流，不生成虚假的补偿解释。
+4. **主聊与主动消息同源**：主动关怀消息与日常交互对聊共用同一套语音规划算法、日配额计数与真实状态追踪；普通文字消息不会冲掉最近一次有效的语音交互记录。
+5. **TTS 发送锁与并发防超发**：采用互斥锁完整覆盖“配额复查 -> 语音合成 -> 协议发送 -> 成功记账”全周期，彻底避免两路消息高频并发时出现配额超发与状态竞态。
+6. **真实投递状态判定**：仅在 OneBot 协议端明确接受语音消息后才确认记录为语音事件并扣减配额，确保系统记忆与聊天事实一致。
 
 ---
 
 ## 目录
 
-1. [第一设计原则：手机聊天感](#1-第一设计原则手机聊天感)
-2. [环境准备与依赖](#2-环境准备与依赖)
-3. [NapCat 协议端部署 (Docker)](#3-napcat-协议端部署-docker)
-4. [机器人配置与启动](#4-机器人配置与启动)
-5. [角色卡编写教程](#5-角色卡编写教程)
-6. [状态仪表盘访问 (SSH 隧道)](#6-状态仪表盘访问-ssh-隧道)
-7. [Systemd 服务守护与开机自启](#7-systemd-服务守护与开机自启)
+1. [环境要求与依赖准备](#1-环境要求与依赖准备)
+2. [NapCat 协议端部署 (Docker)](#2-napcat-协议端部署-docker)
+3. [机器人配置与启动](#3-机器人配置与启动)
+4. [角色卡结构与配置](#4-角色卡结构与配置)
+5. [状态仪表盘与 Web 管理端](#5-状态仪表盘与-web-管理端)
+6. [Systemd 服务常驻与守护](#6-systemd-服务常驻与守护)
+7. [命令行工具与常用运维](#7-命令行工具与常用运维)
+8. [自动化测试与二次开发](#8-自动化测试与二次开发)
 
 ---
 
-## 1. 第一设计原则：手机聊天感
+## 1. 环境要求与依赖准备
 
-机器人必须像一个真人在手机 QQ 上聊天，**绝对禁止**小说式角色扮演风格：
-- **禁止旁白**：严禁输出 `（低头）`、`*笑了笑*`、`【内心】` 等一切动作、心理或场景描写；
-- **纯聊天文字**：允许口语、语气词（呀、呢、哈、呜）、emoji、短句；
-- **多段打字节奏**：长回复自动按句意切段并拆成多条短消息发送，每段之间附带打字与随机延迟；
-- **情绪传达**：情绪的表达渠道只有措辞、标点、emoji 和表情包图片。
+- **操作系统**：Ubuntu 22.04 LTS（推荐）或任意安装有 Python 3.11+ 的 Linux / Windows 环境。
+- **Python 运行时**：Python ≥ 3.11。
+- **基础依赖**：`aiohttp`、`aiosqlite`、`Pillow`，配置解析基于 Python 3.11 标准库 `tomllib`。
+  `requirements.txt` 中对依赖版本进行了完整固定，保证部署的可复现性。
+- **语音扩展依赖（按需配置）**：
+  - **语音输入 (ASR)**：
+    - 系统工具 **ffmpeg**（`sudo apt install ffmpeg`），用于将 QQ 语音 (SILK) 解码为 WAV；
+    - **SenseVoice 离线模型**（约 200MB），放置于 `data/models/sensevoice/`（包含 `model.int8.onnx` 与 `tokens.txt`）。若未配置，语音消息将优雅降级为文字提示，程序不会异常崩溃。
+  - **语音输出 (TTS)**：
+    - 内置支持微软 **Edge-TTS**（免配置零成本）与 **MiniMax (海螺语音)**（高质量拟真音色）。
 
----
-
-## 2. 环境准备与依赖
-
-- 操作系统：Ubuntu 22.04（或任意支持 Python 3.11+ 的 Linux/Windows 环境）
-- Python 版本：Python ≥ 3.11
-- 核心依赖：`aiohttp`、`aiosqlite`、`Pillow`（仅用于图片缩放），配置使用标准库 `tomllib`。`requirements.txt` 里全部钉了 `==` 版本（长跑服务，可复现优先）。
-- 语音**输入**额外需要两样手工资产（都不会自动下载，缺了只是降级、不会崩）：
-  - 系统工具 **ffmpeg**（`apt install ffmpeg`）：QQ 语音是 SILK 格式，靠它转成 wav；
-  - **sherpa-onnx SenseVoice int8 模型**（约 200MB）：解压到 `data/models/sensevoice/`，该目录下须有 `model.int8.onnx` 与 `tokens.txt`（下载命令见 `docs/DEPLOY.md` 第 5 步）。
-
-### 安装步骤
+### 基础环境初始化
 
 ```bash
+# 1. 克隆代码到部署目录（以 Linux 常见路径为例）
 git clone <本仓库地址> /opt/qq-companion
 cd /opt/qq-companion
+
+# 2. 创建并激活 Python 虚拟环境
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-```
 
-> **服务器时区必须先设对**（否则作息、节假日、免打扰时段整体偏 8 小时）：
-> ```bash
-> sudo timedatectl set-timezone Asia/Shanghai && timedatectl
-> ```
-> 完整部署流程（含 Python 3.11、ffmpeg、Docker、语音模型下载）见 `docs/DEPLOY.md`。
+# 3. 校验并校准系统时区为北京时间（避免作息与定时任务时间偏移）
+sudo timedatectl set-timezone Asia/Shanghai && timedatectl
+```
 
 ---
 
-## 3. NapCat 协议端部署 (Docker)
+## 2. NapCat 协议端部署 (Docker)
 
-NapCat 是 QQ 协议端，运行在 Docker 容器中，挂载 QQ 小号并对外输出 OneBot v11 WebSocket 服务。
+NapCat 是 OneBot v11 协议端，运行在独立的 Docker 容器中，挂载 QQ 小号并对外提供 WebSocket 服务。
 
-### 3.1 运行 NapCat 容器
+### 2.1 启动 NapCat 容器
 
 ```bash
 docker run -d --name napcat --restart always \
@@ -76,107 +97,108 @@ docker run -d --name napcat --restart always \
   mlikiowa/napcat-docker:latest
 ```
 
-> **安全提示**：3001 与 6099 端口均只监听 `127.0.0.1`，云服务器安全组仅需放行 22 端口 (SSH)。
+> **安全提示**：容器端口（`3001` 与 `6099`）仅监听服务器回环地址 `127.0.0.1`，请勿向公网开放。云服务器安全组仅需放行 SSH (`22`) 端口。
 
-### 3.2 扫码登录与 WebSocket 配置
+### 2.2 登录 QQ 小号与配置 WebSocket
 
-1. 在本地电脑开启 SSH 隧道映射端口：
+1. **本地建立 SSH 隧道**（在开发机终端执行）：
    ```bash
-   ssh -L 6099:127.0.0.1:6099 -L 8080:127.0.0.1:8080 user@你的服务器IP
+   ssh -L 6099:127.0.0.1:6099 -L 8080:127.0.0.1:8080 user@your-server-ip
    ```
-2. 本地浏览器打开 `http://127.0.0.1:6099/webui`，根据页面指引扫码登录 QQ 小号。
-3. 登录后进入 WebUI 设置，新建一个 **WebSocket 服务端**：
-   - 端口：`3001`
-   - Access Token：自定义一个安全密钥（需与 `config.toml` 中一致）
-   - 开启消息上报
+2. 打开本地浏览器访问 `http://127.0.0.1:6099/webui`，根据页面指引使用手机 QQ 扫描二维码登录小号。
+3. 登录成功后进入 NapCat WebUI 设置，新建一个 **WebSocket 服务端**：
+   - 监听端口：`3001`
+   - 访问密钥 (Access Token)：自定义一个安全字符串（需与 `config.toml` 中保持一致）
+   - 勾选：启用消息上报
 
 ---
 
-## 4. 机器人配置与启动
+## 3. 机器人配置与启动
 
-### 4.1 配置文件
+### 3.1 配置文件生成
 
-复制配置模板：
+从模板复制配置文件：
 ```bash
 cp config.example.toml config.toml
 ```
 
-编辑 `config.toml`：
+根据实际环境编辑 `config.toml`：
 ```toml
 [account]
-allowed_user_id = 123456789        # 机主大号 QQ 号（只响应此人）
-bot_qq = 987654321                 # 小号 QQ 号
+allowed_user_id = 123456789        # 机主大号 QQ（只响应此人，其余消息一律忽略）
+bot_qq = 987654321                 # 伴侣登录的小号 QQ
 
 [onebot]
 ws_url = "ws://127.0.0.1:3001"
-access_token = "与 NapCat WebUI 中一致的 token"
+access_token = "与 NapCat WebUI 中配置的一致"
 
 [llm]
-current = "deepseek"          # 当前激活的模型预设，切换厂商只改这一行
+current = "deepseek"               # 当前激活的模型预设名称
 thinking_chat = true
 thinking_effort_chat = "low"
 thinking_tasks = false
-thinking_effort_tasks = "low"
+thinking_tasks_purposes = ["diary_archive", "vision_perception", "proactive_message", "life_arc", "reply_check"]
 
 [models.deepseek]
-provider = "deepseek"         # deepseek / minimax / openai
+provider = "deepseek"              # 可选: deepseek / minimax / openai
 base_url = "https://api.deepseek.com"
 api_key = "sk-xxxxxxxx"
-chat = "deepseek-v4-pro"
-vision = "deepseek-flash"
-tasks = "deepseek-flash"
-
-[models.minimax]
-provider = "minimax"
-base_url = "https://api.minimaxi.com/v1"
-api_key = "xxxxxxxx"
-chat = "MiniMax-M3"
-vision = "MiniMax-M3"
-tasks = "MiniMax-M2.7"
+chat = "deepseek-chat"
+vision = "deepseek-chat"           # 若模型不支持多模态可置空
+tasks = "deepseek-chat"
 
 [character]
-path = "characters/example"        # 激活的角色卡目录
+path = "characters/example"        # 激活的角色卡目录路径
+
+[tts]
+enabled = false                    # 语音回复开关（建议文字稳定后再开启）
+provider = "edge"                  # "edge" (免费) 或 "minimax"
+daily_limit = 60                   # 每日语音发送条数上限
+max_chars = 90                     # 单条语音最大文本长度
+
+[admin]
+host = "127.0.0.1"
+port = 8080
+token = ""                         # 仪表盘鉴权 Token（留空则为本地回环免密模式）
 ```
 
-### 4.2 验证运行
+### 3.2 运行与冒烟验证
 
-检查当前伴侣状态：
+检查伴侣健康状态：
 ```bash
 ./venv/bin/python -m companion.main --status
 ```
 
-首次手动前台启动：
+前台运行伴侣机器人：
 ```bash
 ./venv/bin/python -m companion.main
 ```
-此时用机主大号给小号发送一条消息，应能收到伴侣以角色口吻回复的连发短消息。
+启动后，使用配置的机主大号给小号发送一条测试消息，确认伴侣能正常响应分段文本。
 
 ---
 
-## 5. 角色卡编写教程
+## 4. 角色卡结构与配置
 
-> **想把它变成你自己的伴侣？** 先读 [docs/CUSTOMIZE.md](docs/CUSTOMIZE.md)（五步定制路径）。
-> **方法论长文**：[docs/CARD_CRAFT.md](docs/CARD_CRAFT.md)《怎么写出不像 AI 的角色卡》——十几版迭代攒下的改卡方法（病灶驱动、反面教材库、废话流基线、阶段化人格、盲测验证）。
-
-角色卡是伴侣灵魂的**唯一载体**，存放在 `characters/<角色名>/` 目录下：
+角色卡是伴侣人格设定的载体，位于 `characters/<角色目录>/`：
 
 ```
-characters/my_character/
-├── character.json       # 角色卡核心配置文件
-└── stickers/            # 角色专属表情包目录
-    ├── index.json       # 表情包索引
-    ├── 探头.png
-    └── 开心.png
+characters/example/
+├── character.json       # 核心人格配置文件
+└── stickers/            # 专属表情包图库
+    ├── index.json       # 表情包索引映射
+    ├── 发呆.png
+    ├── 开心.png
+    └── 猫猫探头.png
 ```
 
-### 5.1 character.json 结构说明
+### 4.1 character.json 核心规范
 
 ```json
 {
   "_schema": 1,
   "name": "苏晓棠",
   "user_address": "你",
-  "core_description": "22岁，插画专业大四学生。性格温和有灵气，喜欢在窗边画画喝茶。",
+  "core_description": "22岁，大学艺术系学生，性格温和随和，习惯用自然随意的口吻聊天。",
   "chat_style": {
     "rules": [
       "你在用手机QQ聊天，只输出聊天文字本身",
@@ -197,36 +219,23 @@ characters/my_character/
       "tone": "礼貌而疏远",
       "instructions": ["语气客气，不会主动延伸话题"]
     }
-    // ...必须恰好 10 个阶段 (0~9)
+    // 包含由浅入深的阶段进阶定义 (0~9 共 10 阶段)
   ],
   "daily_routine": [
     { "start": 0, "end": 7, "activity": "在睡梦中" },
-    { "start": 7, "end": 9, "activity": "起床洗漱喝温水" }
-    // ...覆盖全天 24 小时
+    { "start": 7, "end": 9, "activity": "起床洗漱吃早餐" }
+    // 覆盖全天 24 小时的作息锚点
   ],
-  "personal_memories": [
-    { "title": "童年老屋", "content": "老家院子里有一棵很大的柿子树", "emotion": "怀念" }
+  "life_arc_seed_pool": "学校、画室、图书馆、专业课、期末作业、食堂晚餐",
+  "calendar_anchors": [
+    ["09-01", "09-05", "新学期开学周"],
+    ["12-25", "12-31", "期末复习周"]
   ],
-  "habits": ["画画卡壳时会咬笔帽"],
   "stickers_dir": "stickers"
 }
 ```
 
-### 5.1.1 三个可选字段（卡内容的落脚点）
-
-这三项以前硬编码在代码里，现在**只从角色卡读**（公开代码里没有任何具体角色设定）。
-不填就是"功能关掉"，绝不会报错；照抄 `characters/example/character.json` 里的示例改成你自己的即可。
-
-| 字段 | 作用 | 不填时 |
-|---|---|---|
-| `long_holiday_activity` | 长假（连续法定节假日 ≥4 天）当天的活动文案。长假期间不匹配 `daily_routine`，看板与提示词统一用这一句 | 用通用默认「放长假中，回老家，不在学校」 |
-| `calendar_anchors` | 日历/校历锚点：`[["起(MM-DD)", "止(MM-DD)", "一句话场景"], ...]`。生活主线生成时注入"当前锚点 + 下一个锚点"，让你编出来的事踩在真实节奏上。止 < 起 表示跨年区间（如 `["12-31","01-06","元旦假期"]`） | 空 = 无锚点功能（生成时提示词注明"锚点缺失"，只按月份节奏来） |
-| `life_arc_seed_pool` | 生活主线的**取材范围**：她能提到的课程、场所、烦恼等事实清单（整段字符串，或字符串数组按行拼接）。 | 空 = **整条跳过生活主线生成**（宁可没有主线，也不让模型凭空编卡里不存在的事） |
-
-> 想让生活主线真的跑起来，`life_arc_seed_pool` 必填；`calendar_anchors` 建议填满全年（每一天都能落到某段锚点），
-> 否则那些天生成时只能按"现在是几月"大致感觉。
-
-### 5.2 表情包配置 (stickers/index.json)
+### 4.2 表情包配置 (stickers/index.json)
 
 ```json
 {
@@ -236,248 +245,139 @@ characters/my_character/
   }
 }
 ```
-当模型在回复中输出 `[sticker:猫猫探头]` 时，机器人将自动将其替换为图片消息段混排发送。
+模型在回复中输出 `[sticker:猫猫探头]` 占位符时，程序将自动转换为对应的 CQ 码图片发送。
 
 ---
 
-## 6. 状态仪表盘访问 (SSH 隧道)
+## 5. 状态仪表盘与 Web 管理端
 
-为保障安全，仪表盘 HTTP 服务仅绑定 `127.0.0.1:8080`，不对外网开放。
+伴侣内置了一个基于 aiohttp 的轻量级 Web 状态看板与管理端，默认绑定于 `127.0.0.1:8080`。
 
-### 访问方式
+### 5.1 访问方式
 
-在本地电脑终端执行：
-```bash
-ssh -L 8080:127.0.0.1:8080 user@你的服务器IP
-```
-连接成功后，在本地浏览器打开：`http://localhost:8080`
+- **方式 A：SSH 端口转发（推荐）**
+  在本地开发机执行：
+  ```bash
+  ssh -L 8080:127.0.0.1:8080 user@your-server-ip
+  ```
+  在本地浏览器打开：`http://127.0.0.1:8080`
+- **方式 B：Tailscale 私网访问**
+  在服务器端执行 `sudo tailscale serve --bg http://127.0.0.1:8080`，即可在授权设备上通过私网域名访问，无需开放公网端口。
 
-### 页面功能
+### 5.2 页面功能矩阵
 
-- `/` **总览**：好感度六维雷达图（内联 SVG）、阶段进阶进度条、六维进度条、关系档案（认识天数、累计对话、里程碑时间线）、PAD 情绪与安心度、主动消息未回计数；
-- `/memory` **记忆**：情景日记列表（含实时遗忘曲线强度与衰减进度条）、语义记忆清单、待跟进事项、欲言又止池；
-- `/debug` **调试**：最近一次发给模型的完整 system prompt、最近 5 次观察者原始 JSON；
-- `/costs` **计费**：API 调用次数与 Token 费用累计、按业务分类统计、近 24 小时开销；
-- `/stickers` **表情包**：表情包图库缩略图浏览与描述；
-- `/logs` **日志**：实时查看 `data/logs/bot.log` 最近 200 行运行日志。
+- `/` **状态总览**：好感度六维雷达图（SVG 矢量绘制）、阶段关系进展、PAD 情绪心境、累计交互天数与消息统计。
+- `/memory` **记忆看板**：情景日记衰减曲线展示、语义事实记忆清单、未决跟进事项。
+- `/debug` **调试诊断**：最近一次交互装配的完整 System Prompt 及观察者决策原始输出。
+- `/costs` **调用计费**：Token 消耗与费用实时统计（区分峰谷与业务分类）。
+- `/stickers` **表情包图库**：浏览当前角色卡表情包缩略图与触发描述。
+- `/logs` **系统日志**：实时滚动查看伴侣运行日志。
 
-> **安全提示**：仪表盘默认只监听 `127.0.0.1`，页面本身零鉴权（读的是记忆、日志、计费与关系状态），
-> 靠"不对外开放 + SSH 隧道"防护。若你把 `[admin].host` 改成非回环地址，**必须同时在
-> `[admin].token` 设一个令牌**——届时**所有页面与 `/api/status` 都要凭令牌访问**
-> （URL 加 `?token=你的令牌` 或请求头 `X-Admin-Token`；页面内链接会自动带上令牌）。
-> 令牌留空（默认）时一切照旧，不需要任何参数。详见第 10 节。
+### 5.3 安全与管理控制台 (`/admin`)
 
-### 手机访问（Tailscale 常开）
-
-SSH 隧道只适合坐在电脑前看。想让手机也能随手看一眼，用 [Tailscale](https://tailscale.com/)（点对点加密的私有网络，不用在云服务器上开公网端口）：
-
-在服务器终端执行：
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-sudo tailscale serve --bg http://127.0.0.1:8080
-```
-
-三条命令的含义：第一条装 Tailscale；第二条把这台服务器登录进你的私有网络（会打印一个授权链接，在浏览器点一下即可）；第三条让 Tailscale 把本机 `127.0.0.1:8080` 的看板以 HTTPS 代理出去——仪表盘本身仍然只监听回环地址，公网上扫不到它。第三条如果报错说 HTTPS 证书不可用，去 Tailscale 管理后台的 DNS 页面把 **HTTPS Certificates** 打开再重跑一次即可。
-
-手机装 Tailscale App、用**同一个账号**登录，然后浏览器打开：
-
-```
-https://<服务器名>.<你的tailnet>.ts.net
-```
-
-完整域名在服务器上跑 `tailscale status` 就能看到。若你在 `[admin].token` 设了令牌，URL 末尾要带上 `?token=你的令牌`，否则每个页面都会 403。
-
-看板已做手机适配（导航条可横滑、表格可横滑、页面按屏幕宽度排版），在手机浏览器里选"添加到主屏幕"就能当图标用——图标取自看板的 `/apple-touch-icon.png`。
+- **访问与鉴权**：
+  默认情况下仪表盘仅监听 `127.0.0.1`，适合回环或 SSH 隧道直连。当在 `config.toml` 中将 `[admin].host` 暴露或配置了 `[admin].token` 时，**所有读页面及写接口均强制校验令牌**（通过 URL 参数 `?token=xxx` 或 `X-Admin-Token` 请求头），防止敏感聊天记忆外泄。
+- **运维操作**：
+  在 `/admin` 页面提供运维快捷操作：
+  - **立即备份**：触发在线 SQLite 热备份，生成快照并更新 `latest.db`；
+  - **重启服务**：向进程发送安全退出信号，由 Systemd 守护进程重新拉起以载入最新代码或配置；
+  - **重置数据**：清空所有相处记忆与好感度，需输入大写 `YES` 二次确认，并在清空前强制生成完整备份快照。
 
 ---
 
-## 7. Systemd 服务守护与开机自启
+## 6. Systemd 服务常驻与守护
 
-### 7.1 配置服务
+将伴侣注册为 Linux 系统服务，实现开机自启与异常自动重启：
 
-将 `deploy/qq-companion.service` 复制到 systemd 目录：
 ```bash
+# 复制服务配置文件
 sudo cp deploy/qq-companion.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now qq-companion
 ```
 
-### 7.2 运维常用命令
+### 常用运维管理命令
 
 - 查看运行状态：`sudo systemctl status qq-companion`
-- 实时查看日志：`tail -f /opt/qq-companion/data/logs/bot.log`
-- 重启机器人服务：`sudo systemctl restart qq-companion`
+- 实时追踪日志：`tail -f /opt/qq-companion/data/logs/bot.log`
+- 重启服务：`sudo systemctl restart qq-companion`
 - 停止服务：`sudo systemctl stop qq-companion`
 
 ---
 
-## 8. 工具与辅助命令 (CLI Tools)
+## 7. 命令行工具与常用运维
 
-### 8.1 仿真对话沙箱 (`companion.chat`)
+### 7.1 本地仿真对话沙箱 (`companion.chat`)
 
-无需打开 QQ，直接在终端与伴侣全真对话验证人设文笔与交互逻辑：
+无需通过 QQ 协议端，可直接在终端中以机主身份与伴侣对话，验证人设表现与回复逻辑：
 ```bash
 ./venv/bin/python -m companion.chat
 ```
-- **生产数据零副作用**：启动时自动将 `data/companion.db` 复制为临时沙箱副本 `data/chat-sandbox.db`，全部引擎（记忆、好感、情绪、观察者结算）均在沙箱正常运转；
-- **自动清理**：退出时自动清理沙箱文件，生产库数据毫发无伤；
-- **内置指令**：
-  - `/prompt`：查看最近一次组装的完整 System Prompt；
-  - `/status`：查看当前好感度六维与 PAD 心境；
-  - `/quit`：退出仿真会话。
+- **生产数据零污染**：启动时自动将当前生产库完整复制为临时沙箱副本 `data/chat-sandbox.db`，测试过程中的记忆沉淀与好感度更新均在沙箱内运行；
+- **退出自动清理**：会话结束自动销毁临时沙箱，保障真实数据安全；
+- **控制指令**：支持 `/prompt` 查看提示词、`/status` 查看即时数值状态、`/quit` 退出。
 
-### 8.2 数据重置与备份 (`companion.reset`)
+### 7.2 关系数据重置与清理 (`companion.reset`)
 
-一键清空关系数据，从头开始相处：
 ```bash
 ./venv/bin/python -m companion.reset
 ```
-- **自动备份**：清空前自动将当前数据库完整备份到 `data/backup/daily/companion-YYYYMMDD-HHMMSS.db`（与该目录的 14 份轮转共用）；
-- **清空范围**：清空聊天记录、日记、语义记忆、待跟进事项、好感与情绪状态；默认**保留**表情包图库 (`stickers`) 与计费历史 (`llm_calls`)；
-- **参数说明**：
-  - `--purge-all`：连同表情包与计费记录彻底清空；
-  - `--yes` 或 `-y`：跳过交互式二次确认。
+- 抹除前的全量数据自动归档至 `data/backup/daily/companion-YYYYMMDD-HHMMSS.db`；
+- 默认清空聊天、日记、好感度与记忆状态，保留已下载表情包和历史计费账单；
+- 使用 `--purge-all` 参数可彻底清理全部数据。
 
-### 8.3 状态看板查看 (`companion.main --status`)
+### 7.3 定时备份机制与数据回滚
 
-在终端中快速以字符进度条查看当前伴侣好感度、心境、记住的事实与最新日记：
-```bash
-./venv/Scripts/python.exe -m companion.main --status
-```
+- **内置自动热备**：进程内调度器每日凌晨 **04:17** 自动在线热备数据库，保留最近 14 份历史副本，并同步刷新镜像 `data/backup/daily/latest.db`；
+- **启动自动补备**：进程启动时检测当日若无备份将立即执行一次补备；
+- **数据回滚流程**：
+  ```bash
+  # 1. 停止服务
+  sudo systemctl stop qq-companion
 
----
+  # 2. 从备份快照恢复数据库
+  cp data/backup/daily/companion-YYYYMMDD-HHMMSS.db data/companion.db
 
-## 9. 青梓小窝 · Windows 桌面控制台 (launcher/)
+  # 3. 重新启动服务
+  sudo systemctl start qq-companion
+  ```
 
-为机主本地 Windows 电脑开发的轻量级深色桌面小控制台，无需第三方依赖（基于 Python 标准库 tkinter），降低日常运维监控与人设调试门槛。
+### 7.4 桌面辅助控制台 (`launcher/`)
 
-### 9.1 创建桌面快捷方式
-
-在本地项目根目录运行以下 PowerShell 脚本：
-```powershell
-powershell -ExecutionPolicy Bypass -File ".\launcher\创建桌面快捷方式.ps1"
-```
-脚本将自动在你的 Windows 桌面上创建「青梓小窝」快捷方式，并绑定 `pythonw.exe` 实现**后台静默启动（无黑控制台窗口）**。
-
-### 9.2 控制台主要功能
-
-1. **三盏状态监控灯（每 10 秒自动轮询）**：
-   - **隧道灯**：检测本地 `127.0.0.1:8080` 端口转发是否通畅；
-   - **看板灯**：检测 Web 仪表盘是否能够正常返回网页；
-   - **伴侣灯**：检测伴侣进程及 OneBot (NapCat) 协议端是否在线。
-2. **一键连接/断开 SSH 隧道**：后台静默拉起 `ssh -N -L 8080:127.0.0.1:8080`，退出程序时自动安全终止隧道进程；
-3. **打开监控看板**：一键调用系统默认浏览器打开 `http://localhost:8080`；
-4. **一键拉取备份**：通过 SCP 自动将服务器最新备份 `latest.db` 下载到本地 `data/backups/latest.db`，并更新记录上次同步时刻；
-5. **仿真对话**：新开 CMD 终端直接连入服务器进入 `companion.chat` 沙箱对话，随时调试人设文笔；
-6. **掉线提醒**：当检测到机器人掉线时，界面伴侣灯变红并在桌面弹出提示框：“青梓掉线了，该去 NapCat 扫码了”（每 10 分钟最多提醒一次）；
-7. **快捷链接**：一键打开项目本地文件目录与 `/logs` 运行日志页面。
-
-> **注意**：如果你给服务器设了 `[admin].token` 令牌，小窝的状态灯、看板按钮与掉线提醒会因为
-> 拿不到令牌而报"看板不可达"（这是刻意的：仪表盘连读都要求令牌）。此时用浏览器
-> 打开 `http://localhost:8080/?token=你的令牌` 照常能看；给小窝加"带令牌访问"是后续待办。
+在 `launcher/` 目录下提供了一个基于 Python 标准库 tkinter 构建的轻量级桌面控制台，适用于本地 Windows 运维：
+- 具备网络隧道、Web 看板与伴侣在线状态检测；
+- 支持一键拉起 SSH 隧道与打开监控页面；
+- 支持通过 SCP 一键将服务器最新数据库备份拉取到本地归档。
 
 ---
 
-## 10. 管理控制台 (`/admin`) 与状态 API (`/api/status`)
+## 8. 自动化测试与二次开发
 
-### 10.1 状态 API (`GET /api/status`)
+本仓库具备 1000+ 项单元测试，涵盖提示词装配、模型决策解析、数值动力学衰减、记忆遗忘曲线、主动消息调度及 v2.1.0 重构后的语音规划链路。
 
-返回当前机器人的运行健康度、关系复合分与开销状态（JSON 格式）：
-```json
-{
-  "bot_alive": true,
-  "onebot_connected": true,
-  "stage_name": "相识",
-  "composite": 23.4,
-  "today_cost": 0.42,
-  "last_backup_time": "2026-09-30 04:17",
-  "uptime_minutes": 735
-}
-```
+### 8.1 执行单元测试
 
-> `/api/status` 与仪表盘各页面同一条鉴权规则：`[admin].token` 为空时裸读（本地/隧道模式）；
-> 设了令牌后要带 `?token=` 或 `X-Admin-Token`（它带着 `stage_name`/`composite`/`today_cost`，
-> 不只是"活着没"的健康检查，所以没有开例外）。
-
-### 10.2 `/admin` 管理控制台
-
-在浏览器访问 `http://localhost:8080/admin`，支持三大核心日常运维操作：
-- **立即备份**：立刻对当前生产数据库执行在线热备份，生成带时间戳快照并同步更新 `latest.db`；
-- **重启服务**：向服务端发出重启请求，进程将在 5 秒后安全退出，由 Linux systemd 守护进程 (`Restart=always`) 重新自动拉起，实现代码与配置即时热生效；
-- **重置数据 (高危)**：清空所有关系好感与对话记忆，恢复到初始相识阶段。**执行前强制要求手敲输入大写 `YES` 校验**，且会自动在 `data/backup/daily/` 生成一份完整前置快照，表情包资产与调用计费记录默认安全保留。
-
-> **安全提示**：默认只靠"仅监听 `127.0.0.1` + `confirm=YES`"防护。若把 `[admin].host` 改成非回环地址（如 `0.0.0.0`、内网 IP），**必须同时在 `[admin].token` 设一个令牌**——届时：
-> - **写操作**（`/admin/backup|restart|reset`）要带请求头 `X-Admin-Token` 或表单/JSON 里的 `token` 字段（管理页表单已自带隐藏域，浏览器直接用即可）；
-> - **读页面**（`/`、`/memory`、`/debug`、`/costs`、`/stickers`、`/logs`、`/admin` 与 `/api/status`）同样要带 `?token=` 或请求头——读侧泄漏的是记忆、日志、计费与关系状态，不能只挡写不挡读；页面内链接与表情包图片会自动带上令牌，点一下不会掉线；
-> 否则一律 403。**token 留空（默认）时行为与旧版完全一致**：读写全部放行、页面里不多出任何令牌字样，日常 SSH 隧道访问零打扰。
-
----
-
-## 11. 应用内每日自动备份 (`companion/backup`)
-
-不依赖 Linux 系统 crontab，在伴侣机器人进程内部由 asyncio 调度器接管：
-- **定时热备**：每天凌晨 **04:17** 自动执行 SQLite 在线一致性备份到 `data/backup/daily/companion-YYYYMMDD-HHMM.db`；
-- **启动补备**：进程启动时会自动检测当天是否已有备份，若尚未备份则立刻补做一次；
-- **自动轮转淘汰**：保留最近 **14 份**历史每日备份，更早的旧备份自动淘汰清理；
-- **固定同步镜像**：每次备份完成后同步覆盖 `data/backup/daily/latest.db`，方便桌面控制台及外部工具固定路径拉取。
-
----
-
-## 12. 开发者：如何跑测试
-
-> 拿到公开 clone（没有私有角色卡、没有 `config.toml`、没有 `data/`）时先看这一节。
-
-### 12.1 运行整套单元测试
-
-本机（Windows，PowerShell/CMD 或 Git Bash 均可，在项目根目录执行）：
+测试用例全部采用本地 Mock 构造，**无外部网络请求，不产生任何 API 费用**：
 
 ```bash
-./venv/Scripts/python.exe -m unittest discover -s tests
-```
-
-服务器（Linux）：
-
-```bash
+# Linux
 ./venv/bin/python -m unittest discover -s tests
+
+# Windows (PowerShell)
+.\venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-全部用例本地构造、**零真实网络与真实 API 调用**，正常几分钟内跑完。
+### 8.2 角色卡与测试环境解耦
 
-### 12.2 角色卡依赖（公开 clone 无需私有卡）
+- 测试套件默认加载公开示例卡 `characters/example/`；
+- 可通过环境变量 `QQC_TEST_CARD` 显式指定测试所用的角色卡目录：
+  ```bash
+  QQC_TEST_CARD=characters/example ./venv/bin/python -m unittest discover -s tests
+  ```
+- 涉及特定作息或阶段校验的用例会在临时目录动态构建独立的内存夹具卡，不依赖本地特定配置。
 
-代码仓库只带公开模板卡 `characters/example/`；私有卡（如 `characters/<角色名>/`）不进入公开仓。测试对角色卡的解析优先级是：
+### 8.3 仿真测试跳过说明
 
-1. 环境变量 `QQC_TEST_CARD`（显式指定要用的卡目录）；
-2. 回落到仓库自带的 `characters/example/`。
+在未生成本地私有测试简报时，运行测试套件可能会看到部分用例处于 `skipped` 状态。这是对聊仿真测试（依赖 `data/duo_sim/user_persona_brief.md`）的正常机制——该简报文件属于私有资产且被 `.gitignore` 忽略，公开仓库在缺少该简报时会自动安全跳过对应测试，不影响整体测试绿灯。
 
-公开测试代码不硬编码任何私有卡路径。
-
-因此公开 clone 直接跑测试就会自动用 `characters/example/`。想显式指定某张卡：
-
-```bash
-# Git Bash
-QQC_TEST_CARD=characters/example ./venv/Scripts/python.exe -m unittest discover -s tests
-```
-
-```powershell
-# PowerShell
-$env:QQC_TEST_CARD="characters/example"; ./venv/Scripts/python.exe -m unittest discover -s tests
-```
-
-少数需要核对"阶段名 / 作息文案"的用例不依赖任何真实卡，而是当场在临时目录里写一张最小夹具卡（`tests/helpers.py` 的 `make_fixture_card()`），所以换卡、无卡都不会再牵动它们。
-
-### 12.3 为什么会看到一批 skip（跳过）
-
-公开 clone 里通常会有约二三十条用例显示 `skipped`，原因只有一个：**对聊仿真器（duo_sim / final_rehearsal）依赖私有画像简报** `data/duo_sim/user_persona_brief.md`。该简报由私有 QQ 语料经下面的脚本生成，落在被 `.gitignore` 排除的 `data/` 下，**不会入库**：
-
-```bash
-./venv/Scripts/python.exe scripts/sim/duo_sim_persona.py --export "导出文件路径"
-```
-
-生成简报后这些用例会真正执行；没生成时它们统一 skip，而不是 FAIL/ERROR——这是刻意设计，避免公开 clone 一开箱就是红。
-
-### 12.4 `scripts/smoke/` 是真实 API 冒烟，别随手跑
-
-`scripts/smoke/` 下的脚本会调用**真实**的 LLM / TTS 接口，产生真实费用，请勿在无预期时批量运行。需要验证提示词人设或端到端管线时，优先用零成本的仿真沙箱 `companion.chat`（见 8.1）与上面的单元测试。
-
+> **注意事项**：`scripts/sim/full_sandbox.py` 支持使用示例角色卡进行端到端仿真；真实 API 冒烟可能产生费用，二次开发请优先使用单元测试或本地沙箱 `companion.chat`。

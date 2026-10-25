@@ -13,7 +13,7 @@ import logging
 import random
 import re
 from datetime import datetime
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from companion.affection import AffectionEngine
 from companion.datefmt import relativize_dates
@@ -30,7 +30,6 @@ from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.persona import LONG_HOLIDAY_MIN_SPAN, Persona, holiday_span
 from companion.prompts import (
-    FACE_PROMPT_BLOCK,
     face_prompt_block,
     PROACTIVE_DECISION_PROMPT,
     PROACTIVE_GENERATE_PROMPT,
@@ -40,12 +39,17 @@ from companion.prompts import (
     get_trust_description,
     holiday_prompt_note,
 )
+from companion.voice_planner import VoicePlanner, strip_legacy_voice_markup
+from companion.runtime_state import runtime_v1_enabled
 from companion.replier import (
     Replier,
     count_today_faces,
     face_daily_budget,
+    record_text_from_chunks,
     strip_face_markers,
+    strip_voice_record_prefix_for_history,
     typing_text_from_chunks_or_record,
+    fit_chunks,
 )
 from companion.stickers import StickerManager
 
@@ -101,7 +105,10 @@ def format_recent_chat(turns: List[Dict[str, Any]], max_chars: int = 60) -> str:
         return "（今天是你们第一次聊天）"
     lines = []
     for t in turns:
-        content = str(t.get("content") or "").strip().replace("\n", " ")
+        content = str(t.get("content") or "").strip()
+        if t.get("role") == "assistant":
+            content = strip_voice_record_prefix_for_history(content)
+        content = content.replace("\n", " ")
         if len(content) > max_chars:
             content = content[:max_chars] + "…"
         who = "他" if t.get("role") == "user" else "你"
@@ -155,6 +162,12 @@ class ProactiveScheduler:
         self.arcs = arcs
         # FIXES22：语音闸门（与主聊共用同一份 TTSManager 账目：开关/日上限/作息）
         self.tts = tts
+        self.runtime_events = None
+        self.last_voice_status = "none"
+        self.last_voice_reason = ""
+        self.last_voice_at: Optional[datetime] = None
+        self.last_turn_voice_status = "none"
+        self.last_turn_at: Optional[datetime] = None
         self._typing_on = (
             timing_config is not None
             and timing_config.typing_indicator_enabled
@@ -505,9 +518,19 @@ class ProactiveScheduler:
         tts_cfg = getattr(getattr(self, "tts", None), "config", None)
         voice_gated_note = (not voice_ok) and bool(getattr(tts_cfg, "enabled", False))
         # 完整人格 system prompt 注入（主动消息传空串：作息注记不会误加"你其实是醒着的"）
-        system_prompt = await self.assembler.assemble_system_prompt(
-            "", voice_ok, voice_gated_note=voice_gated_note
+        runtime_enabled = runtime_v1_enabled(None, self.assembler)
+        runtime_block = (
+            await self.runtime_events.render_prompt()
+            if runtime_enabled and self.runtime_events is not None else ""
         )
+        if self.assembler is None:
+            # 老的轻量调用方允许不传 assembler，至少保留角色背景而不崩溃
+            system_prompt = getattr(self.persona, "core_description", "")
+        else:
+            system_prompt = await self.assembler.assemble_system_prompt(
+                "", voice_ok, voice_gated_note=voice_gated_note,
+                now=datetime.now(), runtime_state_block=runtime_block,
+            )
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": self._for_her(gen_user_prompt)},
@@ -530,15 +553,38 @@ class ProactiveScheduler:
         if getattr(self.persona.world, "face_usage", "normal") == "rare":
             used_faces = await count_today_faces(self.db)
             face_budget = face_daily_budget(self.persona.world, used_faces)
+        # 与主聊完全同源：她只产正文，规划器直接从原话形成语音段，不做模型整理或补救。
+        reply_text = strip_legacy_voice_markup(reply_text)
+        planner = VoicePlanner(
+            getattr(self.assembler, "voice_frequency", "frequent"),
+            max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
+        )
+        runtime_plan = planner.plan("", reply_text, voice_allowed=voice_ok, requested=False)
+        body_text = runtime_plan.body_text if runtime_plan.has_voice else reply_text
         chunks, clean_text = self.replier.parse_reply(
-            reply_text,
+            body_text,
             source="proactive",
             face_budget=face_budget,
-            voice_allowed=voice_ok,
-            voice_max_chars=getattr(
-                getattr(self.tts, "config", None), "max_chars", 60
-            ),
+            voice_allowed=False,
+            voice_max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
         )
+        if runtime_plan.has_voice:
+            voice_chunk = {
+                "type": "voice", "content": runtime_plan.voice_text,
+                "_runtime_voice": True,
+            }
+            before_text = getattr(runtime_plan, "before_text", None)
+            if before_text is None:
+                chunks.append(voice_chunk)
+            else:
+                before_chunks, _ = self.replier.parse_reply(
+                    before_text, source="proactive", face_budget=face_budget,
+                    voice_allowed=False,
+                    voice_max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
+                )
+                chunks.insert(min(len(before_chunks), len(chunks)), voice_chunk)
+            chunks = fit_chunks(chunks, self.replier.config.max_chunks)
+        clean_text = record_text_from_chunks(chunks) or clean_text
         if not chunks:
             return False
 
@@ -549,7 +595,29 @@ class ProactiveScheduler:
             typing_text_from_chunks_or_record(chunks, clean_text)
         )
         await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
+        clean_text = record_text_from_chunks(chunks) or clean_text
+        if runtime_plan.has_voice:
+            if any(c.get("type") == "voice" and c.get("_voice_delivery") == "sent" for c in chunks):
+                self.last_voice_status = "sent"
+            elif any(c.get("_runtime_voice") and c.get("_voice_delivery") == "text" for c in chunks):
+                self.last_voice_status = "text_fallback"
+            elif any(c.get("_runtime_voice") and c.get("_voice_delivery") == "failed" for c in chunks):
+                self.last_voice_status = "failed"
+            else:
+                self.last_voice_status = "unconfirmed"
+            self.last_voice_reason = next(
+                (c.get("_voice_failure_reason", "") for c in chunks if c.get("_runtime_voice")), ""
+            )
+            self.last_voice_at = datetime.now()
+        self.last_turn_voice_status = self.last_voice_status if runtime_plan.has_voice else "none"
+        self.last_turn_at = datetime.now()
 
+        # 实验路径只按最终实发结果记语音；没有语音计划时不额外制造未尝试记录
+        if runtime_enabled and self.runtime_events is not None:
+            try:
+                await self.runtime_events.record_delivery_chunks(chunks, reply_text, now=datetime.now())
+            except Exception as e:
+                logger.warning(f"[Proactive] 运行时语音账本写入失败，不影响落库: {e}")
         # 发送后落库并累加未回复计数
         await self.memory.save_proactive_turn(clean_text)
         await self.increment_unanswered_count()
@@ -639,6 +707,12 @@ class ProactiveScheduler:
             except Exception as e:
                 logger.warning(f"[Proactive] 生活主线状态推进异常: {e}")
 
+        # 时间带来的情绪变化（均值回归、冷落）只在这里和观察者结算时推进，组装提示词不推
+        aff_for_mood = await self.affection.get_state()
+        await self.mood.update_mood(
+            composite_affection=float(aff_for_mood.get("composite", 30.0)),
+            stage=aff_for_mood.get("stage"),
+        )
         # 第一层·前置闸门。FIXES24：事件通道豁免第 4 条（"上一条主动消息机主尚未回复"），
         # 所以这里先用 skip_unanswered_reply=True 过一遍零成本闸门——
         # 免打扰 / 60 分钟 / 连续未回(第3条) / 晚安 / 情绪下限 仍然照拦，
@@ -734,6 +808,9 @@ class ProactiveScheduler:
             logger.warning(f"[Proactive] LLM 决策解析失败: {e}")
             return
 
+        if not isinstance(data, dict):
+            logger.warning(f"[Proactive] 决策返回不是 JSON 对象，已跳过本周期: {type(data).__name__}")
+            return
         choice = str(data.get("choice", "B")).upper().strip()
         topic_hint = str(data.get("topic_hint", "")).strip()
         decision_reason = str(data.get("reason", ""))

@@ -211,9 +211,11 @@ class TestSceneEndCondition(unittest.TestCase):
         self.assertTrue(D.hit_end_marker("今天太累了 算了", s1))
         self.assertFalse(D.hit_end_marker("今天做了个实验", s1))
 
-    def test_四张卡都带齐任务书要求的字段(self):
+    def test_场景卡都带齐任务书要求的字段(self):
         """背景/开场/情绪走向/收场条件/时钟推进规则，一个都不能少。"""
-        self.assertEqual(sorted(D.SCENES), ["S1", "S2", "S3", "S4"])
+        # S5 = "管理员喊累"情境卡（2026-10-22 加）；
+        # S6 = 失约讨语音·账浓度探针（2026-10-23 FIXES27 验收加，字段要求同样适用）
+        self.assertEqual(sorted(D.SCENES), ["S1", "S2", "S3", "S4", "S5", "S6"])
         for k, s in D.SCENES.items():
             with self.subTest(scene=k):
                 self.assertTrue(s.background.strip(), "缺背景设定")
@@ -435,7 +437,7 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(m["verdict"], "WARN")
 
     def test_称呼漂移_长称呼出现即FAIL(self):
-        turns = _pair(1, "在吗", "阿俊你吃了吗") + _pair(2, "吃了", "嗯嗯")
+        turns = _pair(1, "在吗", "小明同学你吃了吗") + _pair(2, "吃了", "嗯嗯")
         m = D.metric_address_drift(turns, stage=1)
         self.assertEqual(m["verdict"], "FAIL")
         self.assertEqual(m["long_name_hits"], 1)
@@ -681,7 +683,7 @@ class TestTurnDriver(_FakeGatewayBase):
             notes = [r.get("note", "") for r in sim.raw_turns if r.get("speaker") == "system"]
             self.assertTrue(
                 any("模拟器" in n for n in notes),
-                f"空回复兜底没有留痕，报告会被误读成青梓的病灶：{notes}",
+                f"空回复兜底没有留痕，报告会被误读成模型的病灶：{notes}",
             )
         finally:
             await sim.close()
@@ -763,7 +765,8 @@ class TestSeedIntegration(_FakeGatewayBase):
             st = await sim.affection.get_state()
             self.assertEqual(st["stage"], 5, f"注入后阶段不是 5：{st}")
             self.assertEqual(D.determine_stage(st["composite"]), 5)
-            self.assertAlmostEqual(st["dims"]["warmth"], 95.0, places=1)
+            # 种子 = 阶段 5 阈值带中点（随 STAGE_THRESHOLDS 走，不写死数字）
+            self.assertAlmostEqual(st["dims"]["warmth"], D.stage_seed_dims(5)["warmth"], places=1)
         finally:
             await sim.close()
 
@@ -780,11 +783,13 @@ class TestSeedIntegration(_FakeGatewayBase):
             await sim.close()
 
     async def test_不传种子时保持角色卡初始阶段(self):
-        """回归保护：种子是可选参数，不传时阶段 1 的行为一个字都不能变。"""
+        """回归保护：种子是可选参数，不传时开局阶段完全由角色卡（affection.start_stage）决定。"""
         sim = await self._make_sim("S1", turns=3)
         try:
             st = await sim.affection.get_state()
-            self.assertEqual(st["stage"], 1, f"未注入却改掉了开局阶段：{st}")
+            # 不硬编码阶段值：本机 config 激活哪张卡，就按哪张卡的 start_stage 期望（缺省 1）
+            expected = getattr(sim.persona.affection, "start_stage", None) or 1
+            self.assertEqual(st["stage"], expected, f"未注入却改掉了开局阶段：{st}")
             self.assertIsNone(sim.seeded_dims)
         finally:
             await sim.close()

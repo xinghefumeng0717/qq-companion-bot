@@ -1,4 +1,4 @@
-"""benchmark_v5 指标纯函数（真人回复与青梓回复走同一套口径）"""
+"""benchmark_v5 指标纯函数（真人回复与模型回复走同一套口径）"""
 
 import importlib.util
 import os

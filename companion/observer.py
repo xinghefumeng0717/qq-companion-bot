@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import collections
-import json
 import logging
 import math
 import re
@@ -25,6 +24,7 @@ from companion.prompts import (
     OBSERVER_SELF_FACTS_USER,
     OBSERVER_SYSTEM_PROMPT,
     OBSERVER_USER_PROMPT,
+    OBSERVER_RUNTIME_EVENT_RULES,
 )
 from companion.stickers import StickerManager
 
@@ -87,6 +87,16 @@ def _meetup_history_block(
     return "\n".join(lines)
 
 
+def _followup_similarity(a: str, b: str) -> float:
+    """待跟进标题的字符 Jaccard，用于合并同一件事的近义写法。"""
+    def chars(text: str) -> set:
+        value = set(re.findall(r"[\u4e00-\u9fa5]", text or ""))
+        return value or set((text or "").lower())
+    aa, bb = chars(a), chars(b)
+    union = aa | bb
+    return len(aa & bb) / len(union) if union else 0.0
+
+
 def fact_to_str(fact: Any) -> str:
     """观察者回的一条事实转成字符串：字符串直接用；字典按 FACT_DICT_KEYS 取正文，
     附加键拼在括号里；取不到返回空串（调用方按畸形处理）。"""
@@ -145,6 +155,8 @@ class Observer:
         self.self_memory = False
         # 线下见面（[character].meetup_recap）：由 main 挂上 MeetupManager；None = 关
         self.meetups = None
+        # runtime_state_v1：None = 不接收事件字段，旧观察者输出保持不变
+        self.runtime_events = None
 
     async def settle_turn(
         self,
@@ -194,6 +206,8 @@ class Observer:
         )
 
         system_prompt = OBSERVER_SYSTEM_PROMPT
+        if self.runtime_events is not None:
+            system_prompt += OBSERVER_RUNTIME_EVENT_RULES
         if getattr(self.memory, "fact_layers", False) is True:
             system_prompt += OBSERVER_FACT_CORE_RULES
         if self.self_memory is True:
@@ -285,6 +299,8 @@ class Observer:
             clamped_a += 0.3
             clamped_t += 0.05
 
+        if not isinstance(new_aff_state, dict):
+            new_aff_state = {"composite": 0.0, "stage": None}
         await self.mood.update_mood(
             composite_affection=new_aff_state["composite"],
             stage=new_aff_state.get("stage") if isinstance(new_aff_state, dict) else None,
@@ -341,6 +357,12 @@ class Observer:
             logger.warning(f"[Observer] 字段 followups 类型异常 ({type(followups).__name__}: {followups!r})，已忽略")
         if isinstance(followups, list):
             now_dt = datetime.now()
+            try:
+                existing_rows = await self.memory.get_open_followups(limit=50)
+            except Exception as e:
+                logger.warning(f"[Observer] 读取既有待跟进失败，按无重复处理: {e}")
+                existing_rows = []
+            pending_topics = [str(r.get("topic") or "") for r in existing_rows]
             for fu in followups:
                 if not isinstance(fu, dict):
                     logger.warning(f"[Observer] 丢弃畸形 followup ({type(fu).__name__}: {fu!r})")
@@ -357,6 +379,9 @@ class Observer:
                 if not math.isfinite(remind_hours) or not (0.0 <= remind_hours <= MAX_REMIND_HOURS):
                     logger.warning(f"[Observer] followups[].remind_after_hours 越界({remind_hours})，回退 {DEFAULT_REMIND_HOURS} 小时")
                     remind_hours = DEFAULT_REMIND_HOURS
+                if any(_followup_similarity(topic, old) >= 0.60 for old in pending_topics):
+                    logger.info(f"[Observer] 待跟进近义去重，跳过重复事项: {topic}")
+                    continue
                 remind_dt = now_dt + timedelta(hours=remind_hours)
                 remind_str = remind_dt.strftime(TIME_FORMAT)
                 await self.db.execute(
@@ -366,6 +391,7 @@ class Observer:
                     """,
                     (topic, remind_str, now_str()),
                 )
+                pending_topics.append(topic)
 
         # 6. 标记完成的待跟进事项（精确匹配，不匹配则记日志；非字符串项跳过）
         done_topics = data.get("done_followups")
@@ -397,6 +423,27 @@ class Observer:
                 gateway=self.gateway,
             )
 
+        if self.runtime_events is not None:
+            try:
+                if recent_turns:
+                    last_turn = recent_turns[-1]
+                    try:
+                        evidence_turn_id = last_turn.get("id")
+                    except Exception:
+                        evidence_turn_id = dict(last_turn).get("id")
+                else:
+                    evidence_turn_id = None
+                applied = await self.runtime_events.apply_observation(
+                    data.get("state_events"),
+                    user_text=user_message,
+                    assistant_text=assistant_reply,
+                    now=now_dt,
+                    evidence_turn_id=evidence_turn_id,
+                )
+                if applied:
+                    logger.info(f"[Observer] 已写入 {applied} 条有证据的计划状态变化")
+            except Exception as e:
+                logger.warning(f"[Observer] 计划状态写入失败，已跳过: {e}")
         return data
 
     async def _meetup_history_text(

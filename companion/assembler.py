@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -16,13 +17,17 @@ from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.persona import Persona, holiday_span, is_sleep_activity
 from companion.prompts import (
-    FACE_PROMPT_BLOCK,
     face_prompt_block,
     IMAGE_SEEN_INSTRUCTION,
     QUOTE_USAGE_EXAMPLES,
     QUOTE_USAGE_RULES,
     SYSTEM_PROMPT_TEMPLATE,
     VOICE_PROMPT_BLOCK,
+    VOICE_PLANNER_RULES,
+    VOICE_FREQUENT_NOTE,
+    VOICE_EXPLICIT_NOTE,
+    VOICE_PLANNER_EXPLICIT_RULES,
+    VOICE_PLANNER_OFF_RULES,
     VOICE_UNAVAILABLE_NOTE,
     format_numbered_batch,
     get_frustration_description,
@@ -31,6 +36,7 @@ from companion.prompts import (
     get_trust_description,
     holiday_prompt_note,
 )
+from companion.replier import strip_voice_record_prefix_for_history
 from companion.safety import SafetyChecker
 from companion.stickers import StickerManager
 
@@ -57,6 +63,58 @@ def gap_note(now_dt: datetime, prev_dt: Optional[datetime], show_date: bool = Tr
     if not show_date:
         return f"（{weekday} {now_dt.strftime('%H:%M')}，离上一句已经过了 {span}）\n"
     return f"（{now_dt.strftime('%m-%d %H:%M')} {weekday}，离上一句已经过了 {span}）\n"
+
+
+REPEAT_SCAN_TURNS = 6
+_CLAUSE_SPLIT_RE = re.compile(r"[，。！？!?,~～…\n]+")
+_NON_WORD_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]")
+
+
+def repeated_phrases(texts: List[str], min_len: int = 4, limit: int = 3) -> List[str]:
+    """她最近几条里说了不止一次的小句（近义也算，字的二元组重合 ≥ 0.6）；返回最近的说法。"""
+    clauses: List[str] = []
+    for text in texts:
+        for raw in _CLAUSE_SPLIT_RE.split(re.sub(r"\[[^\]]*\]", "", text or "")):
+            c = _NON_WORD_RE.sub("", raw)
+            if len(c) >= min_len:
+                clauses.append(c)
+
+    def grams(x: str) -> set:
+        return {x[i:i + 2] for i in range(len(x) - 1)}
+
+    groups: List[List[str]] = []
+    for c in clauses:
+        g = grams(c)
+        for grp in groups:
+            h = grams(grp[0])
+            if g and h and len(g & h) / len(g | h) >= 0.6:
+                grp.append(c)
+                break
+        else:
+            groups.append([c])
+    hits = [grp[-1] for grp in groups if len(grp) >= 2]
+    return hits[-limit:]
+
+
+_FACE_TAG_RE = re.compile(r"\[[^\]]{1,12}\]")
+
+
+_ACK_WORDS = {
+    "", "好", "好的", "好吧", "嗯", "嗯嗯", "嗯呢", "哦", "噢", "喔", "行", "行吧", "ok", "OK",
+    "收到", "知道了", "晓得了", "哈", "哈哈", "哈哈哈", "嘿嘿", "好滴", "好哒",
+}
+
+
+def is_short_ack(text: str) -> bool:
+    """他这句是不是只有"好/嗯/哈哈/表情"这类应答（问候、提问不算）。"""
+    bare = _NON_WORD_RE.sub("", _FACE_TAG_RE.sub("", text or ""))
+    return bare in _ACK_WORDS
+
+
+def last_clause(text: str) -> str:
+    """她一条回复的最后一个小句（去掉标记），用来提示收尾别复读。"""
+    parts = [p.strip() for p in _CLAUSE_SPLIT_RE.split(re.sub(r"\[[^\]]*\]", "", text or "")) if p.strip()]
+    return parts[-1][:20] if parts else ""
 
 
 class PromptAssembler:
@@ -89,6 +147,10 @@ class PromptAssembler:
         self.self_memory = False
         # 对他的看法（[character].impressions，默认关）：由 main 按配置置 True
         self.impressions = False
+        # runtime_state_v1：默认关；main 负责挂事件账本与语音频率
+        self.runtime_state_v1 = False
+        self.runtime_events = None
+        self.voice_frequency = "frequent"
         # 线下见面（[character].meetup_recap，默认关）：由 main 挂上 MeetupManager
         self.meetups = None
         self.last_assembled_prompt: str = ""
@@ -193,9 +255,9 @@ class PromptAssembler:
             logger.error(f"[Assembler] 生成看法块异常: {e}")
             return ""
 
-    async def _build_diaries_block(self, current_v: float) -> str:
+    async def _build_diaries_block(self, current_v: float, now: Optional[datetime] = None) -> str:
         try:
-            diaries = await self.memory.get_active_diaries(current_valence=current_v)
+            diaries = await self.memory.get_active_diaries(current_valence=current_v, now=now)
             if not diaries:
                 return ""
             items = "\n".join([f"  - {d}" for d in diaries])
@@ -204,9 +266,9 @@ class PromptAssembler:
             logger.error(f"[Assembler] 生成记忆日记块异常: {e}")
             return ""
 
-    async def _build_followups_block(self) -> str:
+    async def _build_followups_block(self, now: Optional[datetime] = None) -> str:
         try:
-            rows = await self.memory.get_open_followups(due_only=True, limit=5)
+            rows = await self.memory.get_open_followups(due_only=True, limit=5, now=now)
             if not rows:
                 return ""
             items = "\n".join([f"  - {self.memory.format_followup(r)}" for r in rows])
@@ -215,7 +277,7 @@ class PromptAssembler:
             logger.error(f"[Assembler] 生成待跟进块异常: {e}")
             return ""
 
-    async def _build_meetups_block(self) -> str:
+    async def _build_meetups_block(self, now: Optional[datetime] = None) -> str:
         if self.meetups is None:
             return ""
         try:
@@ -225,7 +287,7 @@ class PromptAssembler:
         except Exception as e:
             logger.error(f"[Assembler] 生成约定块异常: {e}")
             return ""
-        now = datetime.now()
+        now = now or datetime.now()
         upcoming, passed = [], []
         for r in rows:
             when_dt = parse_dt(r.get("when_at"))
@@ -244,10 +306,10 @@ class PromptAssembler:
             lines.extend(f"    - {self.meetups.describe(r)}" for r in passed)
         return "\n【约好的见面】（见面本身发生在聊天之外）\n" + "\n".join(lines)
 
-    async def _build_suppressed_block(self) -> str:
+    async def _build_suppressed_block(self, now: Optional[datetime] = None) -> str:
         try:
             # 时效规则（48h + "之后他又跟她聊过就作废"）收口在 memory.get_live_desires
-            valid_items = [r["content"] for r in await self.memory.get_live_desires(limit=5)]
+            valid_items = [r["content"] for r in await self.memory.get_live_desires(limit=5, now=now)]
             if not valid_items:
                 return ""
 
@@ -272,6 +334,9 @@ class PromptAssembler:
         user_message: str,
         voice_allowed: bool = False,
         voice_gated_note: bool = False,
+        voice_delivery_note: str = "",
+        now: Optional[datetime] = None,
+        runtime_state_block: str = "",
     ) -> str:
         """按 §6.2 组装完整的 System Prompt
 
@@ -282,9 +347,10 @@ class PromptAssembler:
         `voice_gated_note`（FIXES27）：TTS 开着、但这一轮作息闸门没过时给一段
         "这会儿只能打字"的实情说明（VOICE_UNAVAILABLE_NOTE）。三态优先级：
         voice_allowed 的完整能力说明 > voice_gated_note 的不可用说明 > 空串。
-        默认 False，所以老调用方的输出与改造前逐字节一致。
+        `voice_delivery_note`：上一轮真实投递结果的补充事实，只有主聊有投递回执时才传。
+        默认空串，所以老调用方的输出与改造前逐字节一致。
         """
-        now_dt = datetime.now()
+        now_dt = now or datetime.now()
         weekday_str = WEEKDAYS[now_dt.weekday()]
         current_time_str = f"{now_dt.strftime(TIME_FORMAT)} 星期{weekday_str}"
 
@@ -299,13 +365,15 @@ class PromptAssembler:
         composite_aff = float(aff_state.get("composite", 30.0))
         stage_idx = int(aff_state.get("stage", 0))
 
-        # 组装前先更新一次情绪自然均值回归 (conv=0)
-        mood_state = await self.mood.update_mood(composite_affection=composite_aff, stage=stage_idx)
+        # 组装提示词是只读操作：情绪只在明确的结算点推进（观察者每轮结算一次、主动消息
+        # 调度每次醒来一次）。以前这里也推一次——主聊、主动决策、语音补救各组装一次，
+        # 一轮里心情就被推好几步（每步还带随机噪声），光"读状态"就把她改了
+        mood_state = await self.mood.get_state()
         v = float(mood_state.get("v", 2.0))
         a = float(mood_state.get("a", 1.0))
         t = float(mood_state.get("t", 7.0))
         frustration = float(mood_state.get("frustration", 0.0))
-        hours_since_chat = await self.mood.get_hours_since_last_chat()
+        hours_since_chat = await self.mood.get_hours_since_last_chat(now=now_dt)
 
         # 2. 各文本段渲染
         role_block = self._build_role_block()
@@ -362,15 +430,36 @@ class PromptAssembler:
             + await self._build_impressions_block()
             + await self._build_self_facts_block(user_message)
         )
-        diaries_block = await self._build_diaries_block(v)
-        followups_block = await self._build_followups_block() + await self._build_meetups_block()
-        suppressed_block = await self._build_suppressed_block()
-        life_arcs_block = await self._build_life_arcs_block()
+        diaries_block = await self._build_diaries_block(v, now=now_dt)
+        followups_block = await self._build_followups_block(now=now_dt) + await self._build_meetups_block(now=now_dt)
+        suppressed_block = await self._build_suppressed_block(now=now_dt)
+        if self.runtime_state_v1:
+            # 生活主线单列为系统创作，不与对账状态混在一个事实块里
+            life_arcs_block = ""
+            if self.arcs is not None:
+                runtime_state_block += await self.arcs.build_prompt_block(as_script=True, now=now_dt)
+        else:
+            life_arcs_block = await self._build_life_arcs_block()
 
         # 安全边界检查 (§13)：模板里占位符位于 {stage_block} 之后、收尾句之前，
         # 保证危机/依赖指引排在"最高优先级"阶段规则之后，不被阶段规则压过
         safety_text = SafetyChecker.check_message(user_message)
         safety_block = f"\n【安全边界】\n{safety_text}" if safety_text else ""
+
+        if voice_allowed:
+            # 语音规划与 runtime_state_v1 解耦：她只写正文，系统从原话选句。
+            if self.voice_frequency == "off":
+                voice_block = VOICE_PLANNER_OFF_RULES
+            elif self.voice_frequency == "explicit":
+                voice_block = VOICE_PLANNER_EXPLICIT_RULES
+            else:
+                voice_block = VOICE_PLANNER_RULES
+        else:
+            voice_block = VOICE_UNAVAILABLE_NOTE if voice_gated_note else ""
+        if voice_delivery_note:
+            voice_block = (
+                f"{voice_block}\n" if voice_block else ""
+            ) + f"  语音投递核对：{voice_delivery_note}"
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             role_block=role_block,
@@ -392,11 +481,8 @@ class PromptAssembler:
             # 主动消息与主聊共用一个 assembler，共享可变开关会互相串味。
             # FIXES27：三态。开着但闸门没过（voice_gated_note）时给"只能打字"的实情，
             # 免得她答应了发语音却只发出文字；两个都 False 仍是空串，旧行为不变。
-            voice_block=(
-                VOICE_PROMPT_BLOCK
-                if voice_allowed
-                else (VOICE_UNAVAILABLE_NOTE if voice_gated_note else "")
-            ),
+            voice_block=voice_block,
+            runtime_state_block=runtime_state_block,
             stage_block=stage_block,
             routine_activity=routine_activity,
             mood_desc=mood_desc,
@@ -426,6 +512,9 @@ class PromptAssembler:
         numbered_batch: Optional[List[Dict[str, Any]]] = None,
         voice_allowed: bool = False,
         voice_gated_note: bool = False,
+        voice_delivery_note: str = "",
+        now: Optional[datetime] = None,
+        runtime_state_block: str = "",
     ) -> Tuple[List[Dict[str, Any]], str]:
         """组装发送给 LLM 的全套 messages：system + 工作记忆 + 当前用户输入
 
@@ -437,7 +526,12 @@ class PromptAssembler:
         没过时的"只能打字"说明）；默认 False，既有调用方输出不变。
         """
         system_prompt = await self.assemble_system_prompt(
-            user_message, voice_allowed, voice_gated_note=voice_gated_note
+            user_message,
+            voice_allowed,
+            voice_gated_note=voice_gated_note,
+            voice_delivery_note=voice_delivery_note,
+            now=now,
+            runtime_state_block=runtime_state_block,
         )
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
@@ -447,12 +541,15 @@ class PromptAssembler:
         prev_dt: Optional[datetime] = None
         for turn in recent_turns:
             content = turn["content"]
+            if turn["role"] == "assistant":
+                # 存档前缀只用于数据库存储，不能当成她下一次发送语音的示范。
+                content = strip_voice_record_prefix_for_history(content)
             turn_dt = parse_dt(turn.get("created_at"))
             if turn["role"] == "user" and turn_dt is not None:
                 content = gap_note(turn_dt, prev_dt, show_date) + content
             prev_dt = turn_dt or prev_dt
             messages.append({"role": turn["role"], "content": content})
-        now_note = gap_note(datetime.now(), prev_dt, show_date)
+        now_note = gap_note(now or datetime.now(), prev_dt, show_date)
 
         # 本轮用户输入
         block = format_numbered_batch(numbered_batch)
@@ -465,6 +562,23 @@ class PromptAssembler:
             # 单条消息的老路径：与 FIXES21 之前逐字一致
             user_text = user_message
         user_text = now_note + user_text
+        # 她最近几条里翻来覆去说的话（生产实锤："到了喊你"一段里说了 4 遍）：点名告诉她，
+        # 比在规则里写"别重复"管用。只附在本轮输入后面，不进系统提示词（缓存照常命中）
+        repeated = repeated_phrases(
+            [t["content"] for t in recent_turns if t.get("role") == "assistant"][-REPEAT_SCAN_TURNS:]
+        )
+        her_recent = [t["content"] for t in recent_turns if t.get("role") == "assistant"]
+        if repeated:
+            user_text += "\n（你最近几条已经说过" + "".join(f"「{p}」" for p in repeated) + "，这轮别再说一遍。）"
+        elif is_short_ack(user_message) and her_recent:
+            # 他只回"好/嗯/表情"时最容易拖尾：把她刚说过的收尾话摆出来，没新事就短收
+            tails = [last_clause(t) for t in her_recent[-2:]]
+            tails = [t for t in tails if t]
+            if tails:
+                user_text += (
+                    "\n（他只回了个短句。你刚才已经说过" + "".join(f"「{t}」" for t in tails)
+                    + "，没有新内容就简短收住，别把同一个意思再讲一遍。）"
+                )
 
         if image_data_url:
             # 只有一步看图（[reply].vision_direct）才会带图进来：让她回完留一行【看到：…】给记录用

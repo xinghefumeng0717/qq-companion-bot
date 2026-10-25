@@ -1,8 +1,8 @@
-"""对聊仿真器：AI 扮演阿俊 × 青梓全管道多轮冒烟 (scripts/sim/duo_sim.py)
+"""对聊仿真器：AI 扮演阿俊 × 小艾全管道多轮冒烟 (scripts/sim/duo_sim.py)
 
 FIXES18：现有评测全是**单发探针**，而"告别拖尾 / 一梗连刷 / 话量膨胀 / 称呼漂移 /
 阶段越界"这一类病灶天生要多轮才发作，只能靠上线后攒 2~3 天生产数据暴露，反馈环太长。
-本脚本造一个对聊仿真器：让 v4-pro 扮演"他"，与青梓**全管道**（角色卡→组装→回复→
+本脚本造一个对聊仿真器：让 v4-pro 扮演"他"，与小艾**全管道**（角色卡→组装→回复→
 观察者→好感度/情绪/记忆/生活主线）交替对聊，把多轮病灶在部署前逼出来。
 
 两侧模型
@@ -141,7 +141,7 @@ FACE_WARN_N = 6                     # 一局里带脸的气泡数上限
 FACE_BUBBLE_WARN_RATIO = 0.5        # 带脸气泡 / 她的全部气泡，超过即判"刷屏"
 
 # 单发复用口径（与 benchmark_v4 一致）
-NAME_RE = re.compile(r"阿俊|小W同学")
+NAME_RE = re.compile(r"[\u4e00-\u9fffA-Za-z]{1,3}同学")
 QUESTION_MARK_RE = re.compile(r"[？?]")
 # 汇报腔黑名单：沿用 scripts/smoke/smoke_fixes16.py 的 REPORT_TONE_WORDS
 REPORT_TONE_WORDS = ["刚刚", "结果", "综上", "总结", "汇报", "如下", "第一", "第二", "总而言之"]
@@ -199,6 +199,7 @@ TIME_PATCH_MODULES = (
     "companion.turn_handler",
     "companion.arcs",
     "companion.observer",
+    "companion.meetups",
     # DEEP_AUDIT B-2：漏了它计费峰谷就按真实墙钟走——仿真时钟跨日必然错档
     # （落库 created_at 走仿真钟、cost_estimate 走真钟，成本与熔断全失真）。
     "companion.config",
@@ -374,6 +375,50 @@ SCENES: Dict[str, Scene] = {
         reply_delay_min=(0.5, 6.0),
         min_turns=12,
         max_turns=25,
+    ),
+    "S5": Scene(
+        key="S5",
+        title="管理员喊累的一天（小艾语境版 S1）",
+        probe="傲娇探针的多轮版：她是先骂再兜底，还是变成护士式连环叮嘱/直球关心",
+        background=(
+            "你（管理员，终末地工业的负责人）今天在帝江号从早忙到现在：裂隙巡查、协议回收的"
+            "报告堆成山，晚饭都没正经吃。你想找她说说话，但**你不会直接说“我好累你安慰我”**"
+            "——你只会把今天发生的事一件件讲出来，说到最后自然就露出来了。"
+            "你要的是有人接住，不是有人教你怎么做。"
+        ),
+        opening="今天真的累死了",
+        mood_arc=(
+            "从累到想倾诉 → 她回应后你可能稍微松一点，但不会变得热情；"
+            "你不会连发很多条诉苦，累了就懒得打字"
+        ),
+        end_markers=("算了", "不说了", "先这样", "睡了", "去休息了", "没力气了"),
+        clock_step_min=6.0,
+        reply_delay_min=(1.0, 9.0),
+        min_turns=12,
+        max_turns=25,
+    ),
+    "S6": Scene(
+        key="S6",
+        title="失约后半夜出现还讨语音（小艾语境·账浓度探针）",
+        probe="FIXES27 验收：她翻不翻账、同一天是不是只翻一次、会不会缠着同一件事念叨；"
+              "他张口讨语音时她怎么接（仿真未装配 TTS，看的是她的措辞姿态）",
+        background=(
+            "你（管理员，终末地工业的负责人）昨天傍晚答应过她「晚上来找你说话」，"
+            "结果裂隙巡查的报告堆成山，忙到直接把这事忘了。现在半夜了，你终于冒出来，"
+            "一上来先嬉皮笑脸打哈哈，还想讨一句语音当补偿。你不会立刻郑重道歉——"
+            "先插科打诨两句，她要是真戳到痛处你才会认怂。你也不会主动提昨天那个约，"
+            "看她会不会翻出来。"
+        ),
+        opening="睡了没～昨儿说好来找你的，加班给忙忘了，别生气哈",
+        mood_arc=(
+            "开场嬉皮笑脸讨打 → 她刺你你就嘴硬两句 → 她真翻出旧账你就认怂哄她 → "
+            "哄好了就松弛下来聊点闲的"
+        ),
+        end_markers=("睡了", "先这样", "去忙了", "拜拜", "明天说"),
+        clock_step_min=6.0,
+        reply_delay_min=(1.0, 9.0),
+        min_turns=12,
+        max_turns=20,
     ),
     "S3": Scene(
         key="S3",
@@ -553,7 +598,7 @@ def build_user_system_prompt(brief: str, scene: Scene) -> str:
     什么"，纪律给输出格式。纪律放最后，因为 LLM 对末尾指令的遵守率最高。
     """
     return (
-        "你正在扮演一个真实的人：阿俊，杭州一所高校的大二男生。你要和沈知予（网名青梓）"
+        "你正在扮演一个真实的人：阿俊，杭州一所高校的大二男生。你要和沈知予（网名小艾）"
         "在 QQ 上聊天。\n\n"
         "# 一、你是什么样的人（来自真实聊天语料的统计，禁止凭印象发挥）\n"
         f"{brief}\n\n"
@@ -574,7 +619,7 @@ def build_user_system_prompt(brief: str, scene: Scene) -> str:
     )
 
 
-# 青梓侧 system prompt 的已知区块头（以 companion/prompts.py 模板及各子块实际渲染的
+# 小艾侧 system prompt 的已知区块头（以 companion/prompts.py 模板及各子块实际渲染的
 # 标题为准）。子块【关于他】【她的记忆】【待跟进】【欲言又止】【她最近的生活】
 # 【安全边界】是【事实】内部的分段，单列是为了看清"记忆与生活主线把提示词撑大了多少"。
 PROMPT_BLOCK_HEADS = (
@@ -807,7 +852,7 @@ def metric_address_drift(turns: Sequence[Dict[str, Any]], stage: int) -> Dict[st
 
     阶段允许集按角色卡的称呼线：阶段 0~3 允许「小W同学」作礼节性偶用但**不该出现**
     （真人基线 9 个月 0 次），阶段 4+ 才逐步放开。这里按 benchmark_v4 口径：
-    「阿俊」出现即 FAIL（长称呼在初识阶段出现 = 越界）。
+    任意「某某同学」长称呼在初识阶段出现都判为越界。
     """
     hits = []
     per_turn = []
@@ -819,7 +864,7 @@ def metric_address_drift(turns: Sequence[Dict[str, Any]], stage: int) -> Dict[st
         if found:
             per_turn.append({"turn": t["idx"], "text": text[:60]})
             hits.extend(found)
-    long_name = [h for h in hits if h == "阿俊"]
+    long_name = list(hits)
     n_her = sum(1 for t in turns if t.get("speaker") == "her") or 1
     if long_name:
         verdict = "FAIL"
@@ -1235,7 +1280,7 @@ def render_transcript(
     A(f"- 回合数：{len(turns)} ｜ 结束原因：{meta.get('end_reason')}")
     A(f"- 成本实报：¥{meta.get('cost', 0):.4f}")
     A("")
-    A("> 左列是他（AI 扮演），右列是她（青梓全管道实跑）。`[沉默]` 表示她本轮选择不回。")
+    A("> 左列是他（AI 扮演），右列是她（小艾全管道实跑）。`[沉默]` 表示她本轮选择不回。")
     A("")
     A("| # | 时间 | 他 | 她 |")
     A("| --- | --- | --- | --- |")
@@ -1509,7 +1554,7 @@ class TurnRecord:
 class DuoSimulator:
     """一局对聊仿真。
 
-    青梓侧走**生产同一条** TurnHandler.handle_turn（视觉/组装/流式生成/切段/
+    小艾侧走**生产同一条** TurnHandler.handle_turn（视觉/组装/流式生成/切段/
     落库/加固/观察者结算全在里面），只是把"发到 QQ"换成收集到内存、
     把"真睡"换成记账。用户侧是 v4-pro 扮演的他。
     """
@@ -1572,12 +1617,12 @@ class DuoSimulator:
         self.db = Database(self.db_path)
         await self.db.init_tables()
 
-        self.persona = Persona.load(self.config.character.path)
+        self.persona = Persona.load(self.config.character.path, self.config.character.user_profile)
         stickers_dir = os.path.join(self.persona.base_dir, self.persona.stickers_dir)
         self.stickers = StickerManager(stickers_dir, self.db)
         await self.stickers.sync_initial_stickers()
 
-        self.affection = AffectionEngine(self.db, self.persona.initial_dims)
+        self.affection = AffectionEngine.from_persona(self.db, self.persona)
         await self._seed_affection()
         self.mood = MoodEngine(self.db)
         self.gateway = LLMGateway(self.config.llm, self.db)
@@ -1766,7 +1811,7 @@ class DuoSimulator:
         """模拟器偶尔会回空串，必须兜住——**空消息会污染下游所有指标**。
 
         踩过的坑（S3 冒烟实测）：第 14 轮模型返回空串，于是她对着一句空消息选了
-        `[沉默]`，"[沉默] 合规" 指标如实判成 FAIL。那不是青梓的病灶，是仿真器自己
+        `[沉默]`，"[沉默] 合规" 指标如实判成 FAIL。那不是小艾的病灶，是仿真器自己
         的 bug——但报告读起来就是"她违规了"。所以：空 → 重试一次 → 还空就用他
         语料里最高频的应答（"嗯"）兜底，并把这次兜底**写进 raw.json**，
         让看报告的人知道这一轮不是她的问题。
@@ -1785,16 +1830,16 @@ class DuoSimulator:
         if text:
             self.raw_turns.append({
                 "idx": idx, "speaker": "system",
-                "note": "模拟器首轮返回空串，已重试补上（非青梓侧问题）",
+                "note": "模拟器首轮返回空串，已重试补上（非小艾侧问题）",
             })
             return text
         self.raw_turns.append({
             "idx": idx, "speaker": "system",
-            "note": "模拟器连续两次返回空串，已用兜底应答「嗯」代替（非青梓侧问题）",
+            "note": "模拟器连续两次返回空串，已用兜底应答「嗯」代替（非小艾侧问题）",
         })
         return USER_FALLBACK_REPLY
 
-    # ---------- 青梓侧 ----------
+    # ---------- 小艾侧 ----------
 
     async def _her_turn(self, idx: int, user_text: str) -> TurnRecord:
         """驱动一轮全管道。返回本轮记录（含真实切好的气泡）。"""

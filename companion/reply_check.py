@@ -15,7 +15,12 @@ from collections import Counter
 from typing import Any, Awaitable, Callable, Dict, List, Tuple
 
 from companion.gateway import parse_llm_json
-from companion.prompts import REPLY_CHECK_PROMPT, REPLY_CHECK_USER
+from companion.prompts import (
+    CONTINUITY_CHECK_PROMPT,
+    CONTINUITY_CHECK_USER,
+    REPLY_CHECK_PROMPT,
+    REPLY_CHECK_USER,
+)
 from companion.replier import is_silence_output
 
 logger = logging.getLogger(__name__)
@@ -101,6 +106,152 @@ async def check_reply(
 
 
 # ==========================================
+# 语句连贯性闸门（默认开）：只抓答非所问、读不通、前后矛盾
+# ==========================================
+CONTINUITY_HISTORY_TURNS = 3
+
+
+def _format_continuity_history(history: Any, her_identity: str, his_identity: str) -> str:
+    """最近几轮原文，旧→新；只作判定材料，不把角色称呼写死。"""
+    lines: List[str] = []
+    for item in list(history or [])[-CONTINUITY_HISTORY_TURNS:]:
+        try:
+            row = item if isinstance(item, dict) else dict(item)
+        except Exception:
+            continue
+        content = " ".join(str(row.get("content") or "").split())[:120]
+        if not content:
+            continue
+        who = his_identity if row.get("role") == "user" else her_identity
+        when = str(row.get("created_at") or "")[:16] or "??"
+        lines.append(f"{when} {who}：{content}")
+    while lines and sum(len(x) + 1 for x in lines) > 700:
+        lines.pop(0)
+    return "\n".join(lines) or "（没有更早的聊天）"
+
+
+async def check_continuity(
+    gateway: Any,
+    his_text: str,
+    candidates: List[str],
+    picked: int = 0,
+    history: Any = None,
+    timeout: float = 8.0,
+    tiebreak: str = "warm",
+    her_identity: str = "她",
+    his_identity: str = "他",
+) -> Tuple[str, Dict[str, Any]]:
+    """预选 → 通过候选重选 → 最小修补；任何失败都保留预选原稿。"""
+    if not candidates:
+        return "", {"checked": False, "changed": False, "mode": "keep", "choice": 0, "issues": [], "why": "无候选"}
+    picked = picked if 0 <= picked < len(candidates) else 0
+    original = candidates[picked]
+    info: Dict[str, Any] = {
+        "checked": False,
+        "changed": False,
+        "mode": "keep",
+        "choice": picked,
+        "issues": [],
+        "why": "",
+    }
+    if not (his_text or "").strip() or is_silence_output(original):
+        info["why"] = "空输入或沉默，跳过"
+        return original, info
+
+    candidate_block = "\n".join(
+        f"{i + 1}. {(c or '')[:300]}" for i, c in enumerate(candidates)
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": CONTINUITY_CHECK_PROMPT.replace("{her_identity}", her_identity)
+            .replace("{his_identity}", his_identity)
+            .replace("{picked}", str(picked + 1)),
+        },
+        {
+            "role": "user",
+            "content": CONTINUITY_CHECK_USER.replace(
+                "{history}", _format_continuity_history(history, her_identity, his_identity)
+            )
+            .replace("{his}", (his_text or "（无）")[:300])
+            .replace("{candidates}", candidate_block)
+            .replace("{picked}", str(picked + 1)),
+        },
+    ]
+    try:
+        resp = await asyncio.wait_for(
+            gateway.chat(
+                messages=messages,
+                model=gateway.config.observer_model,
+                temperature=0.2,
+                json_mode=True,
+                purpose="reply_check",
+                max_retries=0,
+            ),
+            timeout=timeout,
+        )
+        data = parse_llm_json(resp)
+    except Exception as e:
+        info["why"] = f"连贯判定失败，保留原稿: {type(e).__name__}"
+        logger.info(f"[Continuity] {info['why']}")
+        return original, info
+
+    if not isinstance(data, dict) or not isinstance(data.get("candidates"), list):
+        info["why"] = "连贯判定结构不完整，保留原稿"
+        return original, info
+    info["checked"] = True
+    entries: Dict[int, Dict[str, Any]] = {}
+    for item in data["candidates"]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("i", -1)) - 1
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(candidates):
+            entries[idx] = item
+
+    def _passes(idx: int) -> bool:
+        item = entries.get(idx)
+        return bool(
+            item
+            and item.get("answers") is True
+            and item.get("coherent") is True
+            and item.get("consistent") is True
+            and not is_silence_output(candidates[idx])
+        )
+
+    selected = entries.get(picked, {})
+    why = selected.get("why")
+    if why:
+        info["issues"] = [str(why)]
+    if _passes(picked):
+        return original, info
+
+    passing = [i for i in range(len(candidates)) if _passes(i)]
+    if passing:
+        sub = [candidates[i] for i in passing]
+        chosen, sub_info = pick_candidate(his_text, sub, tiebreak=tiebreak)
+        mapped = passing[sub_info["picked"]]
+        info.update({"changed": True, "mode": "switch", "choice": mapped})
+        logger.info(f"[Continuity] 预选有硬伤，改选第 {mapped + 1} 条")
+        return chosen, info
+
+    fixed = data.get("fixed") if isinstance(data.get("fixed"), str) else ""
+    if fixed.strip() and not is_silence_output(fixed):
+        ok, why_fixed = accept_fixed(original, fixed)
+        if ok:
+            info.update({"changed": True, "mode": "rewrite", "choice": picked})
+            logger.info(f"[Continuity] 预选有硬伤，采用最小修补（{info['issues']}）")
+            return fixed.strip(), info
+        info["why"] = f"修补稿不合格，保留原稿: {why_fixed}"
+        return original, info
+
+    info["why"] = "没有通过候选或合格修补，保留原稿"
+    return original, info
+
+
+# ==========================================
 # 首泡回声裁剪（[reply].trim_echo，默认关）：零调用、零延迟
 # ==========================================
 # v5 三轮 38 条复述里 71% 只出现在第一个气泡，55% 是"首泡复述 + 后面还有话"——
@@ -116,11 +267,6 @@ def _his_grams(his_text: str) -> set:
     src = _TAG.sub("", his_text or "")
     n = ECHO_MIN_HANZI
     return {run[i:i + n] for run in _HANZI_RUN.findall(src) for i in range(len(run) - n + 1)}
-
-
-def echoes_his(line: str, his_text: str) -> bool:
-    """这一行原样用了他这句话里连续 ECHO_MIN_HANZI 个以上的汉字（他话里的表情标记不算）。"""
-    return any(g in (line or "") for g in _his_grams(his_text))
 
 
 # 去掉复述的字以后，剩下的这些字不算"她自己的东西"（应答词、虚字）

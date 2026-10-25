@@ -49,10 +49,10 @@ from companion.persona import Persona
 from companion.stickers import StickerManager
 
 # ── 路径与常量 ──
-OLD_CARD_SRC = "characters/example/character.backup-before-fixes9.json"
+OLD_CARD_SRC = os.environ.get("OLD_CARD_SRC", "characters/example/character.json")
 OLD_CARD_DIR = "data/ab_old_card"
-NEW_CARD_DIR = "characters/example"
-STICKER_DIR = "characters/example/stickers"
+NEW_CARD_DIR = os.environ.get("NEW_CARD_DIR", "characters/example")
+STICKER_DIR = os.environ.get("STICKER_DIR", "characters/example/stickers")
 DB_SRC = "data/server-companion.db"
 WORK_DB_OLD = "data/ab_work_old.db"
 WORK_DB_NEW = "data/ab_work_new.db"
@@ -89,6 +89,8 @@ STICKER_RE = re.compile(r"\[(表情|sticker|动画表情)")
 
 def prepare_old_card_dir() -> None:
     """为旧卡建临时目录：Persona.load 需要目录 + character.json 的文件布局"""
+    if not os.path.exists(OLD_CARD_SRC):
+        raise FileNotFoundError(f"旧卡文件不存在: {OLD_CARD_SRC}。请通过 CLI 或环境变量 OLD_CARD_SRC 指定有效旧卡路径。")
     os.makedirs(OLD_CARD_DIR, exist_ok=True)
     shutil.copyfile(OLD_CARD_SRC, os.path.join(OLD_CARD_DIR, "character.json"))
 
@@ -268,7 +270,7 @@ def build_report(raw: Dict[str, Any], old_m: Dict[str, Any], new_m: Dict[str, An
     if failed_calls:
         lines.append(f"- 失败调用：{failed_calls} 条（按纪律重试一次后仍失败，记 [失败]，已从统计分母中剔除）")
     lines.append(f"- 提示词长度（字符数）：旧卡 system {prompts['old']} / 新卡 system {prompts['new']}（探针 1 实测）")
-    lines.append("- 说明：本报告正文中的「新卡 = FIXES9 大修后的 `characters/example/character.json`」；旧卡内容取自 `character.backup-before-fixes9.json`，放入临时目录 `data/ab_old_card/` 由 `Persona.load` 加载。")
+    lines.append(f"- 说明：本报告正文中的「新卡 = `{NEW_CARD_DIR}/character.json`」；旧卡取自 `{OLD_CARD_SRC}`，放入临时目录 `data/ab_old_card/` 由 `Persona.load` 加载。")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -390,8 +392,20 @@ def render_report(raw: Dict[str, Any]) -> str:
 
 
 async def main() -> None:
-    dry = "--dry" in sys.argv
-    from_raw = "--from-raw" in sys.argv
+    global OLD_CARD_SRC, NEW_CARD_DIR, STICKER_DIR
+    import argparse
+    parser = argparse.ArgumentParser(description="角色卡 A/B 测试脚本")
+    parser.add_argument("--dry", action="store_true", help="dry-run，不调用 API")
+    parser.add_argument("--from-raw", action="store_true", help="只用留档重算报告")
+    parser.add_argument("--old-card", default=OLD_CARD_SRC, help="旧卡路径")
+    parser.add_argument("--new-card", default=NEW_CARD_DIR, help="新卡目录")
+    parser.add_argument("--stickers-dir", default=STICKER_DIR, help="表情包目录")
+    parsed, _ = parser.parse_known_args()
+    dry = parsed.dry
+    from_raw = parsed.from_raw
+    OLD_CARD_SRC = parsed.old_card
+    NEW_CARD_DIR = parsed.new_card
+    STICKER_DIR = parsed.stickers_dir
     prepare_old_card_dir()
 
     if from_raw:

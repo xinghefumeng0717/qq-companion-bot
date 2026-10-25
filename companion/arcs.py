@@ -56,8 +56,6 @@ def _now_str() -> str:
 
 # 活跃主线（还在前面、没出结果）= 这三种状态
 ACTIVE_STATUSES = ("upcoming", "near", "today")
-# 已被解决/淡出，不再计入活跃数（resolved 超过 FADE_AFTER_DAYS 会被推成 faded）
-CLOSED_STATUSES = ("resolved", "faded")
 
 # 拍板决策 1：同时活跃 2~3 条。少了补，≥3 条本轮结果全丢（多了像连续剧，少了没感觉）
 MIN_ACTIVE_ARCS = 2
@@ -431,10 +429,10 @@ class LifeArcManager:
     # 任务4：提示词注入
     # ==========================================
 
-    async def build_prompt_block(self) -> str:
-        """【她最近的生活】区块；无可注入主线时返回空串（整块省略，不留空标题）。"""
+    async def build_prompt_block(self, as_script: bool = False, now: Optional[datetime] = None) -> str:
+        """生活主线区块；as_script=True 时明确标为系统创作，不与对账事实混用。"""
         try:
-            now = datetime.now()
+            now = now or datetime.now()
             lines: List[str] = []
 
             # 临近/今天：注入她在牵挂的那几件事
@@ -458,10 +456,14 @@ class LifeArcManager:
 
             if not lines:
                 return ""
-            return (
-                "\n【她最近的生活】（这是她当下真实的生活主线，她的话会自然带上这些事的进展）\n"
-                + "\n".join(lines)
-            )
+            if as_script:
+                header = (
+                    "\n【生活剧本】（这是系统允许创作的生活剧本，可自然带上进展；"
+                    "它不用于证明他做过什么或语音等真实动作是否发生）\n"
+                )
+            else:
+                header = "\n【她最近的生活】（这是她当下真实的生活主线，她的话会自然带上这些事的进展）\n"
+            return header + "\n".join(lines)
         except Exception as e:
             logger.error(f"[Arcs] 生成生活主线区块异常: {e}")
             return ""

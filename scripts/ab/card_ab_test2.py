@@ -63,10 +63,10 @@ from companion.persona import Persona
 from companion.stickers import StickerManager
 
 # ── 路径与常量 ──
-OLD_CARD_SRC = "characters/example/character.backup-before-fixes9.json"
+OLD_CARD_SRC = os.environ.get("OLD_CARD_SRC", "characters/example/character.json")
 OLD_CARD_DIR = "data/ab_old_card"
-NEW_CARD_DIR = "characters/example"
-STICKER_DIR = "characters/example/stickers"
+NEW_CARD_DIR = os.environ.get("NEW_CARD_DIR", "characters/example")
+STICKER_DIR = os.environ.get("STICKER_DIR", "characters/example/stickers")
 DB_SRC = "data/server-companion.db"
 WORK_DB_OLD = "data/ab2_work_old.db"
 WORK_DB_NEW = "data/ab2_work_new.db"
@@ -723,8 +723,20 @@ async def verify_fake_time() -> Dict[str, Any]:
 
 
 async def main() -> None:
-    dry = "--dry" in sys.argv
-    from_raw = "--from-raw" in sys.argv
+    global OLD_CARD_SRC, NEW_CARD_DIR, STICKER_DIR
+    import argparse
+    parser = argparse.ArgumentParser(description="角色卡 A/B 测试第二轮脚本")
+    parser.add_argument("--dry", action="store_true", help="dry-run，不调用 API")
+    parser.add_argument("--from-raw", action="store_true", help="只用留档重算报告")
+    parser.add_argument("--old-card", default=OLD_CARD_SRC, help="旧卡路径")
+    parser.add_argument("--new-card", default=NEW_CARD_DIR, help="新卡目录")
+    parser.add_argument("--stickers-dir", default=STICKER_DIR, help="表情包目录")
+    parsed, _ = parser.parse_known_args()
+    dry = parsed.dry
+    from_raw = parsed.from_raw
+    OLD_CARD_SRC = parsed.old_card
+    NEW_CARD_DIR = parsed.new_card
+    STICKER_DIR = parsed.stickers_dir
     prepare_old_card_dir()
 
     if from_raw:

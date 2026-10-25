@@ -8,7 +8,7 @@ import asyncio
 import logging
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from companion.assembler import PromptAssembler
@@ -18,10 +18,17 @@ from companion.memory import MemoryManager
 from companion.observer import MEETUP_HISTORY_TURNS, Observer
 from companion.persona import holiday_span
 from companion.proactive import ProactiveScheduler
-from companion.prompts import VISION_PERCEPTION_PROMPT
+from companion.prompts import VISION_PERCEPTION_PROMPT, VOICE_FAILURE_NOTE, VOICE_NOT_SENT_NOTE, VOICE_SENT_NOTE
 from companion.meetups import MeetupManager
+from companion.voice_planner import (
+    VoicePlanner,
+    VOICE_FOLLOWUP_RE as _VOICE_FOLLOWUP_RE,
+    strip_legacy_voice_markup,
+)
+from companion.runtime_state import TurnContext, runtime_v1_enabled
 from companion.reply_check import (
     CANDIDATE_GRACE_SECONDS,
+    check_continuity,
     check_reply,
     gather_candidates,
     pick_candidate,
@@ -31,7 +38,11 @@ from companion.replier import (
     Replier,
     count_today_faces,
     face_daily_budget,
+    fit_chunks,
     is_silence_output,
+    quote_chunk,
+    record_text_from_chunks,
+    sanitize_voice_claims,
     strip_face_markers,
     typing_text_from_chunks_or_record,
 )
@@ -61,7 +72,6 @@ _SEEN_NOTE_CLOSERS = frozenset("】]）)』」")
 
 # FIXES27：他这一句是不是在讨要语音（"发个语音""让我听听你""唱一句"）。
 # 只给作息闸门开一个口子：开关关着、日上限到了，点名也发不出去（见 TTSManager.check_gate）。
-_VOICE_REQUEST_RE = re.compile(r"语音|声音|听听你|唱[一句段个首]")
 
 
 def _seen_note_span(text: str, start: int) -> Tuple[str, int]:
@@ -166,6 +176,17 @@ def _sync_image_desc_to_batch(batch: List[Dict[str, Any]], user_text: str) -> No
 # 不进 TimingConfig：这是节奏标定常量，不是需要按环境调的部署参数。
 TYPING_INLINE_MAX = 8.0
 
+# 他点名要语音后，"讨要"保持多久（期间作息闸门对他让路；开关与日上限照常拦）
+VOICE_REQUEST_HOLD = timedelta(minutes=10)
+# 他说"没收到/没听到"：只在聊的是语音时（话里提到语音/声音，或讨要还没兑现）才算
+_NOT_RECEIVED_RE = re.compile(r"没(?:收到|听到|听见|声音)|收不到|听不到|没有声音")
+# 只有无其它宾语的短句，才能结合上一轮真实语音投递记录理解；不靠物品黑名单。
+_GENERIC_NOT_RECEIVED_RE = re.compile(
+    r"^\s*(?:我|怎么|为什么|为啥)?\s*(?:还|又|都)?\s*"
+    r"(?:没(?:有)?(?:收到|听到|听见)|收不到|听不到)"
+    r"[\s诶哎唉啊呀呢嘛了？?！!]*$"
+)
+
 
 class TurnHandler:
     def __init__(
@@ -197,6 +218,23 @@ class TurnHandler:
         self.timing = timing_config
         # FIXES22：语音闸门问的是它；默认 None = 语音整体关着（既有测试与旧调用方零改动）
         self.tts = tts
+        self.voice_planner = VoicePlanner(
+            getattr(config.reply, "voice_frequency", "frequent"),
+            max_chars=self._voice_max_chars(),
+        )
+        self.runtime_events = None
+        self.turn_tracer = None
+        self._observer_tasks = set()
+        # 跨轮只保留一份真实投递事实；请求保持与投递投诉语境互不推导。
+        self._last_voice_status = "none"
+        self._last_voice_reason = ""
+        self._last_voice_at: Optional[datetime] = None
+        self._last_turn_voice_status = "none"
+        self._last_turn_at: Optional[datetime] = None
+        self._voice_requested = False
+        self._voice_activity = ""
+        self._voice_request_until: Optional[datetime] = None
+        self._voice_retry_used = False
         self._typing_on = (
             timing_config is not None
             and timing_config.typing_indicator_enabled
@@ -371,6 +409,19 @@ class TurnHandler:
         `user_requested` 看他这句话有没有点名要语音：点名了就再开作息那扇门，
         但开关与日上限照常拦。
         """
+        # 他点名要语音以后，这个"讨要"一直有效，直到语音真发出去或过了 VOICE_REQUEST_HOLD
+        # （生产实锤：讨价还价三四个来回，"成交""没发！耍赖"这几句里没有"语音"二字，
+        # 放行只管一句时，后面几轮闸门全关，她只能用文字假装发了）
+        now_dt = datetime.now()
+        explicit_request = VoicePlanner.explicit_request(user_text)
+        if explicit_request:
+            self._voice_request_until = now_dt + VOICE_REQUEST_HOLD
+        until = getattr(self, "_voice_request_until", None)
+        pending = until is not None and now_dt < until
+        self._voice_retry_used = pending and not explicit_request
+        requested = explicit_request or pending
+        self._voice_requested = requested
+
         tts = getattr(self, "tts", None)
         if tts is None:
             return False, "没有装配 TTSManager"
@@ -379,11 +430,65 @@ class TurnHandler:
             activity = await self._current_activity_text()
         except Exception as e:  # 作息查不到不该挡住主流程
             logger.debug(f"[Timing] 取作息文案失败（语音闸门按允许处理）: {e}")
+        self._voice_activity = activity
         return await tts.check_gate(
             activity,
             awake_override=True,
-            user_requested=bool(_VOICE_REQUEST_RE.search(user_text or "")),
+            user_requested=requested,
         )
+
+    def _latest_voice_delivery(self) -> Tuple[str, str]:
+        """最近一次真实语音事件，不被后来的普通文字消息冲掉。"""
+        proactive = getattr(self, "proactive", None)
+        events = []
+        for at, status, reason in (
+            (getattr(self, "_last_voice_at", None), getattr(self, "_last_voice_status", "none"), getattr(self, "_last_voice_reason", "")),
+            (getattr(proactive, "last_voice_at", None), getattr(proactive, "last_voice_status", "none"), getattr(proactive, "last_voice_reason", "")),
+        ):
+            if isinstance(status, str) and status != "none":
+                events.append((at if isinstance(at, datetime) else datetime.min, status, reason))
+        if not events:
+            return "none", ""
+        _, status, reason = max(events, key=lambda item: item[0])
+        return status, reason if isinstance(reason, str) else ""
+
+    def _latest_turn_voice_status(self) -> str:
+        """最近一条助手消息是否涉及语音，用于无宾语“没收到”的紧邻语境。"""
+        proactive = getattr(self, "proactive", None)
+        own_at = getattr(self, "_last_turn_at", None)
+        other_at = getattr(proactive, "last_turn_at", None)
+        own_at = own_at if isinstance(own_at, datetime) else datetime.min
+        other_at = other_at if isinstance(other_at, datetime) else datetime.min
+        status = (
+            getattr(proactive, "last_turn_voice_status", "none")
+            if other_at > own_at else getattr(self, "_last_turn_voice_status", "none")
+        )
+        return status if isinstance(status, str) else "none"
+
+    def _missing_voice_context(self, user_text: str) -> bool:
+        """只按明确语音词句或上一轮真实投递记录判断，不按讨要保持期猜测。"""
+        text = user_text or ""
+        if not _NOT_RECEIVED_RE.search(text):
+            return False
+        explicit = bool(re.search(r"语音|声音", text) or _VOICE_FOLLOWUP_RE.search(text))
+        if explicit:
+            return True
+        attempted = self._latest_turn_voice_status() in {"sent", "text_fallback", "failed", "unconfirmed"}
+        return attempted and bool(_GENERIC_NOT_RECEIVED_RE.fullmatch(text))
+
+    def _asks_about_missing_voice(self, user_text: str) -> bool:
+        """他在问一条并未确认发出的语音；OneBot 已接受则走另一条事实说明。"""
+        return self._missing_voice_context(user_text) and self._latest_voice_delivery()[0] != "sent"
+
+    def _voice_delivery_note(self, user_text: str) -> str:
+        if not self._missing_voice_context(user_text):
+            return ""
+        status, reason = self._latest_voice_delivery()
+        if status == "sent":
+            return VOICE_SENT_NOTE
+        if status in {"text_fallback", "failed", "unconfirmed"}:
+            return reason or VOICE_FAILURE_NOTE
+        return VOICE_NOT_SENT_NOTE
 
     async def _current_activity_text(self) -> str:
         """当前活动文案（与 assembler 同一份口径：节假日段长也算进去）"""
@@ -413,6 +518,11 @@ class TurnHandler:
             f"批次={len(quote_targets) if quote_targets else 0} 条"
         )
         batch = list(quote_targets or [])
+        runtime_enabled = runtime_v1_enabled(self.config.reply, self.assembler)
+        # 配置与组装器共用同一开关，沙箱只设其中一处也不会半新半旧
+        self.assembler.runtime_state_v1 = runtime_enabled
+        planned_voice = False
+        runtime_plan = None
 
         # 1. 重置主动消息未回计数
         await self.proactive.reset_unanswered_count()
@@ -425,6 +535,13 @@ class TurnHandler:
         except Exception as e:
             logger.warning(f"[Timing] 回复时机环节异常，降级为立即发送: {e}")
             is_first_reply = False
+
+        # 首条延迟结束后再冻结本轮时间与状态，避免提示词和账本早取几分钟
+        state_block = (
+            await self.runtime_events.render_prompt()
+            if runtime_enabled and self.runtime_events is not None else ""
+        )
+        context = TurnContext(datetime.now(), user_text, state_block)
 
         # 2. 图像多模态处理与降级
         image_data_url = None
@@ -481,6 +598,8 @@ class TurnHandler:
             except Exception as e:
                 logger.warning(f"[Bot] 见面纪要处理异常: {e}")
 
+        self._active_user_text = user_text
+
         # 3. 提示词组装（编号块由 quote_targets 生成）
         #    FIXES22：**先问语音闸门再组装**——提示词层要不要写语音能力说明，
         #    取决于这一轮闸门开不开（关着时模型连 [voice:] 都不该认识）。
@@ -491,12 +610,19 @@ class TurnHandler:
         # getattr 防御：老测试装配的 handler 没有 tts 属性。
         tts_cfg = getattr(getattr(self, "tts", None), "config", None)
         voice_gated_note = bool(getattr(tts_cfg, "enabled", False))
+        # 无论是否开启运行时账本，都用同一份真实投递事实回答"没收到"。
+        delivery_note = self._voice_delivery_note(user_text)
+        assemble_kwargs: Dict[str, Any] = {
+            "numbered_batch": batch,
+            "voice_allowed": voice_allowed,
+            "voice_gated_note": voice_gated_note,
+            "now": context.now,
+            "runtime_state_block": context.state_block,
+        }
+        if delivery_note:
+            assemble_kwargs["voice_delivery_note"] = delivery_note
         messages, sys_prompt = await self.assembler.assemble_messages(
-            user_text,
-            image_data_url,
-            numbered_batch=batch,
-            voice_allowed=voice_allowed,
-            voice_gated_note=voice_gated_note,
+            user_text, image_data_url, **assemble_kwargs
         )
         logger.info(f"[Bot] 语音闸门: {'可用' if voice_allowed else '不可用'}（{voice_why}）")
 
@@ -505,6 +631,8 @@ class TurnHandler:
         # 这条要求在本实现里由结构保证（开 typing 的代码在生成之后），不存在开着打字
         # 走进兜底分支的路径。
         reply_parts = []
+        candidate_texts: List[str] = []
+        picked_index = 0
         # [reply].candidates > 1：并行生成几条，挑没复述/点评/比喻的那条（等待时间≈最慢的那条）
         n_cand = getattr(self.config.reply, "candidates", 1)
         n_cand = n_cand if isinstance(n_cand, int) and n_cand > 1 else 1
@@ -534,13 +662,18 @@ class TurnHandler:
                     f"[Bot] 多候选择优: 收到 {len(texts)}/{n_cand} 条，毛病数 {cand_info['flaws']}"
                     f" → 选第 {cand_info['picked'] + 1} 条"
                 )
+                candidate_texts = texts
+                picked_index = cand_info["picked"]
                 reply_parts = [picked]
             else:
                 reply_parts = [await _generate_one()]
+                candidate_texts = list(reply_parts)
         except Exception as e:
             logger.error(f"[Bot] 调用 LLM 异常: {e}")
             # 兜底文案不能含括号/星号，否则会被旁白剥离正则整块剥除导致用户端静默
             reply_parts = ["刚刚走神了……你再说一次？"]
+            candidate_texts = list(reply_parts)
+            picked_index = 0
 
         full_reply = "".join(reply_parts).strip()
         logger.info(f"[Bot] LLM 回复全文: {full_reply}")
@@ -553,6 +686,31 @@ class TurnHandler:
             else:
                 user_text = f"{user_text} [发来一张图片]".strip()
             _sync_image_desc_to_batch(batch, user_text)
+
+        # 4.3 语句连贯性：先保留预选，只有硬伤才换候选或最小修补，失败一律照原稿。
+        continuity_info = None
+        if (
+            getattr(self.config.reply, "continuity_check", False) is True
+            and reply_parts != ["刚刚走神了……你再说一次？"]
+            and not is_silence_output(full_reply)
+        ):
+            try:
+                continuity_history = await self.memory.get_recent_turns(limit=3)
+            except Exception:
+                continuity_history = []
+            full_reply, continuity_info = await check_continuity(
+                self.gateway,
+                user_text,
+                candidate_texts,
+                picked_index,
+                continuity_history,
+                timeout=getattr(self.config.reply, "continuity_timeout", 8.0),
+                tiebreak=getattr(self.config.reply, "candidate_tiebreak", "warm"),
+                **_identities(self.assembler),
+            )
+            reply_parts = [full_reply]
+            if continuity_info.get("changed"):
+                logger.info(f"[Bot] 连贯性闸门: {continuity_info}")
 
         # 4.4 首泡回声裁剪（[reply].trim_echo，默认关）：第一个气泡在复述/点评他、后面还有话就删掉它
         if getattr(self.config.reply, "trim_echo", False) is True and reply_parts != ["刚刚走神了……你再说一次？"]:
@@ -568,11 +726,28 @@ class TurnHandler:
                 **_identities(self.assembler),
             )
 
-        # 5. 回复管道切段与打字延迟发送
-        #    FIXES21：把批次传下去，编号才能翻译成 message_id
-        #    FIXES22：voice_allowed 是第 3 步问出来的同一份结论（两次问会各读一次
-        #    日计数；同一轮内不会变，用缓存的那份）。
-        # 小黄脸日额度（卡 world.face_usage = "rare"）：问库拿今日已用量换算剩余额度
+        # 她只产正文。旧语音标记仅做确定性清理，普通括号与普通措辞不参与语音判断。
+        full_reply = strip_legacy_voice_markup(full_reply)
+        requested = bool(getattr(self, "_voice_requested", False))
+        runtime_plan = self.voice_planner.plan(
+            user_text, full_reply,
+            voice_allowed=voice_allowed,
+            requested=requested,
+        )
+        planned_voice = runtime_plan.has_voice
+        voice_context = requested or planned_voice or self._missing_voice_context(user_text)
+        body_text = runtime_plan.body_text if planned_voice else full_reply
+        sanitized_reply = sanitize_voice_claims(
+            body_text,
+            voice_allowed=planned_voice,
+            previous_voice_sent=self._latest_voice_delivery()[0] == "sent",
+            voice_context=voice_context,
+        )
+        if sanitized_reply != body_text:
+            logger.warning("[Bot] 明确语音上下文中已删去未确认投递断言")
+        full_reply = sanitized_reply
+
+        # 5. 文字由原解析器处理；语音段由规划器直接产生，不再编码回字符串二次解析。
         face_budget = None
         if getattr(self.assembler.persona.world, "face_usage", "normal") == "rare":
             used_faces = await count_today_faces(self.memory.db)
@@ -580,10 +755,39 @@ class TurnHandler:
         chunks, clean_record_text = self.replier.parse_reply(
             full_reply,
             quote_targets=batch,
-            voice_allowed=voice_allowed,
+            voice_allowed=False,
             voice_max_chars=self._voice_max_chars(),
             face_budget=face_budget,
         )
+        if planned_voice:
+            voice_chunk = {
+                "type": "voice", "content": runtime_plan.voice_text,
+                "_runtime_voice": True,
+                "_voice_activity": getattr(self, "_voice_activity", ""),
+                "_voice_requested": requested,
+            }
+            before_text = getattr(runtime_plan, "before_text", None)
+            if before_text is None:
+                chunks.append(voice_chunk)
+            else:
+                before_chunks, _ = self.replier.parse_reply(
+                    before_text, quote_targets=batch, voice_allowed=False,
+                    voice_max_chars=self._voice_max_chars(), face_budget=face_budget,
+                )
+                chunks.insert(min(len(before_chunks), len(chunks)), voice_chunk)
+            chunks = fit_chunks(chunks, self.replier.config.max_chunks)
+        if runtime_plan.quote_index is not None and chunks:
+            quote = quote_chunk(runtime_plan.quote_index, batch)
+            if quote is not None:
+                # QQ 对 reply+record 的组合消息兼容有问题：语音绝不挂引用。
+                target = next((c for c in chunks if c.get("type") in ("text", "face", "combo")), None)
+                if target is not None:
+                    target["_quote"] = quote
+                else:
+                    logger.info("[Bot] 本轮只有语音，引用不挂到 record 段上")
+        for chunk in chunks:
+            if chunk.get("type") == "voice":
+                chunk["_voice_user_text"] = user_text
         if self.replier.is_silence_decision(full_reply, batch):
             # [沉默]（FIXES13）：她选择不回。不发送、不落 assistant 记录、跳过 observer 结算，
             # 但用户消息照常落库（他确实说了这句），并照常做回忆加固。
@@ -599,6 +803,7 @@ class TurnHandler:
             )
             await self.memory.reinforce_memories(user_text)
             return
+        clean_record_text = record_text_from_chunks(chunks) or clean_record_text
         if not chunks:
             chunks = [{"type": "text", "content": "刚刚走神了……你再说一次？"}]
             clean_record_text = "刚刚走神了……你再说一次？"
@@ -611,6 +816,67 @@ class TurnHandler:
         typing_text = typing_text_from_chunks_or_record(chunks, clean_record_text)
         await self.play_typing_indicator(typing_text, is_first_reply)
         await self.replier.send_reply_chunks(chunks, self.send_chunk_fn)
+        # 语音发送失败时 main 会把 voice 段原地改成 text；落库必须按实发结果重算。
+        clean_record_text = record_text_from_chunks(chunks) or clean_record_text
+        voice_sent = any(
+            c.get("type") == "voice" and c.get("_voice_delivery") == "sent"
+            for c in chunks
+        )
+        # 只有规划器真的形成了语音段才记投递结果；普通聊天绝不产生语音失败。
+        if planned_voice:
+            if voice_sent:
+                self._last_voice_status = "sent"
+            elif any(c.get("_runtime_voice") and c.get("_voice_delivery") == "text" for c in chunks):
+                self._last_voice_status = "text_fallback"
+            elif any(c.get("_runtime_voice") and c.get("_voice_delivery") == "failed" for c in chunks):
+                self._last_voice_status = "failed"
+            else:
+                self._last_voice_status = "unconfirmed"
+            self._last_voice_reason = next(
+                (c.get("_voice_failure_reason", "") for c in chunks if c.get("_runtime_voice")),
+                "",
+            ) or ("" if voice_sent else VOICE_FAILURE_NOTE)
+            self._last_voice_at = datetime.now()
+        self._last_turn_voice_status = self._last_voice_status if planned_voice else "none"
+        self._last_turn_at = datetime.now()
+        if voice_sent:
+            self._voice_request_until = None  # 讨要已兑现
+        elif planned_voice:
+            logger.warning(f"[Bot] 语音投递状态: {self._last_voice_status}")
+        if runtime_enabled and self.runtime_events is not None:
+            try:
+                blocked = (
+                    voice_why
+                    if not voice_sent and (planned_voice or requested) else ""
+                )
+                await self.runtime_events.record_delivery_chunks(
+                    chunks, full_reply, now=context.now, blocked_reason=blocked,
+                )
+            except Exception as e:
+                logger.warning(f"[Bot] 运行时语音账本写入失败，不影响本轮回复: {e}")
+        if runtime_enabled and self.turn_tracer is not None:
+            try:
+                self.turn_tracer.write(
+                    context,
+                    candidates=candidate_texts,
+                    picked=picked_index,
+                    continuity=continuity_info,
+                    reply=full_reply,
+                    voice_plan=(
+                        {"mode": runtime_plan.mode, "voice_text": runtime_plan.voice_text,
+                         "reason": runtime_plan.reason}
+                        if runtime_plan is not None else None
+                    ),
+                    final_chunks=[
+                        {"type": c.get("type"), "content": c.get("content"),
+                         "delivery": c.get("_voice_delivery"),
+                         "runtime_voice": bool(c.get("_runtime_voice"))}
+                        for c in chunks
+                    ],
+                    voice_sent=voice_sent,
+                )
+            except Exception as e:
+                logger.warning(f"[Bot] 轮次追踪写入失败，不影响本轮回复: {e}")
 
         # 6. 本轮对话落库
         await self.memory.save_turn_pair(
@@ -630,7 +896,7 @@ class TurnHandler:
         except Exception as e:
             logger.warning(f"[Bot] 读取近期轮次失败，见面识别按本轮两句判: {e}")
             recent_turns = None
-        asyncio.create_task(
+        task = asyncio.create_task(
             self.observer.settle_turn(
                 user_message=user_text,
                 assistant_reply=clean_record_text,
@@ -638,3 +904,5 @@ class TurnHandler:
                 recent_turns=recent_turns,
             )
         )
+        self._observer_tasks.add(task)
+        task.add_done_callback(self._observer_tasks.discard)

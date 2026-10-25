@@ -10,7 +10,7 @@ from companion.lorebook import BLOCK_HEADER, Lorebook
 from helpers import close_db, make_db, make_engine_stack
 
 BOOK = {
-    "always": "塔卫二，帝江号是科幻工业的轨道总部舰。",
+    "always": "塔卫二，帝江号是终末地工业的轨道总部舰。",
     "entries": [
         {"keys": ["武陵"], "content": "武陵城：宏山科学院治理甚大裂隙的重点地区。"},
         {"keys": ["锅底", "火锅"], "content": "她爱在武陵城的火锅店试怪锅底。", "priority": 5},

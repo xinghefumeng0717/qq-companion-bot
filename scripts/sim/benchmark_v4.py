@@ -1,6 +1,6 @@
-"""青梓综合评测体系 V4 (scripts/sim/benchmark_v4.py)
+"""小艾综合评测体系 V4 (scripts/sim/benchmark_v4.py)
 
-对**当前生产卡**（characters/example/，即已替换的 V3 卡）做一次性定版大考：
+对当前角色卡做一次性定版大考：
 12 个场景 × 2 个时间伪装时钟 × N 次采样，全部走本地 config.toml 的真实 key
 （主聊 deepseek-v4-pro / thinking low，与生产一致），严禁 mock 主聊。
 
@@ -69,8 +69,8 @@ RAW_JSON = f"{OUT_DIR}/report.json"
 REPORT_MD = f"{OUT_DIR}/report.md"
 TRANSCRIPTS_MD = f"{OUT_DIR}/transcripts.md"
 
-CARD_DIR = "characters/example"          # 当前生产卡（V3），单卡评测不做 A/B
-CARD_LABEL = "生产卡 V3（characters/example/character.json）"
+CARD_DIR = os.environ.get("CARD_DIR", "characters/example")          # 评测角色卡目录
+CARD_LABEL = os.environ.get("CARD_LABEL", f"评测卡（{CARD_DIR}/character.json）")
 
 # ── 时钟：两个时间伪装时刻 ──────────────────────────────────────────────
 # 2026-10-09 是周五（国庆假期已结束的普通工作日）；2026-10-05 是周一（国庆长假中）。
@@ -1081,7 +1081,7 @@ def eval_k(cell: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "id": "F3",
                 "label": "她说的·（未捞到自述事实）",
-                "expected_owner": "她（青梓）",
+                "expected_owner": "她（小艾）",
                 "source_turn": None,
                 "source_text": None,
                 "diary_sentences": [],
@@ -1108,7 +1108,7 @@ def eval_k(cell: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "id": "F3",
                 "label": "她说的·" + sf["matched"],
-                "expected_owner": "她（青梓）",
+                "expected_owner": "她（小艾）",
                 "source_turn": sf["turn"],
                 "source_text": sf["sentence"],
                 "diary_sentences": related,
@@ -1548,7 +1548,7 @@ def clock_env() -> Dict[str, Any]:
 def build_report_md(data: Dict[str, Any]) -> str:
     L: List[str] = []
     meta = data["meta"]
-    L.append("# 青梓综合评测 V4 · 汇总报告（定版大考）")
+    L.append("# 小艾综合评测 V4 · 汇总报告（定版大考）")
     L.append("")
     L.append(f"- 生成时间：{meta['generated_at']}")
     L.append(f"- 评测卡：**{CARD_LABEL}**（单卡评测，不做 A/B）")
@@ -1661,7 +1661,7 @@ def build_report_md(data: Dict[str, Any]) -> str:
                 L.append(f"**机主：** {t.get('user','')}")
                 L.append("")
                 if t.get("raw"):
-                    L.append(f"**青梓（模型裸输出）：** {t['raw']}")
+                    L.append(f"**小艾（模型裸输出）：** {t['raw']}")
                     L.append("")
                 if t.get("reply"):
                     L.append(f"**生产实发：** {t['reply']}")
@@ -1725,7 +1725,7 @@ def _one_line(key: str, v: Dict[str, Any]) -> str:
 
 def build_transcripts_md(data: Dict[str, Any]) -> str:
     L: List[str] = []
-    L.append("# 青梓综合评测 V4 · 全部 transcript 留档")
+    L.append("# 小艾综合评测 V4 · 全部 transcript 留档")
     L.append("")
     L.append(f"生成时间：{data['meta']['generated_at']}｜卡：{CARD_LABEL}｜采样：每场景每钟 {data['meta']['runs']} 次")
     L.append("")

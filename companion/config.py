@@ -288,6 +288,14 @@ class ReplyConfig:
     # 一步看图：主聊模型直接看他发的图（要求主聊模型支持多模态），回复末尾顺手写一行
     # 【看到：…】存进记录；发图那一轮只生成 1 条候选。默认关 = 老的两步（先看图写描述再聊）
     vision_direct: bool = False
+    # 语句连贯性闸门：只抓答非所问、读不通、前后矛盾；失败开放，默认开
+    continuity_check: bool = False   # 2026-10-25 云端审查：实测常等满 8 秒超时，先默认关
+    continuity_timeout: float = 8.0
+    # 运行时事实/事件协作实验：默认关，旧路径逐字不变
+    runtime_state_v1: bool = False
+    # 高频是产品偏好：frequent=适合就优先语音；explicit=仅明确请求；off=关闭规划
+    voice_frequency: str = "frequent"
+    trace_dir: str = "data/turn_traces"
 
 
 @dataclass
@@ -375,7 +383,7 @@ class AdminConfig:
     host: str = "127.0.0.1"
     port: int = 8080
     token: str = ""      # 管理页写操作鉴权令牌；空 = 仅 localhost 信任模式（向后兼容）
-    # 看板主题：journal = 原来的手账纸（默认）；plain = 通用；endfield = 科幻工业风。
+    # 看板主题：journal = 原来的手账纸（默认）；plain = 通用；endfield = 终末地工业风。
     # 角色卡有 theme/skin.json 时，plain / endfield 会叠上卡里的皮肤（头像、光标、水墨等）。
     # 默认值用哨兵：要区分「config 没写 theme」与「显式写了 journal」——
     # 没写时 admin.resolve_theme 会跟随卡里的皮肤，写了就严格用 config。
@@ -608,6 +616,11 @@ class Config:
                 reply_data.get("style_examples_path", "data/style_examples/real_chat.json")
             ),
             vision_direct=bool(reply_data.get("vision_direct", False)),
+            continuity_check=bool(reply_data.get("continuity_check", False)),
+            continuity_timeout=float(reply_data.get("continuity_timeout", 8.0)),
+            runtime_state_v1=bool(reply_data.get("runtime_state_v1", False)),
+            voice_frequency=str(reply_data.get("voice_frequency", "frequent")),
+            trace_dir=str(reply_data.get("trace_dir", "data/turn_traces")),
             candidate_tiebreak=str(reply_data.get("candidate_tiebreak", "warm")),
         )
         if reply.candidate_tiebreak not in ("warm", "first"):
@@ -616,6 +629,12 @@ class Config:
                 f"{reply.candidate_tiebreak!r}"
             )
             reply.candidate_tiebreak = "warm"
+        if reply.voice_frequency not in ("frequent", "explicit", "off"):
+            logger.warning(
+                f"[Config] reply.voice_frequency 只认 frequent/explicit/off，已回退 frequent："
+                f"{reply.voice_frequency!r}"
+            )
+            reply.voice_frequency = "frequent"
         # 卡里的 features 只补 config 没显式写的项；旧卡没有 features 段时整条跳过。
         # 必须在 main.py 消费这些开关之前完成（Config.load 返回前，见 CompanionBot.__init__）。
         apply_card_features(character, reply, char_data, reply_data, character.path)

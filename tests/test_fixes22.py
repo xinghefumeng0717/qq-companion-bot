@@ -834,8 +834,10 @@ class TestVoicePrompt(unittest.TestCase):
                 await close_db(db)
 
         prompt = asyncio.run(run())
-        self.assertIn("[voice:", prompt)
-        self.assertIn("情绪到位", prompt)  # FIXES27：措辞放宽后断言跟着换
+        from companion.prompts import VOICE_PLANNER_RULES
+        self.assertIn(VOICE_PLANNER_RULES, prompt)
+        self.assertNotIn("多发语音是受欢迎的", prompt)
+        self.assertNotIn("情绪到位", prompt)
 
     def test_她此刻仍独立成行(self):
         """FIXES21 踩过：【她此刻】被插进来的块挤到行中间，既有守卫报过一次。"""
@@ -871,7 +873,7 @@ class TestProactiveVoicePath(unittest.TestCase):
         from companion.proactive import ProactiveScheduler
 
         class _P:
-            name = "青梓"
+            name = "小艾"
 
             def get_current_activity(self, hour, weekday=None, holiday_span=0):
                 return activity

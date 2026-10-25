@@ -28,7 +28,7 @@ import os
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from companion.config import ModelPreset, TTSConfig
 # FIXES27：睡眠词口径只有一份（persona.SLEEP_WORDS），这里不另抄一张表——
@@ -245,7 +245,7 @@ def truncate_for_voice(text: str, max_chars: int) -> str:
     cut = max(head.rfind(c) for c in "。！？!?，,；;…～~")
     if cut >= max_chars // 3:      # 句读点离得太近就别切了，硬截更自然
         return head[: cut + 1].strip()
-    return head.rstrip("，,、 ") + "…"
+    return head[: max(1, max_chars - 1)].rstrip("，,、 ") + "…"
 
 
 class TTSManager:
@@ -285,7 +285,19 @@ class TTSManager:
         self.voice_light_busy_words = (
             None if voice_light_busy_words is None else tuple(voice_light_busy_words)
         )
+        self._send_lock: Optional[asyncio.Lock] = None
         os.makedirs(self.out_dir, exist_ok=True)
+
+    @property
+    def send_lock(self) -> asyncio.Lock:
+        """供发送端包裹「再次检查日额度 → 合成 → QQ发送 → 成功记账」的共享锁。
+
+        延迟创建（在当前运行事件循环中初始化），确保主动与主聊共享同一个锁对象，
+        避免两路任务同时进入合成与发送窗口导致超额或竞争。
+        """
+        if self._send_lock is None:
+            self._send_lock = asyncio.Lock()
+        return self._send_lock
 
     @property
     def provider(self) -> str:

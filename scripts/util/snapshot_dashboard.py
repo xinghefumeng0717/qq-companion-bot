@@ -243,11 +243,12 @@ def main():
     parser.add_argument("--save", type=str, help="抓取并保存快照的目标目录")
     parser.add_argument("--diff", nargs=2, metavar=("DIR_A", "DIR_B"), help="比对两个快照目录")
     parser.add_argument("--port", type=int, default=18080, help="测试 HTTP 端口 (默认 18080)")
+    parser.add_argument("--card", type=str, default="characters/example", help="角色卡目录 (默认 characters/example)")
 
     args = parser.parse_args()
 
     if args.save:
-        snaps = asyncio.run(fetch_snapshots(port=args.port))
+        snaps = asyncio.run(fetch_snapshots(port=args.port, char_dir=args.card))
         save_snapshots(snaps, args.save)
     elif args.diff:
         dir_a, dir_b = args.diff
