@@ -4,7 +4,8 @@ tests/test_full_sandbox_checks.py
 不依赖真实 API、不依赖网络、不依赖真实 OneBot/TTS。
 """
 
-import pytest
+import unittest
+
 from scripts.sim.full_sandbox import Turn, run_checks, _group_beats
 
 
@@ -223,3 +224,23 @@ def test_group_beats_structure():
     assert len(beats[1]["her"]) == 1
     assert beats[2]["tag"] == "拍2"
     assert beats[2]["her"][0].kind == "voice"
+
+
+class TestFullSandboxChecks(unittest.TestCase):
+    """CI 用 unittest 跑每个测试文件（没装 pytest），这里把上面四个检查挂进 TestCase。"""
+
+    def test_cost_check_pass_and_fail(self):
+        test_cost_check_pass_and_fail()
+
+    def test_ask_voice_per_beat_check(self):
+        test_ask_voice_per_beat_check()
+
+    def test_fault_injection_and_degrade_checks(self):
+        test_fault_injection_and_degrade_checks()
+
+    def test_group_beats_structure(self):
+        test_group_beats_structure()
+
+
+if __name__ == "__main__":
+    unittest.main()
