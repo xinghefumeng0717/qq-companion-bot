@@ -2,7 +2,7 @@
 
 这篇讲 QQ 伴侣机器人背后的机制：一条消息怎么变成她的回复，她为什么不秒回、为什么会忘事、心情和关系怎么变、什么时候会主动找你，以及语音是怎么挑出来的。
 
-文中的数字都取自代码（文件位置写在每节末尾），改代码时请同步这里。图用 Mermaid 画，GitHub 上可以直接看。
+文中的数字都取自代码（文件位置写在每节末尾），改代码时请同步这里。图是用 Mermaid 画好再导出的图片，源码折叠在每张图下面；改了源码后运行 `node scripts/util/render_mermaid.js docs/ARCHITECTURE.md docs/images architecture` 重新生成图片。
 
 ---
 
@@ -24,22 +24,31 @@
 
 ## 1. 整体结构
 
+![整体结构](images/architecture-01.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
-flowchart LR
-    U["你的 QQ 大号"] <-->|私聊| N["NapCat<br/>（QQ 小号，Docker）"]
-    N <-->|"OneBot v11<br/>WebSocket"| B
-    subgraph B["机器人进程 companion"]
-        direction TB
+flowchart TB
+    U["你的 QQ 大号"] <-->|"私聊"| N["NapCat<br/>（登录 QQ 小号，Docker）"]
+    N <-->|"OneBot v11 · WebSocket"| AG
+    subgraph B["机器人进程 companion（Python）"]
+        direction LR
         AG["消息聚合器"] --> TH["对话处理"]
-        TH --> OB["观察者<br/>（事后结算）"]
+        TH -.->|"事后结算"| OB["观察者"]
         PR["主动消息调度"]
-        AD["看板 / 管理页"]
     end
-    B <-->|HTTPS| L["大模型 API<br/>（DeepSeek 等）"]
-    B <--> DB[("SQLite<br/>data/companion.db")]
-    B -->|"语音合成"| T["Edge-TTS / MiniMax"]
+    TH --> L["大模型 API<br/>（DeepSeek 等）"]
+    OB --> L
+    PR --> L
+    TH -->|"合成语音"| T["Edge-TTS / MiniMax"]
+    OB --> DB[("SQLite<br/>data/companion.db")]
+    DB --> AD["看板 / 管理页"]
     Y["你的浏览器 / 小窝"] -.->|"SSH 隧道"| AD
 ```
+
+</details>
 
 - **NapCat** 负责登录 QQ 小号，把收到的私聊消息通过 WebSocket 推给机器人，再把她的回复发出去。
 - **机器人进程**是一个纯 Python 的异步程序，里面同时跑着几条线：处理你的消息、定时考虑要不要主动找你、事后结算好感和记忆、提供看板网页。
@@ -48,6 +57,11 @@ flowchart LR
 ---
 
 ## 2. 一条消息的旅程
+
+![一条消息的旅程](images/architecture-02.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
 
 ```mermaid
 sequenceDiagram
@@ -74,6 +88,8 @@ sequenceDiagram
     Note over 观察者: 更新好感、情绪、事实、<br/>待跟进、见面约定、表情包收藏
 ```
 
+</details>
+
 几个关键点：
 
 1. **先等你说完**。真人聊天经常一句话拆成好几条发。聚合器在你停手 **6 秒**后才认为这一轮说完了；从第一条算起最多等 **15 秒**。NapCat 能上报你"正在输入"时，它会再多等一会儿，但不会无限等。
@@ -89,6 +105,11 @@ sequenceDiagram
 
 秒回是机器人最容易露馅的地方。她的回复时机分两段：
 
+![回复时机](images/architecture-03.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
 flowchart TD
     A["一轮消息到达"] --> B{"距她上次回话<br/>超过 5 分钟？"}
@@ -103,6 +124,8 @@ flowchart TD
     G --> H["逐条发出，条与条之间<br/>停 0.8~2.2 秒"]
 ```
 
+</details>
+
 - **第一条才延迟**："她拿起手机"的判据是她上一次回话已经过去 5 分钟以上。聊开之后就正常接话，不会每句都拖。
 - **延迟先于看消息**：等待发生在看图、拼提示词之前，相当于"她还没看到消息"。等完再去取当时的时间和状态，提示词里的"现在几点"才准确。
 - **"正在输入"按字数演**：生成完才知道她要说多少字，所以输入时长在生成之后才算。
@@ -116,21 +139,32 @@ flowchart TD
 
 每轮主聊的系统提示词由一个固定模板拼成。顺序是刻意安排的：**越稳定的内容越靠前**。
 
+![提示词的拼装顺序](images/architecture-04.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
 flowchart TD
     subgraph S["几乎不变：靠前，命中缓存"]
+        direction TB
         R1["【角色】人设、说话习惯、正反示范"]
         R2["【聊天规则】不写旁白、表情包、沉默权…"]
         R3["QQ 表情表 / 引用规则 / 语音说明"]
+        R1 --> R2 --> R3
     end
     subgraph V["每轮都在变：靠后"]
+        direction TB
         R4["【她此刻】作息、心情、安心感、冷落感"]
         R5["【事实】现在几点、上次聊天、记得的事、<br/>日记、待跟进、欲言又止、生活主线、世界书"]
         R6["【当前关系阶段·最高优先级】<br/>阶段规则 + 安全提示"]
+        R4 --> R5 --> R6
     end
     S --> V
     V --> M["+ 最近 10 轮聊天记录 + 你这一轮的消息"]
 ```
+
+</details>
 
 为什么这么排：
 
@@ -146,6 +180,11 @@ flowchart TD
 
 ### 5.1 三层记忆
 
+![三层记忆](images/architecture-05.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
 flowchart LR
     T["工作记忆<br/>最近 10 轮原话"] -->|"每攒够 8 轮"| D["日记<br/>她用自己的口吻写一篇<br/>带重要度和情绪"]
@@ -153,6 +192,8 @@ flowchart LR
     D -->|"按遗忘曲线"| P["提示词里的<br/>'清晰地记得 / 记得 / 隐约记得'"]
     F --> P
 ```
+
+</details>
 
 - **工作记忆**：最近 10 轮原话，原样放进提示词，保证她接得上刚才的话。
 - **日记**：每攒够 8 轮你的消息，后台让模型以她的视角写一篇日记，打上重要度（1~10）和情绪（温暖、感动、不安、平静……）。
@@ -214,6 +255,11 @@ flowchart LR
 
 情绪用 **Ornstein-Uhlenbeck 过程**建模：受刺激会偏离，但总会被一股"回归力"慢慢拉回基线，同时带一点随机波动。
 
+![情绪的均值回归](images/architecture-06.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
 flowchart LR
     X["当前情绪"] -->|"每小时回归 12%<br/>+ 少量随机波动"| Bv["基线"]
@@ -221,6 +267,8 @@ flowchart LR
     M["情绪惯性<br/>（上次变化的余波）"] --> X
     N["冷落<br/>（你多久没说话）"] -->|"把基线往下压"| Bv
 ```
+
+</details>
 
 - **基线随关系变**：愉悦的基线 = 2 + min(2, 好感复合分 ÷ 50)。关系越好，她平时越开心。
 - **对话冲击**：观察者每轮给出这一轮让她开心 / 激动 / 安心了多少，单轮冲击有上限（愉悦、激活各 ±2），防止一句话就让她大起大落。
@@ -247,6 +295,11 @@ flowchart LR
 
 ### 7.1 从一轮对话到六个维度
 
+![好感与关系阶段](images/architecture-07.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
 flowchart LR
     O["观察者给这一轮打分（0~10）<br/>自我暴露 · 回应度 · 温暖 · 共鸣"] --> D["六维变化"]
@@ -259,6 +312,8 @@ flowchart LR
     W & TR & I & IN & P & TE --> C["复合分 0~100"]
     C --> S["关系阶段 0~9"]
 ```
+
+</details>
 
 - **打分换算**：比如温暖维看"温暖"分，亲密维看"自我暴露 + 共鸣"。每轮每维最多变 ±2。
 - **越高越难涨**：复合分超过 20 后，涨幅乘一个阻力系数 r = (100 − 复合分) ÷ 80。到 100 时阻力为 0，所以永远不会破百。
@@ -299,6 +354,11 @@ flowchart LR
 
 主动消息每隔 20~40 分钟（随机）"醒来"一次，经过三层判断：
 
+![主动消息的三层判断](images/architecture-08.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
 flowchart TD
     W["醒来（每 20~40 分钟）"] --> G{"第一层：规则闸门<br/>（不花钱）"}
@@ -316,6 +376,8 @@ flowchart TD
     T4 -.没有.-> T5["⑤ 今天是星期几的感觉"]
     T1 & T2 & T3 & T4 & T5 --> S["生成并发送"]
 ```
+
+</details>
 
 **第一层规则闸门**，命中任何一条就不发：
 
@@ -345,6 +407,11 @@ flowchart TD
 
 **生活主线**解决"她的生活是即兴编的，说完就蒸发"的问题：
 
+![生活主线的状态变化](images/architecture-09.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
+
 ```mermaid
 stateDiagram-v2
     direction LR
@@ -355,6 +422,8 @@ stateDiagram-v2
     resolved --> faded: 2 天后淡出
     faded --> [*]
 ```
+
+</details>
 
 - 她手上同时有 2~3 件"接下来要做的事"（比如一次考试、一趟出门），按日期往前推进；
 - 到了那天 18 点后，这件事会有一个结果，并触发一条"脱口而出"的主动消息；
@@ -369,6 +438,11 @@ stateDiagram-v2
 ## 10. 语音是怎么挑出来的
 
 v2.1.0 的思路是"**模型只写自然正文，程序从原话里挑一句去念**"。模型不用学任何语音标记，也就不存在"标记写错"的问题。
+
+![语音选句流程](images/architecture-10.png)
+
+<details>
+<summary>图的源码（Mermaid）</summary>
 
 ```mermaid
 flowchart TD
@@ -386,6 +460,8 @@ flowchart TD
     SEND -- "QQ 确认收到" --> OK["记一次语音，扣额度"]
     SEND -- "合成失败或没确认" --> FB["那一句原样当文字发出"]
 ```
+
+</details>
 
 - **怎么判断"情绪浓"**：句子里有晚安、想你、舍不得、哼、不理你、早点睡这类词得 2 分，带语气词或感叹、问号再加 1 分；"嗯""好的"这种应答是 0 分。没要语音时，只有 2 分以上的句子才会被念出来。
 - **怎么算"明确要了"**：用规则匹配"发条语音""想听你声音""唱一句"这类说法；"别发语音"会被识别成拒绝。
