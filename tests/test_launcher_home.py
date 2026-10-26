@@ -47,6 +47,7 @@ class TestWindow(unittest.TestCase):
 
 
 class TestShortcut(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows 快捷方式专用测试，非 Windows 明确跳过")
     def test_base_pythonw_is_preferred(self):
         with mock.patch.object(home_mod.sys, "_base_executable", r"D:\base\python.exe"), \
                 mock.patch.object(home_mod.os.path, "isfile", return_value=True):
