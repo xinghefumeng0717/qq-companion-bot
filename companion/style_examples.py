@@ -18,7 +18,7 @@ import math
 import random
 import re
 from collections import Counter
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,8 @@ class StyleExampleBank:
     def _norm(self, v: Counter) -> float:
         return math.sqrt(sum((c * self._idf.get(k, 1.0)) ** 2 for k, c in v.items())) or 1.0
 
-    def search(self, text: str, top_k: int = TOP_K) -> List[Dict[str, str]]:
+    def search_entries(self, text: str, top_k: int = TOP_K) -> List[Tuple[int, Dict[str, str]]]:
+        """返回候选的原始序号与内容，供可回放抽样和 trace 使用。"""
         q = _bigrams(text)
         if not q:
             return []
@@ -100,7 +101,10 @@ class StyleExampleBank:
                 if s >= MIN_SCORE:
                     scored.append((s, i))
         scored.sort(reverse=True)
-        return [self.items[i] for _, i in scored[:top_k]]
+        return [(i, self.items[i]) for _, i in scored[:top_k]]
+
+    def search(self, text: str, top_k: int = TOP_K) -> List[Dict[str, str]]:
+        return [item for _index, item in self.search_entries(text, top_k=top_k)]
 
     def pick(self, text: str, n: int = PICK) -> List[Dict[str, str]]:
         cands = self.search(text)
@@ -108,16 +112,19 @@ class StyleExampleBank:
             cands = self.rng.sample(cands, n)
         return cands
 
-    def build_block(self, text: str) -> str:
-        """空串 = 不注入（没检索到或输入为空），提示词与关掉时逐字节一致。"""
-        try:
-            picked = self.pick(text)
-        except Exception as e:
-            logger.error(f"[StyleExamples] 检索异常: {e}")
-            return ""
+    def render(self, picked: Sequence[Dict[str, str]]) -> str:
+        """只渲染已经选定的条目；空序列不留下标题或空白块。"""
         if not picked:
             return ""
         lines = [
             f"\n  - 他：{_one_line(x['his'])} → 她：{_one_line(x['her'])}" for x in picked
         ]
         return self.header + "".join(lines)
+
+    def build_block(self, text: str) -> str:
+        """旧链路入口：保留共享 RNG 抽样行为，不在本阶段改生产基线。"""
+        try:
+            return self.render(self.pick(text))
+        except Exception as e:
+            logger.error(f"[StyleExamples] 检索异常: {e}")
+            return ""

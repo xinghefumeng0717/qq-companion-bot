@@ -39,12 +39,16 @@ from companion.prompts import (
     get_trust_description,
     holiday_prompt_note,
 )
-from companion.voice_planner import VoicePlanner, strip_legacy_voice_markup
+from companion.voice_recovery import recover_voice_text
+from companion.voice_planner import VoicePlanner
 from companion.runtime_state import runtime_v1_enabled
 from companion.replier import (
     Replier,
     count_today_faces,
     face_daily_budget,
+    has_voice_intent,
+    has_voice_promise,
+    sanitize_voice_claims,
     record_text_from_chunks,
     strip_face_markers,
     strip_voice_record_prefix_for_history,
@@ -163,11 +167,6 @@ class ProactiveScheduler:
         # FIXES22：语音闸门（与主聊共用同一份 TTSManager 账目：开关/日上限/作息）
         self.tts = tts
         self.runtime_events = None
-        self.last_voice_status = "none"
-        self.last_voice_reason = ""
-        self.last_voice_at: Optional[datetime] = None
-        self.last_turn_voice_status = "none"
-        self.last_turn_at: Optional[datetime] = None
         self._typing_on = (
             timing_config is not None
             and timing_config.typing_indicator_enabled
@@ -553,37 +552,67 @@ class ProactiveScheduler:
         if getattr(self.persona.world, "face_usage", "normal") == "rare":
             used_faces = await count_today_faces(self.db)
             face_budget = face_daily_budget(self.persona.world, used_faces)
-        # 与主聊完全同源：她只产正文，规划器直接从原话形成语音段，不做模型整理或补救。
-        reply_text = strip_legacy_voice_markup(reply_text)
-        planner = VoicePlanner(
-            getattr(self.assembler, "voice_frequency", "frequent"),
-            max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
-        )
-        runtime_plan = planner.plan("", reply_text, voice_allowed=voice_ok, requested=False)
-        body_text = runtime_plan.body_text if runtime_plan.has_voice else reply_text
-        chunks, clean_text = self.replier.parse_reply(
-            body_text,
-            source="proactive",
-            face_budget=face_budget,
-            voice_allowed=False,
-            voice_max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
-        )
-        if runtime_plan.has_voice:
-            voice_chunk = {
-                "type": "voice", "content": runtime_plan.voice_text,
-                "_runtime_voice": True,
-            }
-            before_text = getattr(runtime_plan, "before_text", None)
-            if before_text is None:
-                chunks.append(voice_chunk)
-            else:
-                before_chunks, _ = self.replier.parse_reply(
-                    before_text, source="proactive", face_budget=face_budget,
-                    voice_allowed=False,
-                    voice_max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
+        runtime_plan = None
+        planner = None
+        planner_allowed = voice_ok
+        if runtime_enabled:
+            planner = VoicePlanner(
+                getattr(self.assembler, "voice_frequency", "frequent"),
+                max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
+            )
+            planner_allowed = voice_ok and planner.allows("")
+            reply_text = sanitize_voice_claims(
+                reply_text, voice_allowed=planner_allowed,
+                previous_voice_sent=False, voice_context=True,
+            )
+            runtime_plan = planner.plan("", reply_text, voice_allowed=planner_allowed)
+            if not runtime_plan.has_voice:
+                reply_text = sanitize_voice_claims(
+                    reply_text, voice_allowed=False,
+                    previous_voice_sent=False, voice_context=True,
                 )
-                chunks.insert(min(len(before_chunks), len(chunks)), voice_chunk)
-            chunks = fit_chunks(chunks, self.replier.config.max_chunks)
+            chunks, clean_text = self.replier.parse_reply(
+                runtime_plan.body_text if runtime_plan.has_voice else reply_text,
+                source="proactive",
+                face_budget=face_budget,
+                voice_allowed=False,
+                voice_max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
+            )
+            if runtime_plan.has_voice:
+                chunks.append({
+                    "type": "voice", "content": runtime_plan.voice_text,
+                    "_runtime_voice": True,
+                })
+                chunks = fit_chunks(chunks, self.replier.config.max_chunks)
+        else:
+            chunks, clean_text = self.replier.parse_reply(
+                reply_text,
+                source="proactive",
+                face_budget=face_budget,
+                voice_allowed=voice_ok,
+                voice_max_chars=getattr(
+                    getattr(self.tts, "config", None), "max_chars", 60
+                ),
+            )
+        for chunk in chunks:
+            if chunk.get("type") == "voice":
+                chunk["_voice_user_text"] = ""
+        if (has_voice_intent(reply_text) or has_voice_promise(reply_text)) and (
+            planner is None or planner.frequency != "off"
+        ) and not any(
+            c.get("type") == "voice" for c in chunks
+        ):
+            recovered = await recover_voice_text(
+                replier=self.replier,
+                assembler=self.assembler,
+                gateway=self.gateway,
+                user_text="",
+                draft=reply_text,
+                reason="主动消息的语音没有真正发出",
+                model=self.gateway.config.text_model,
+            )
+            if recovered:
+                chunks.append({"type": "text", "content": recovered})
         clean_text = record_text_from_chunks(chunks) or clean_text
         if not chunks:
             return False
@@ -596,21 +625,6 @@ class ProactiveScheduler:
         )
         await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
         clean_text = record_text_from_chunks(chunks) or clean_text
-        if runtime_plan.has_voice:
-            if any(c.get("type") == "voice" and c.get("_voice_delivery") == "sent" for c in chunks):
-                self.last_voice_status = "sent"
-            elif any(c.get("_runtime_voice") and c.get("_voice_delivery") == "text" for c in chunks):
-                self.last_voice_status = "text_fallback"
-            elif any(c.get("_runtime_voice") and c.get("_voice_delivery") == "failed" for c in chunks):
-                self.last_voice_status = "failed"
-            else:
-                self.last_voice_status = "unconfirmed"
-            self.last_voice_reason = next(
-                (c.get("_voice_failure_reason", "") for c in chunks if c.get("_runtime_voice")), ""
-            )
-            self.last_voice_at = datetime.now()
-        self.last_turn_voice_status = self.last_voice_status if runtime_plan.has_voice else "none"
-        self.last_turn_at = datetime.now()
 
         # 实验路径只按最终实发结果记语音；没有语音计划时不额外制造未尝试记录
         if runtime_enabled and self.runtime_events is not None:
@@ -707,12 +721,13 @@ class ProactiveScheduler:
             except Exception as e:
                 logger.warning(f"[Proactive] 生活主线状态推进异常: {e}")
 
-        # 时间带来的情绪变化（均值回归、冷落）只在这里和观察者结算时推进，组装提示词不推
-        aff_for_mood = await self.affection.get_state()
-        await self.mood.update_mood(
-            composite_affection=float(aff_for_mood.get("composite", 30.0)),
-            stage=aff_for_mood.get("stage"),
-        )
+        if runtime_v1_enabled(None, self.assembler):
+            # 实验路径只在明确的调度结算点推进时间相关情绪，不在读取提示词时推进
+            aff_for_mood = await self.affection.get_state()
+            await self.mood.update_mood(
+                composite_affection=float(aff_for_mood.get("composite", 30.0)),
+                stage=aff_for_mood.get("stage"),
+            )
         # 第一层·前置闸门。FIXES24：事件通道豁免第 4 条（"上一条主动消息机主尚未回复"），
         # 所以这里先用 skip_unanswered_reply=True 过一遍零成本闸门——
         # 免打扰 / 60 分钟 / 连续未回(第3条) / 晚安 / 情绪下限 仍然照拦，

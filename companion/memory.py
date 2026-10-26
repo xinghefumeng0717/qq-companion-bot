@@ -130,20 +130,6 @@ def calc_diary_strength(
     return strength, tau_effective
 
 
-def third_person(text: str) -> str:
-    """只改明确的观察者角色称谓，不做全词表替换。
-
-    旧事实多以"机主/伴侣"开头；介词后的"给伴侣/告诉伴侣"等也是明确角色位置。
-    "咖啡伴侣/灵魂伴侣/生活伴侣"等普通词不在这些位置，必须原样保留。
-    """
-    if not text:
-        return ""
-    prefix = r"(\s*(?:[-*•]\s+|\d+[.、]\s+)?)"
-    res = re.sub(r"(?m)^" + prefix + r"机主", r"\1他", text or "")
-    res = re.sub(r"(?m)^" + prefix + r"伴侣(?=说|今天|最近|现在|目前|心情|喜欢|想|在|已|正|又|还|没|不|会|要|将|刚)", r"\1她", res)
-    return re.sub(r"(?<=[给陪和跟对让向问告诉知])伴侣", "她", res)
-
-
 class MemoryManager:
     def __init__(
         self,
@@ -272,6 +258,25 @@ class MemoryManager:
             logger.info(f"[Memory] {n} 条待跟进超过 {FOLLOWUP_EXPIRE_HOURS} 小时没下文，已按过期处理")
         return n
 
+    async def get_open_followups_readonly(self, due_only: bool = False, limit: int = 5, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """只读取待跟进，不执行过期写回；筛选口径与旧接口一致。"""
+        now_dt = now or datetime.now()
+        cutoff = (now_dt - timedelta(hours=FOLLOWUP_EXPIRE_HOURS)).strftime(TIME_FORMAT)
+        if due_only:
+            rows = await self.db.fetchall(
+                "SELECT id, topic, remind_after, created_at FROM followups "
+                "WHERE done = 0 AND remind_after <= ? AND remind_after >= ? "
+                "ORDER BY id ASC LIMIT ?",
+                (now_dt.strftime(TIME_FORMAT), cutoff, limit),
+            )
+        else:
+            rows = await self.db.fetchall(
+                "SELECT id, topic, remind_after, created_at FROM followups "
+                "WHERE done = 0 AND remind_after >= ? ORDER BY id ASC LIMIT ?",
+                (cutoff, limit),
+            )
+        return [dict(r) for r in rows]
+
     async def get_open_followups(self, due_only: bool = False, limit: int = 5, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """未完成且未过期的待跟进（先顺手清掉过期的）。due_only=True 只要提醒时间已到的。"""
         await self.expire_stale_followups(now=now)
@@ -296,9 +301,27 @@ class MemoryManager:
 
     @staticmethod
     def format_followup(row: Dict[str, Any]) -> str:
-        """待跟进的提示词形态：带上"哪天记下的"，模型才知道 topic 里的"明天"指哪天。"""
+        """带上记录日期；旧数据没有来源字段，不猜测是用户还是她的计划。"""
         day = mmdd_of(row.get("created_at"))
-        return f"{row['topic']}（{day} 他说的）" if day else str(row["topic"])
+        return f"{row['topic']}（{day} 记下）" if day else str(row["topic"])
+
+    async def get_live_desires_readonly(self, limit: int = 5, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """只筛选仍作数的念头，不删除过期行，供只读心理快照使用。"""
+        rows = await self.db.fetchall(
+            "SELECT id, content, created_at FROM suppressed_desires ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        now_dt = now or datetime.now()
+        last_user = await self.get_last_user_turn_time()
+        live: List[Dict[str, Any]] = []
+        for r in rows:
+            c_dt = parse_dt(r["created_at"])
+            if c_dt and (now_dt - c_dt).total_seconds() > DESIRE_TTL_HOURS * 3600:
+                continue
+            if c_dt and last_user and last_user > c_dt:
+                continue
+            live.append(dict(r))
+        return live
 
     async def get_live_desires(self, limit: int = 5, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """还作数的欲言又止念头（新到旧）。
@@ -704,8 +727,7 @@ class MemoryManager:
         out = []
         for r in rows:
             day = mmdd_of(r["created_at"])
-            content = third_person(r["content"])
-            out.append(f"{content}（{day} 记下）" if day else content)
+            out.append(f"{r['content']}（{day} 记下）" if day else r["content"])
         return out
 
     # ==========================================

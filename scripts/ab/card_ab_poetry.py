@@ -5,7 +5,7 @@
 （"小巷的风我替你吹着""辣椒下锅声比我还响""这表情我给巷子看了，它说会写"）。
 处置：角色卡 `chat_style.rules` 追加 1 条"场景意象也是梗"规则 + `bad_examples`
 追加 3 条生产原话反面教材（术前备份
-指定的旧卡备份，本脚本以它为旧卡）。
+`characters/qingzi/character.backup-20261005-poetry-v3术前.json`，本脚本以它为旧卡）。
 
 与前几轮的关键差异：**时间伪装必须落在 2026 国庆 8 天长假内**（用 `--time` 显式指定，
 建议 2026-10-06 15:00；不指定时沿用基座默认 2026-10-01 20:30，也在长假内），
@@ -85,8 +85,8 @@ async def build_messages(char_dir: str, work_db: str, probe: str):
 
 base.build_messages = build_messages
 
-# ── 本轮专用配置：旧卡与新卡配置 ──
-base.OLD_CARD_SRC = os.environ.get("OLD_CARD_SRC", "characters/example/character.json")
+# ── 本轮专用配置：旧卡 = 诗意术前备份，新卡 = 当前 characters/qingzi ──
+base.OLD_CARD_SRC = "characters/qingzi/character.backup-20261005-poetry-v3术前.json"
 base.OLD_CARD_DIR = "data/ab_poetry_old_card"
 base.WORK_DB_OLD = "data/ab_poetry_work_old.db"
 base.WORK_DB_NEW = "data/ab_poetry_work_new.db"

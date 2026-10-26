@@ -3,8 +3,6 @@
 import json
 import os
 import socket
-import sys
-import tempfile
 import threading
 import unittest
 import urllib.error
@@ -14,7 +12,7 @@ from unittest import mock
 
 import launcher.home as home_mod
 
-EXAMPLE_CARD = os.path.join("characters", "example")
+SI = os.path.join("characters", "si")
 
 
 def _free_port() -> int:
@@ -29,21 +27,11 @@ class TestIdentity(unittest.TestCase):
         self.assertEqual(ident["name"], "她")
         self.assertIsNone(ident["skin"])
 
-    def test_example_identity(self):
-        ident = home_mod.load_identity(EXAMPLE_CARD)
-        self.assertTrue(ident["name"])
-
-    def test_custom_identity_with_skin(self):
-        with tempfile.TemporaryDirectory() as d:
-            theme_dir = os.path.join(d, "theme")
-            os.makedirs(theme_dir)
-            with open(os.path.join(d, "character.json"), "w", encoding="utf-8") as f:
-                json.dump({"name": "测试角色"}, f, ensure_ascii=False)
-            with open(os.path.join(theme_dir, "skin.json"), "w", encoding="utf-8") as f:
-                json.dump({"ink": True}, f)
-            ident = home_mod.load_identity(d)
-            self.assertEqual(ident["name"], "测试角色")
-            self.assertTrue(ident["skin"].ink)
+    @unittest.skipUnless(os.path.isdir(os.path.join(SI, "theme")), "祀的皮肤只在私人仓库")
+    def test_si_identity(self):
+        ident = home_mod.load_identity(SI)
+        self.assertEqual(ident["name"], "祀")
+        self.assertTrue(ident["skin"].ink)
 
 
 class TestWindow(unittest.TestCase):
@@ -59,7 +47,6 @@ class TestWindow(unittest.TestCase):
 
 
 class TestShortcut(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "win32", "快捷方式只在 Windows 上建，路径拼法也只在 Windows 上成立")
     def test_base_pythonw_is_preferred(self):
         with mock.patch.object(home_mod.sys, "_base_executable", r"D:\base\python.exe"), \
                 mock.patch.object(home_mod.os.path, "isfile", return_value=True):
@@ -68,7 +55,7 @@ class TestShortcut(unittest.TestCase):
 
 class TestServer(unittest.TestCase):
     def setUp(self):
-        card = EXAMPLE_CARD
+        card = SI if os.path.isdir(SI) else os.path.join("characters", "example")
         cfg = {"token": "", "card": card, "theme": "endfield"}
         with mock.patch.object(home_mod, "read_local_config", return_value=cfg):
             self.home = home_mod.Home()

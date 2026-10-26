@@ -532,13 +532,13 @@ class TestActivityGate(unittest.TestCase):
     def test_本卡真实文案会命中(self):
         """闸门必须对本卡真实作息文案真的响，否则等于装了个死开关。"""
         blocked = [
-            "教学区西教连上专业必修（古代汉语与文学经典精读），课间看一眼手机",
+            "紫金港西教连上专业必修（古代汉语与文学经典精读），课间看一眼手机",
             "下午安中大楼上通识选修课，在自动贩卖机买乌龙茶",
             "蒙民伟楼大排练厅进行文琴交响乐团全团合练，手机静音",
             "周��四下午独奏练琴时间！独自在蒙民伟楼个人琴房练大提琴独奏",
             "在基础馆自习室刷文献、做笔记",
             "整理谱子上的笔记，准备熄灯休息",
-            "已经睡下了，在示例大学宿舍安静的梦乡中",
+            "已经睡下了，在浙大宿舍安静的梦乡中",
         ]
         for act in blocked:
             with self.subTest(act=act):
@@ -599,8 +599,8 @@ class TestActivityGate(unittest.TestCase):
             ("早上在基础馆借还书，在二楼选几本下周参考书", False),
             ("风味食堂吃快餐，买杯咖啡提神，回自习室看书", False),
             ("蒙民伟楼大排练厅进行文琴交响乐团全团合练，手机静音", False),
-            ("教学区西教连上专业必修（古代汉语与文学经典精读），课间看一眼手机", False),
-            ("已经睡下了，在示例大学宿舍安静的梦乡中", False),
+            ("紫金港西教连上专业必修（古代汉语与文学经典精读），课间看一眼手机", False),
+            ("已经睡下了，在浙大宿舍安静的梦乡中", False),
             ("在临湖餐厅二楼靠窗边吃饭边看湖景，回寝室看闲书", True),
             ("周末夜晚在宿舍泡杯花果茶看文学书、写手账，最适合深度聊天", True),
         ]
@@ -834,10 +834,8 @@ class TestVoicePrompt(unittest.TestCase):
                 await close_db(db)
 
         prompt = asyncio.run(run())
-        from companion.prompts import VOICE_PLANNER_RULES
-        self.assertIn(VOICE_PLANNER_RULES, prompt)
-        self.assertNotIn("多发语音是受欢迎的", prompt)
-        self.assertNotIn("情绪到位", prompt)
+        self.assertIn("[voice:", prompt)
+        self.assertIn("情绪到位", prompt)  # FIXES27：措辞放宽后断言跟着换
 
     def test_她此刻仍独立成行(self):
         """FIXES21 踩过：【她此刻】被插进来的块挤到行中间，既有守卫报过一次。"""
@@ -873,7 +871,7 @@ class TestProactiveVoicePath(unittest.TestCase):
         from companion.proactive import ProactiveScheduler
 
         class _P:
-            name = "小艾"
+            name = "青梓"
 
             def get_current_activity(self, hour, weekday=None, holiday_span=0):
                 return activity

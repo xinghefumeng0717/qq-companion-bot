@@ -29,8 +29,8 @@ FILE_URI_PREFIX = "file://"
 def file_uri_to_path(uri: str) -> str:
     """file:// URI 还原为本地路径，兼容三种写法：
     - POSIX:   file:///opt/qq-companion/voice/a.silk -> /opt/qq-companion/voice/a.silk
-    - Windows: file:///D:/companion/a.silk          -> D:/companion/a.silk
-    - Windows: file://D:/companion/a.silk           -> D:/companion/a.silk
+    - Windows: file:///D:/QQ chatter/a.silk          -> D:/QQ chatter/a.silk
+    - Windows: file://D:/QQ chatter/a.silk           -> D:/QQ chatter/a.silk
     非 file:// 开头或非字符串时原样返回，交给调用方按本地路径处理。
     """
     if not isinstance(uri, str) or not uri.startswith(FILE_URI_PREFIX):

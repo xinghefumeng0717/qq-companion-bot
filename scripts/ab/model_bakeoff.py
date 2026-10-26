@@ -1,10 +1,10 @@
 """模型文笔盲测工具 (scripts/ab/model_bakeoff.py)
 
-用项目自身的组装器 + 导出的数据库，复刻生产环境的真实提示词，
+用项目自身的组装器 + 服务器导出的数据库，复刻青梓生产环境的真实提示词，
 对多家候选模型发送同一批探针消息，横向对比文笔。
 
 用法：./venv/Scripts/python.exe scripts/ab/model_bakeoff.py [探针编号...]
-API key 读取 config.toml（已 gitignore），DeepSeek key 读 config.toml。
+API key 读取 data/test_keys.toml（已 gitignore），DeepSeek key 读 config.toml。
 """
 
 from __future__ import annotations
@@ -42,8 +42,7 @@ async def build_probe_messages(db: Database, persona: Persona, probe: str) -> Li
     affection = AffectionEngine(db, persona.initial_dims)
     mood = MoodEngine(db)
     memory = MemoryManager(db)
-    sdir = "characters/example/stickers" if os.path.exists("characters/example/stickers") else "characters"
-    stickers = StickerManager(sdir, db)
+    stickers = StickerManager("characters/qingzi/stickers", db)
     assembler = PromptAssembler(persona, affection, mood, memory, stickers, db)
     messages, _ = await assembler.assemble_messages(probe)
     return messages
@@ -79,7 +78,7 @@ async def main() -> None:
     only = set(int(x) for x in sys.argv[1:]) if len(sys.argv) > 1 else None
 
     config = Config.load()
-    with open("config.toml", "rb") as f:
+    with open("data/test_keys.toml", "rb") as f:
         keys = tomllib.load(f)
 
     persona = Persona.load(config.character.path)

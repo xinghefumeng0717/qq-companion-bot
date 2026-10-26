@@ -24,6 +24,11 @@ from companion.db import Database
 from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
+from companion.kernel.context import ContextBuilder
+from companion.kernel.kernel import DialogueKernel
+from companion.kernel.production import KernelTurnHandler
+from companion.kernel.psychology import PsychologicalSnapshotBuilder
+from companion.kernel.tracing import JsonlTraceRecorder
 from companion.onebot import (
     OneBotClient,
     build_face_segment,
@@ -239,7 +244,7 @@ class CompanionBot:
             meetups = MeetupManager(self.db, self.gateway, self.persona, self.memory)
             self.assembler.meetups = self.observer.meetups = self.proactive.meetups = meetups
 
-        self.turn_handler = TurnHandler(
+        turn_handler = TurnHandler(
             config=config,
             gateway=self.gateway,
             assembler=self.assembler,
@@ -252,8 +257,39 @@ class CompanionBot:
             timing_config=config.timing,
             tts=self.tts,   # FIXES22：语音闸门
         )
-        self.turn_handler.runtime_events = self.runtime_events
-        self.turn_handler.turn_tracer = self.turn_tracer
+        turn_handler.runtime_events = self.runtime_events
+        turn_handler.turn_tracer = self.turn_tracer
+        self.kernel = None
+        if getattr(config.reply, "use_kernel", False):
+            snapshot_builder = PsychologicalSnapshotBuilder(
+                affection_engine=self.affection,
+                mood_engine=self.mood,
+                persona=self.persona,
+                holidays_provider=config.get_holidays,
+            )
+            self.kernel = DialogueKernel(
+                gateway=self.gateway,
+                persona=self.persona,
+                snapshot_builder=snapshot_builder,
+                context_builder=ContextBuilder(),
+                tracer=JsonlTraceRecorder(config.reply.trace_dir),
+                memory=self.memory,
+                arcs=self.arcs,
+                self_memory=self.assembler.self_memory,
+                impressions=self.assembler.impressions,
+                meetups=getattr(self.assembler, "meetups", None),
+                model=config.llm.text_model,
+            )
+            turn_handler = KernelTurnHandler(
+                kernel=self.kernel,
+                legacy_handler=turn_handler,
+                memory=self.memory,
+                observer=self.observer,
+                proactive=self.proactive,
+                replier=self.replier,
+                send_chunk_fn=self._send_chunk_to_onebot,
+            )
+        self.turn_handler = turn_handler
         self.aggregator = MessageAggregator(turn_handler=self.turn_handler.handle_turn)
 
         self.backup_scheduler = DailyBackupScheduler(
@@ -334,8 +370,7 @@ class CompanionBot:
             if not body:
                 return
         elif chunk["type"] == "voice":
-            # reply+record 在部分 QQ 客户端显示为“不支持查看”：语音不携带引用。
-            chunk.pop("_quote", None)
+            # record 不携带 reply；若语音失败降级为文字，保留原 quote 给文字段。
             await self._send_voice_chunk(chunk)
             return
         else:
@@ -363,8 +398,7 @@ class CompanionBot:
     async def _send_voice_chunk(self, chunk: Dict[str, Any]) -> None:
         """语音段：合成 → 发送 → 删临时文件，失败必须真实降级为文字。"""
         text = (chunk.get("content") or "").strip()
-        # 所有语音发送入口都禁止 reply+record，包括直接调用本方法的旧代码。
-        chunk.pop("_quote", None)
+        # record 本身不携带 reply；若语音失败降级为文字，原 quote 仍可按文字段发送。
         if not text:
             return
 
@@ -417,14 +451,8 @@ class CompanionBot:
                     await asyncio.sleep(min(3.0, 0.6 + 0.04 * len(text)))
                 except asyncio.CancelledError:
                     raise
-                voice_segments = []
-                quote = chunk.get("_quote")
-                if isinstance(quote, dict) and quote.get("message_id") is not None:
-                    try:
-                        voice_segments.append(build_reply_segment(quote["message_id"]))
-                    except (TypeError, ValueError) as e:
-                        logger.warning(f"[Bot] 语音引用 id 非法，按无引用发送: {e}")
-                voice_segments.append(build_record_segment(audio_path))
+                # NapCat/QQ 不支持 reply + record；语音只发 record。
+                voice_segments = [build_record_segment(audio_path)]
                 ok = await self.onebot.send_private_msg(
                     self.config.account.allowed_user_id, voice_segments,
                 )

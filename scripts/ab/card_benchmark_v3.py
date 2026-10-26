@@ -55,7 +55,7 @@ from companion.stickers import StickerManager
 
 # ── 路径与常量 ──
 DB_SRC = "data/server-companion.db"
-STICKER_DIR = os.environ.get("STICKER_DIR", "characters/example/stickers")
+STICKER_DIR = "characters/qingzi/stickers"
 REPORT_MD = "data/card_benchmark_v3_report.md"
 RAW_JSON = "data/card_benchmark_v3_raw.json"
 TEMP_CARD_DIR = "data/benchmark_temp_cards"
@@ -83,21 +83,21 @@ _ORIG_DATETIME: Dict[str, Any] = {}
 AVAILABLE_CARDS: Dict[str, Dict[str, str]] = {
     "v0": {
         "id": "v0",
-        "name": "V0 原始卡",
-        "src": os.environ.get("CARD_V0", "characters/example/character.json"),
-        "desc": "对比卡0",
+        "name": "V0 原始卡 (FIXES9前)",
+        "src": "characters/qingzi/character.backup-before-fixes9.json",
+        "desc": "高称呼率(48%)、居委会空洞叮嘱、阶段4~9全空、高考作文腔",
     },
     "v1": {
         "id": "v1",
-        "name": "V1 对照卡",
-        "src": os.environ.get("CARD_V1", "characters/example/character.json"),
-        "desc": "对比卡1",
+        "name": "V1 大修卡 (真人校准前)",
+        "src": "characters/qingzi/character.backup-before-realfix.json",
+        "desc": "完成阶段补全，但单句超长、含写景空镜、绝对禁令过硬",
     },
     "v2": {
         "id": "v2",
-        "name": "V2 当前卡",
-        "src": os.environ.get("CARD_V2", "characters/example/character.json"),
-        "desc": "对比卡2",
+        "name": "V2 最新卡 (真人基线微调版)",
+        "src": "characters/qingzi/character.json",
+        "desc": "真人量级校准、删空镜写景、松绑禁令、好感具体反馈、支持外号",
     },
 }
 

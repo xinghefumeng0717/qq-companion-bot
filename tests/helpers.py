@@ -158,14 +158,16 @@ def card_path() -> str:
     """解析测试要用的角色卡目录，让公开 clone 不再依赖私有卡。
 
     优先级：
-    1. 环境变量 QQC_TEST_CARD（显式指定任意本地卡目录）；
-    2. 回落 characters/example（仓库自带的公开模板卡）。
-
-    公开仓不硬编码任何私有卡路径；本地想测私有卡请用环境变量指定。
+    1. 环境变量 QQC_TEST_CARD（显式指定，外人环境可设 characters/example）；
+    2. characters/qingzi 存在则用它（所有者本机，保持原有覆盖）；
+    3. 回落 characters/example（仓库自带的公开模板卡）。
     """
     env_card = os.environ.get("QQC_TEST_CARD", "").strip()
     if env_card:
         return env_card
+    private_card = os.path.join("characters", "qingzi")
+    if os.path.isdir(private_card):
+        return private_card
     return os.path.join("characters", "example")
 
 

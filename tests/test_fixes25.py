@@ -136,7 +136,7 @@ class TestFollowupExpiry(_MemHarness):
         await self.add_followup("明天七点起床", remind_ago_h=1, created_ago_h=10)
         rows = await self.memory.get_open_followups(due_only=True)
         day = (datetime.now() - timedelta(hours=10)).strftime("%m-%d")
-        self.assertEqual(self.memory.format_followup(rows[0]), f"明天七点起床（{day} 他说的）")
+        self.assertEqual(self.memory.format_followup(rows[0]), f"明天七点起床（{day} 记下）")
 
     async def test_主动消息用掉一次就勾掉(self):
         stack = make_engine_stack(self.db, include_proactive=True, proactive_config=ProactiveConfig())
@@ -291,14 +291,14 @@ class TestBackupRotation(unittest.TestCase):
 
 
 class TestSmokeScriptPaths(unittest.TestCase):
-    def test_通用沙箱与冒烟路径都存在(self):
+    def test_仿真器路径都存在(self):
         root = os.path.join(os.path.dirname(__file__), "..")
-        for rel in ("scripts/sim/full_sandbox.py", "scripts/smoke/smoke_continuity.py"):
-            path = os.path.join(root, rel)
+        for name in ("smoke_fixes19", "smoke_fixes20", "smoke_fixes21"):
+            path = os.path.join(root, "scripts", "smoke", f"{name}.py")
             with open(path, encoding="utf-8") as f:
                 src = f.read()
-            self.assertIn("companion", src, rel)
-        self.assertTrue(os.path.exists(os.path.join(root, "scripts", "sim", "full_sandbox.py")))
+            self.assertIn('os.path.join("scripts", "sim", "duo_sim.py")', src, name)
+        self.assertTrue(os.path.exists(os.path.join(root, "scripts", "sim", "duo_sim.py")))
 
 
 class TestObserverTopicFacts(_MemHarness):

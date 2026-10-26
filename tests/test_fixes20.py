@@ -81,7 +81,7 @@ from helpers import card_path  # noqa: E402  （tests/ 已在上方加入 sys.pa
 
 # 角色卡路径：下游回归（observer/记忆）要用真引擎堆，
 # 不能拿 None 占位——那样只能验出"参数没传对"，验不到"纯标签会不会炸"。
-_CARD = card_path()
+_QINGZI = card_path()
 
 
 async def _async_return(value: str):
@@ -377,7 +377,7 @@ class TestReceiveSideDownstream(_ConnectedCase):
 
         db = await make_db()
         try:
-            stack = make_engine_stack(db, persona_path=_CARD)
+            stack = make_engine_stack(db, persona_path=_QINGZI)
             await stack.memory.reinforce_memories("[流泪]")
             await stack.memory.reinforce_memories("")  # 空串仍是合法的降级输入
         finally:
@@ -396,7 +396,7 @@ class TestReceiveSideDownstream(_ConnectedCase):
             gw = make_mock_gateway()
             obs = Observer(
                 gw,
-                AffectionEngine(db, Persona.load(_CARD).initial_dims),
+                AffectionEngine(db, Persona.load(_QINGZI).initial_dims),
                 MoodEngine(db),
                 MemoryManager(db, gateway=gw, affection=None),
                 _StubStickers(),
@@ -893,7 +893,7 @@ class TestFaceTagReadSideInObserverMessages(unittest.IsolatedAsyncioTestCase):
             gw.chat = AsyncMock(side_effect=_capture)
             obs = Observer(
                 gw,
-                AffectionEngine(db, Persona.load(_CARD).initial_dims),
+                AffectionEngine(db, Persona.load(_QINGZI).initial_dims),
                 MoodEngine(db),
                 MemoryManager(db, gateway=gw, affection=None),
                 _StubStickers(),

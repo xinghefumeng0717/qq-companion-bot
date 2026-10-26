@@ -285,18 +285,12 @@ class TTSManager:
         self.voice_light_busy_words = (
             None if voice_light_busy_words is None else tuple(voice_light_busy_words)
         )
-        self._send_lock: Optional[asyncio.Lock] = None
+        self._send_lock = asyncio.Lock()
         os.makedirs(self.out_dir, exist_ok=True)
 
     @property
     def send_lock(self) -> asyncio.Lock:
-        """供发送端包裹「再次检查日额度 → 合成 → QQ发送 → 成功记账」的共享锁。
-
-        延迟创建（在当前运行事件循环中初始化），确保主动与主聊共享同一个锁对象，
-        避免两路任务同时进入合成与发送窗口导致超额或竞争。
-        """
-        if self._send_lock is None:
-            self._send_lock = asyncio.Lock()
+        """主聊与主动消息共用的合成/发送临界区锁。"""
         return self._send_lock
 
     @property

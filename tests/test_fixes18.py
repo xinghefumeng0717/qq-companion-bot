@@ -213,7 +213,7 @@ class TestSceneEndCondition(unittest.TestCase):
 
     def test_场景卡都带齐任务书要求的字段(self):
         """背景/开场/情绪走向/收场条件/时钟推进规则，一个都不能少。"""
-        # S5 = "管理员喊累"情境卡（2026-10-22 加）；
+        # S5 = 祀语境的"管理员喊累"卡（2026-10-22 加）；
         # S6 = 失约讨语音·账浓度探针（2026-10-23 FIXES27 验收加，字段要求同样适用）
         self.assertEqual(sorted(D.SCENES), ["S1", "S2", "S3", "S4", "S5", "S6"])
         for k, s in D.SCENES.items():
@@ -437,7 +437,7 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(m["verdict"], "WARN")
 
     def test_称呼漂移_长称呼出现即FAIL(self):
-        turns = _pair(1, "在吗", "小明同学你吃了吗") + _pair(2, "吃了", "嗯嗯")
+        turns = _pair(1, "在吗", "阿俊你吃了吗") + _pair(2, "吃了", "嗯嗯")
         m = D.metric_address_drift(turns, stage=1)
         self.assertEqual(m["verdict"], "FAIL")
         self.assertEqual(m["long_name_hits"], 1)
@@ -683,7 +683,7 @@ class TestTurnDriver(_FakeGatewayBase):
             notes = [r.get("note", "") for r in sim.raw_turns if r.get("speaker") == "system"]
             self.assertTrue(
                 any("模拟器" in n for n in notes),
-                f"空回复兜底没有留痕，报告会被误读成模型的病灶：{notes}",
+                f"空回复兜底没有留痕，报告会被误读成青梓的病灶：{notes}",
             )
         finally:
             await sim.close()

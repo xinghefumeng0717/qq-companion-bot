@@ -4,12 +4,12 @@
 data/screenshot_demo.db —— 绝不使用生产库 data/companion.db，
 否则会把假日记、假事实、假计费记录混进真实相处数据里。
 
-命令行参数（都已给默认值，不带参数跑 = 与旧版行为一致：小艾 + journal、桌面 1200x960、原输出目录）：
+命令行参数（都已给默认值，不带参数跑 = 与旧版行为一致：青梓 + journal、桌面 1200x960、原输出目录）：
   --width/--height  截图视口尺寸（默认 1200x960 = 桌面端）
   --sizes           一次跑多档宽度，如 "1200x960,390x844"（给定时忽略 --width/--height，
                     文件名自动加 _{宽} 后缀，避免互相覆盖）
-  --card            角色卡目录（默认 characters/example；指定带 theme/skin.json 的卡
-                    如指定带 theme/skin.json 的卡时，主题会按卡里的皮肤走）
+  --card            角色卡目录（默认 characters/qingzi；指定带 theme/skin.json 的卡
+                    如 characters/si 时，主题会按卡里的皮肤走）
   --theme           journal / plain / endfield（显式指定时优先于卡里的皮肤声明）
   --out             输出目录（默认仍是原来的绝对路径）
   --keep            保留临时浏览器 profile 目录（排查 CDP 问题时用）
@@ -19,7 +19,7 @@ data/screenshot_demo.db —— 绝不使用生产库 data/companion.db，
 宽度 ≤ 768 时自动开**手机视口仿真**（设备像素比 1 + viewport meta 生效）。
 
 新主题全页核对示例（终末地 + 水墨皮肤，桌面与手机两档）：
-  python scripts/util/screenshot_helper.py --card characters/example --theme endfield \
+  python scripts/util/screenshot_helper.py --card characters/si --theme endfield \
       --sizes 1200x960,390x844 --out snapshots/endfield
 
 演示库 data/screenshot_demo.db 每次运行都会重建（固定样例，避免重复插入把图表撑歪）；
@@ -220,7 +220,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help=f"视口宽度，默认 {DEFAULT_WIDTH}")
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT, help=f"视口高度，默认 {DEFAULT_HEIGHT}")
     parser.add_argument("--sizes", type=str, default="", help='多档尺寸，如 "1200x960,390x844"')
-    parser.add_argument("--card", type=str, default="characters/example", help="角色卡目录")
+    parser.add_argument("--card", type=str, default="characters/qingzi", help="角色卡目录")
     parser.add_argument("--theme", type=str, default="", choices=["", "journal", "plain", "endfield"],
                         help="看板主题；留空交给 config/角色卡皮肤决定")
     parser.add_argument("--out", type=str, default=OUTPUT_DIR, help="输出目录，默认沿用原路径")
@@ -250,7 +250,7 @@ def parse_sizes(args) -> list:
 # 演示日志：只在 data/logs/bot.log 不存在时临时写、拍完删掉
 DEMO_LOG_LINES = [
     "2026-10-22 18:02:11 [INFO] [OneBot] 已连接 ws://127.0.0.1:3001",
-    "2026-10-22 18:02:12 [INFO] [Persona] 角色卡已加载：小艾（缘缘庄）",
+    "2026-10-22 18:02:12 [INFO] [Persona] 角色卡已加载：祀（缘缘庄）",
     "2026-10-22 18:02:13 [INFO] [Affection] 阶段 5 · 伙伴 · 复合分 68.4",
     "2026-10-22 18:07:44 [INFO] [Chat] 收到私聊消息，进入回合处理",
     "2026-10-22 18:07:46 [INFO] [Gateway] chat 调用完成，耗时 1.9s",
@@ -287,7 +287,8 @@ async def main(args=None):
     db = Database(db_path)
     await db.init_tables()
     config = Config.load("config.example.toml")
-    persona_dir = args.card or config.character.path
+    persona_dir = args.card or ("characters/qingzi" if os.path.exists("characters/qingzi")
+                                else config.character.path)
     persona = Persona.load(persona_dir)
     affection = AffectionEngine(db, persona.initial_dims)
     mood = MoodEngine(db)

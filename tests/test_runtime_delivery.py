@@ -68,8 +68,8 @@ class RuntimeDeliveryTests(unittest.IsolatedAsyncioTestCase):
             bot = self._bot(onebot, _TTS(path))
             chunk = {"type": "voice", "content": "晚安", "_quote": {"index": 2, "message_id": 123}}
             await bot._send_voice_chunk(chunk)
-            self.assertEqual(onebot.calls[0][0]["type"], "record")
-            self.assertNotIn("_quote", chunk)
+            # NapCat/QQ 不支持 reply + record；引用只放文字段。
+            self.assertEqual([s["type"] for s in onebot.calls[0]], ["record"])
             self.assertEqual(chunk["_voice_delivery"], "sent")
 
     async def test_已发出后计数异常不重复补发(self):

@@ -38,8 +38,8 @@ class TestDirectionTagStrip(unittest.TestCase):
         """行首标签必须被剥离"""
         for tag in ("【起】", "【接】", "【收】"):
             with self.subTest(tag=tag):
-                out = strip_direction_tag(f"{tag}刚出琴房 教学区的路灯刚亮")
-                self.assertEqual(out, "刚出琴房 教学区的路灯刚亮")
+                out = strip_direction_tag(f"{tag}刚出琴房 紫金港的路灯刚亮")
+                self.assertEqual(out, "刚出琴房 紫金港的路灯刚亮")
 
     def test_strips_with_whitespace_and_newline(self):
         """标签与正文之间可能有空格或换行"""
@@ -88,22 +88,22 @@ class TestParseReplyIntegration(unittest.TestCase):
         self.r = _make_replier()
 
     def test_parse_reply_removes_tag(self):
-        chunks, record = self.r.parse_reply("【起】刚出琴房 教学区的路灯刚亮")
+        chunks, record = self.r.parse_reply("【起】刚出琴房 紫金港的路灯刚亮")
         self.assertTrue(chunks, "应至少产生一个待发段")
         for c in chunks:
             self.assertNotIn("【起】", c["content"])
             self.assertNotIn("【", c["content"])
         self.assertNotIn("【起】", record)
-        self.assertEqual(record, "刚出琴房 教学区的路灯刚亮")
+        self.assertEqual(record, "刚出琴房 紫金港的路灯刚亮")
 
     def test_parse_reply_tag_then_narration(self):
         """标签剥离必须发生在旁白剥离之前，两者叠加都要生效"""
-        raw = "【接】刚出琴房（叹了口气）教学区的路灯刚亮"
+        raw = "【接】刚出琴房（叹了口气）紫金港的路灯刚亮"
         chunks, record = self.r.parse_reply(raw)
         self.assertNotIn("【", record)
         self.assertNotIn("（", record)
         self.assertIn("刚出琴房", record)
-        self.assertIn("教学区的路灯刚亮", record)
+        self.assertIn("紫金港的路灯刚亮", record)
 
     def test_parse_reply_tag_on_every_line(self):
         """模型可能每行都加标签，所有行都要剥干净"""
@@ -123,8 +123,8 @@ class TestNewlineHardBoundary(unittest.TestCase):
     """换行是硬边界：模型写的换行 = 两条独立气泡，绝不能被合并成黏句"""
 
     def test_newline_splits_into_two_messages(self):
-        chunks = chunk_text_sentences("刚出琴房\n教学区的灯亮了", max_chunks=5)
-        self.assertEqual(chunks, ["刚出琴房", "教学区的灯亮了"])
+        chunks = chunk_text_sentences("刚出琴房\n紫金港的灯亮了", max_chunks=5)
+        self.assertEqual(chunks, ["刚出琴房", "紫金港的灯亮了"])
 
     def test_no_cross_line_merge_even_when_short(self):
         """两行加起来 <= 15 字也绝不能合并（这正是旧实现会黏句的场景）"""
@@ -139,8 +139,8 @@ class TestNewlineHardBoundary(unittest.TestCase):
         self.assertEqual(chunks[0], "在呢！好的。没问题。")
 
     def test_single_line_untouched(self):
-        chunks = chunk_text_sentences("刚出琴房，教学区的路灯刚亮", max_chunks=5)
-        self.assertEqual(chunks, ["刚出琴房，教学区的路灯刚亮"])
+        chunks = chunk_text_sentences("刚出琴房，紫金港的路灯刚亮", max_chunks=5)
+        self.assertEqual(chunks, ["刚出琴房，紫金港的路灯刚亮"])
 
     def test_blank_lines_skipped(self):
         chunks = chunk_text_sentences("第一行\n\n第三行", max_chunks=5)
@@ -152,7 +152,7 @@ class TestLiteralNewlineUnescape(unittest.TestCase):
 
     def test_unescape_backslash_n(self):
         self.assertEqual(
-            unescape_literal_newlines("刚出琴房\\n教学区"), "刚出琴房\n教学区"
+            unescape_literal_newlines("刚出琴房\\n紫金港"), "刚出琴房\n紫金港"
         )
 
     def test_unescape_backslash_r_backslash_n(self):
@@ -166,9 +166,9 @@ class TestLiteralNewlineUnescape(unittest.TestCase):
     def test_parse_reply_never_emits_literal_newline(self):
         r = _make_replier()
         for raw in (
-            "刚出琴房\\n教学区的灯亮了",
-            "【起】刚出琴房\\n【接】教学区",
-            '刚出琴房\\n教学区\\n路灯刚亮',
+            "刚出琴房\\n紫金港的灯亮了",
+            "【起】刚出琴房\\n【接】紫金港",
+            '刚出琴房\\n紫金港\\n路灯刚亮',
         ):
             with self.subTest(raw=raw):
                 chunks, _ = r.parse_reply(raw)
@@ -177,8 +177,8 @@ class TestLiteralNewlineUnescape(unittest.TestCase):
 
     def test_parse_reply_literal_newline_becomes_two_bubbles(self):
         r = _make_replier()
-        chunks, _ = r.parse_reply("【起】刚出琴房\\n【接】教学区")
-        self.assertEqual([c["content"] for c in chunks], ["刚出琴房", "教学区"])
+        chunks, _ = r.parse_reply("【起】刚出琴房\\n【接】紫金港")
+        self.assertEqual([c["content"] for c in chunks], ["刚出琴房", "紫金港"])
 
 
 # ==========================================================

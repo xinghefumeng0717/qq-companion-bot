@@ -30,11 +30,6 @@ NARRATION_PATTERN = re.compile(
 # 只剥首行会让第二行标签粘在第二条气泡上发出去。
 # 只认行首且只认这三个字，正文中偶然出现的【】不受影响。
 DIRECTION_TAG_PATTERN = re.compile(r"^[ \t]*【[起收接]】[ \t\n]*", re.MULTILINE)
-# 没有编号的残缺引用只是标记残渣，不像 [quote:2] 那样包含可执行目标。
-MALFORMED_QUOTE_PATTERN = re.compile(
-    r"^[ \t]*[\[【［]\s*quote\s*[:：]?\s*[\]】］][ \t]*",
-    re.IGNORECASE | re.MULTILINE,
-)
 
 
 def strip_direction_tag(text: str) -> str:
@@ -48,7 +43,7 @@ def strip_direction_tag(text: str) -> str:
 # QQ 系统表情标记正则（FIXES20 任务3）：[face:标签名]
 # 刻意不用裸标签 [旺柴]——那是收侧翻出来的**读**侧形态（她读他消息用），
 # 裸标签在发侧分不清"这句是她要写给他看的字"还是"她要发的脸"，会撞车。
-FACE_PATTERN = re.compile(r"[\[［]face[:：]([^\］\]]+)[\]］]", re.IGNORECASE)
+FACE_PATTERN = re.compile(r"\[face[:：]([^\]]+)\]", re.IGNORECASE)
 
 # 四类标记合并成一条正则，一次扫描切出全部段：
 # group(1) = sticker，group(2) = face，group(3) = quote，group(4) = voice。
@@ -63,7 +58,7 @@ FACE_PATTERN = re.compile(r"[\[［]face[:：]([^\］\]]+)[\]］]", re.IGNORECASE
 # 两条气泡，而模型写的是一行、不可用时它本该一个字都不改地照发。
 _MIXED_BASE = (
     r"\[(?:sticker|表情)[:：]([^\]]+)\]"
-    r"|[\[［]face[:：]([^\］\]]+)[\]］]"
+    r"|\[face[:：]([^\]]+)\]"
     r"|^[ \t]*\[quote[:：](\d+)\]"
 )
 # 三种生产写法同源共用：
@@ -75,12 +70,6 @@ _VOICE_PATTERN_SOURCE = r"\[voice[:：]\]?\s*([^\[\]]*?)\s*\]?\s*\[/voice\]"
 _VOICE_LINE_SHORTHAND = re.compile(
     r"^[ \t]*[\[【［]\s*voice[:：]\]?\s*([^\[\]【】［］\n]*?)\s*[\]】］][ \t]*$",
     re.IGNORECASE | re.MULTILINE,
-)
-# 行内简写：[voice:正文]后面还接着别的话（沙箱实测："[voice:嗓子还没开呢 将就听]刚睡醒…"），
-# 正文非空、且这一行后面没有 [/voice] 收尾——补成成对标记，余下的话照常按文字发
-_VOICE_INLINE_SHORTHAND = re.compile(
-    r"[\[【［]\s*voice[:：]\s*([^\[\]【】［］\n]+?)\s*[\]】］](?![^\n]*\[/voice)",
-    re.IGNORECASE,
 )
 MIXED_SEGMENT_PATTERN = re.compile(
     _MIXED_BASE + "|" + _VOICE_PATTERN_SOURCE,
@@ -105,12 +94,7 @@ FACE_RARE_DAILY_BUDGET = 2
 
 def enforce_face_daily_budget(text: str, budget: Optional[int]) -> str:
     """只保留当日额度内的 [face:] 标记，超出的剥标记留正文。None = 不限（默认旧行为）。"""
-    if budget is None or (
-        "[face" not in text
-        and "[FACE" not in text
-        and "［face" not in text
-        and "［FACE" not in text
-    ):
+    if budget is None or ("[face" not in text and "[FACE" not in text):
         return text
     seen = 0
 
@@ -243,14 +227,6 @@ def rewrite_voice_record_prefix(text: str, voice_allowed: bool) -> str:
     return _VOICE_RECORD_LINE_PREFIX.sub(_sub, text)
 
 
-def _sub_inline(m: "re.Match[str]") -> str:
-    body = m.group(1).strip()
-    if not body:
-        return m.group(0)
-    logger.info("[Replier] 补全行内语音简写标记（[voice:正文] 后接文字）")
-    return f"[voice:]{body}[/voice]\n"
-
-
 def repair_voice_line_shorthand(text: str) -> str:
     """把整行 ``[voice:正文]`` 补成标准成对标记。
 
@@ -268,8 +244,7 @@ def repair_voice_line_shorthand(text: str) -> str:
         logger.info("[Replier] 补全行尾语音简写标记（缺少 [/voice]）")
         return f"[voice:]{body}[/voice]"
 
-    text = _VOICE_LINE_SHORTHAND.sub(_sub, text)
-    return _VOICE_INLINE_SHORTHAND.sub(_sub_inline, text)
+    return _VOICE_LINE_SHORTHAND.sub(_sub, text)
 
 
 _VOICE_HISTORY_PREFIX = re.compile(
@@ -327,8 +302,7 @@ def sanitize_voice_claims(
     dropped = False
     for line in text.split("\n"):
         is_resend = bool(_VOICE_RESEND_RE.search(line))
-        # 只有明确指向语音的承诺才清理；“给你一条毛巾/唱一句/听好了”不属此处。
-        is_promise = has_voice_promise(line) and bool(re.search(r"语音|音频|声音", line))
+        is_promise = has_voice_promise(line)
         is_receipt_claim = bool(_VOICE_RECEIPT_RE.search(line)) and not previous_voice_sent
         is_heard_claim = bool(_VOICE_HEARD_RE.search(line)) and not previous_voice_sent
         is_sent_claim = (
@@ -748,12 +722,7 @@ def normalize_face_markers(text: str) -> str:
 
     只处理非法标记，合法标记一个字节都不动（下游按标记正常解析）。
     """
-    if (
-        "[face" not in text
-        and "[FACE" not in text
-        and "［face" not in text
-        and "［FACE" not in text
-    ):
+    if "[face" not in text and "[FACE" not in text and "［face" not in text:
         return text  # 绝大多数回复没这个标记，省一次全串扫描
 
     out: List[str] = []
@@ -777,9 +746,7 @@ def normalize_face_markers(text: str) -> str:
 
 
 # 裸表情标签：[doge] / [[汪汪]]（方括号里没有冒号，长度很短）
-BARE_FACE_TAG_PATTERN = re.compile(
-    r"\[\[([^\[\]:：\n]{1,10})\]\]|\[([^\[\]:：\n]{1,10})\]|［([^［］:：\n]{1,10})］"
-)
+BARE_FACE_TAG_PATTERN = re.compile(r"\[\[([^\[\]:：\n]{1,10})\]\]|\[([^\[\]:：\n]{1,10})\]")
 
 
 def normalize_bare_face_tags(text: str) -> str:
@@ -793,11 +760,11 @@ def normalize_bare_face_tags(text: str) -> str:
     改写后交给 normalize_face_markers 走既有白名单：清单内的变真表情，
     清单外的（[汪汪]、黑名单 [微笑]）剥掉标记只留正文。
     """
-    if not text or ("[" not in text and "［" not in text):
+    if not text or "[" not in text:
         return text
 
     def _sub(m: "re.Match[str]") -> str:
-        name = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        name = (m.group(1) or m.group(2) or "").strip()
         if face_id_by_name(name) is None:
             return m.group(0)
         return f"[face:{name}]"
@@ -1408,7 +1375,6 @@ class Replier:
 
         # 1. 字面量 \n 还原为真换行（模型常把换行写成两个字符）
         clean_text = unescape_literal_newlines(raw_text)
-        clean_text = MALFORMED_QUOTE_PATTERN.sub("", clean_text)
         clean_text = normalize_voice_syntax_variants(clean_text)
 
         # 1.5 DEEP_AUDIT B-7：单独占一行的 [沉默] 剥掉（其余内容照发）。

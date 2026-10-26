@@ -480,7 +480,7 @@ class TestScorecardItems(unittest.TestCase):
         kw = _base_kwargs()
         kw["turns"] = [
             _turn(1, "user", "在吗", act="A1"),
-            _turn(1, "her", "你吃了吗", act="A1"),
+            _turn(1, "her", "阿俊你吃了吗", act="A1"),
         ]
         sc = FR.build_scorecard(**kw)
         self.assertEqual(self._item(sc, "风格基线")["verdict"], "FAIL")

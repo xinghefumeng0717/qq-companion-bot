@@ -79,12 +79,13 @@ chunk_delay_min = 0.8              # 段间延迟秒数下限
 chunk_delay_max = 2.2
 self_check = false                 # 生成后质检：flash 检查复述/点评他的话和装饰性比喻，有就删掉（默认关）
 self_check_timeout = 10.0          # 质检最长等几秒，超时照发原稿（质检开 low 思考，中位约 1.6 秒）
-continuity_check = false           # 语句连贯性：只抓答非所问、读不通、前后矛盾；失败照发原稿（实测常超时，默认关）
+continuity_check = true            # 语句连贯性：只抓答非所问、读不通、前后矛盾；失败照发原稿
 continuity_timeout = 8.0            # 连贯性判定最长等几秒，超时照发原稿
 # 运行时事实/事件协作实验（默认关；只读状态、语音规划与投递、轮次追踪共用）
 runtime_state_v1 = false
 voice_frequency = "frequent"         # frequent=内容适合就优先语音（非每条）；explicit=仅明确请求；off=关闭规划
 trace_dir = "data/turn_traces"       # 实验开启后的本地 JSONL 轮次追踪
+use_kernel = false                  # 新对话内核：普通文字与明确语音走新管线，特殊输入事前回退旧链路（默认关）
 # trim_echo / vision_direct / candidates 同样可由卡里的 features 段自声明：
 # 这里没写的项取卡里的值，写了以这里为准。
 trim_echo = false                  # 首泡回声裁剪：第一个气泡在复述/点评他、后面还有话就删掉（不调模型，默认关）

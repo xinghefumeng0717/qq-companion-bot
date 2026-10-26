@@ -36,13 +36,13 @@ class TestLayers(_Harness):
 
     async def test_开着时核心常驻_非核心只带最近和相关(self):
         self.memory.fact_layers = True
-        await self._insert("他在示例大学读农学", 1, core=1)
+        await self._insert("他在浙大读农学", 1, core=1)
         await self._insert("他在准备数学建模比赛", 2)
         for i in range(15):
             await self._insert(f"事{i}", 3 + i)
         items = await self.memory.get_facts_for_prompt()
         self.assertEqual(len(items), 1 + FACT_RECENT_N)
-        self.assertTrue(items[0].startswith("他在示例大学读农学"))
+        self.assertTrue(items[0].startswith("他在浙大读农学"))
         self.assertFalse(any("数学建模" in x for x in items))
         items = await self.memory.get_facts_for_prompt(query="你那个建模比赛怎么样了")
         self.assertTrue(any("数学建模" in x for x in items))
@@ -59,14 +59,14 @@ class TestLayers(_Harness):
     async def test_核心超上限才合并(self):
         for i in range(FACT_CORE_LIMIT):
             await self._insert(f"核心{i}", 1 + i % 28, core=1)
-        self.memory.gateway = make_mock_gateway(chat_return_value='{"facts": ["他在示例大学读农学"]}')
+        self.memory.gateway = make_mock_gateway(chat_return_value='{"facts": ["他在浙大读农学"]}')
         self.assertFalse(await self.memory.consolidate_fact_core())
         await self._insert("再来一条", 28, core=1)
         self.assertTrue(await self.memory.consolidate_fact_core())
         prompt = self.memory.gateway.chat.call_args.kwargs["messages"][0]["content"]
         self.assertIn("关于一个男生", prompt)
         rows = await self.db.fetchall("SELECT content, core FROM facts")
-        self.assertEqual([(r["content"], r["core"]) for r in rows], [("他在示例大学读农学", 1)])
+        self.assertEqual([(r["content"], r["core"]) for r in rows], [("他在浙大读农学", 1)])
 
 
 class TestObserver(_Harness):
@@ -98,14 +98,14 @@ class TestMigration(unittest.IsolatedAsyncioTestCase):
         path = os.path.join(tempfile.mkdtemp(), "old.db")
         con = sqlite3.connect(path)
         con.execute("CREATE TABLE facts (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT UNIQUE, created_at TEXT)")
-        con.execute("INSERT INTO facts (content, created_at) VALUES ('他在示例大学', '2026-10-05 12:00')")
+        con.execute("INSERT INTO facts (content, created_at) VALUES ('他在浙大', '2026-10-05 12:00')")
         con.commit()
         con.close()
         db = Database(path)
         await db.init_tables()
         mem = MemoryManager(db)
         mem.fact_layers = True
-        self.assertEqual(await mem.get_facts_for_prompt(), ["他在示例大学（10-05 记下）"])
+        self.assertEqual(await mem.get_facts_for_prompt(), ["他在浙大（10-05 记下）"])
         await mem.add_fact("他是宁波人", core=True)
         await db.close()
 

@@ -1,81 +1,28 @@
-"""内容驱动的语音规划：主聊只产自然正文，从原文选连续片段并形成结构化语音段。"""
+"""内容驱动的高频语音规划：愿意多说，但不逢话必说。"""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from companion.tts import truncate_for_voice
+from companion.replier import normalize_voice_syntax_variants, repair_voice_line_shorthand
 
-# 明确请求正则：必须是本轮明确索要/请求语音，而非对声音的评价或喜好（保留导出供主流程使用）
-VOICE_REFUSAL_RE = re.compile(
-    r"(?:不|别|不要|不想|不用|甭)\s*(?:再|又)?\s*(?:给[我你他她它]|跟[我你他她它])?\s*(?:发|录|唱|用|听).{0,4}(?:语音|声音)"
-    r"|(?:不|别|不要|不想|不用|甭)\s*(?:再|又)?\s*(?:给[我你他她它]|跟[我你他她它])?\s*唱[一句段个首]"
-)
-VOICE_REQUEST_RE = re.compile(
-    r"(?:"
-    r"(?:发|发来|来|留|录|发个|发条|发段|来个|来条|来段|录个|录条|录段)\s*(?:一条|一段|一个)?\s*(?:语音|语音条|音频)"
-    r"|(?:用|换|发|说)\s*(?:语音|声音)\s*(?:说|聊|回复?|答|回|跟?我?讲)"
-    r"|(?:想|要|能不能|可以|能|快|求|让我|我想)\s*(?:听听?|听一下|听一声|听一听)\s*(?:你(?:的)?(?:声音)?|你的声|语音)?"
-    r"|让我听听你"
-    r"|想听你(?:说话|唱歌|唱|念|读)"
-    r"|唱[一句段个首]"
-    r"|给(?:我)?(?:唱|念|读)[一句段个首]"
-    r"|开麦|连麦|通个话|打语音"
-    r")"
-)
-
-# 追问正则：语音呢/怎么没语音/没收到等追问使用；快递/验证码不能命中
-VOICE_FOLLOWUP_RE = re.compile(
-    r"(?:"
-    r"(?:语音|声音)\s*(?:呢|去哪了|怎么没|咋没|怎么还没|为什么没|没出|没见|没来)"
-    r"|(?:怎么|咋|为什么)\s*(?:没|没有|不见|还没)\s*(?:(?:发|收到|听到|听见)?\s*(?:语音|声音)|出声)"
-    r"|(?:没|没能|未|无法)\s*(?:收到|听到|听见|播放)\s*(?:语音|声音)"
-    r"|(?:语音|声音)\s*(?:发了?没|发出来了?吗|发了吗|发了没|没收到|没听到|没听见|挂了|坏了)"
-    r")"
-)
-
-# 旧语音标记清理正则（不误伤普通括号，如【划重点】、[笑哭]、array[0]）
-_OPEN_BRACKET = r"(?:\[|【|［)"
-_CLOSE_BRACKET = r"(?:\]|】|］)"
-
-_VOICE_PAIR = re.compile(
-    _OPEN_BRACKET + r"\s*(?:voice|语音)\s*[:：]?[ \t]*" + _CLOSE_BRACKET + r"?(.*?)" +
-    _OPEN_BRACKET + r"\s*/\s*(?:voice|语音)\s*" + _CLOSE_BRACKET,
-    re.IGNORECASE | re.DOTALL,
-)
-_VOICE_SHORTHAND = re.compile(
-    _OPEN_BRACKET + r"\s*voice\s*[:：]\s*([^\[\]【】［］]*?)" +
-    _CLOSE_BRACKET + r"(?![^\n]*\[/voice])",
-    re.IGNORECASE | re.DOTALL,
-)
-_VOICE_TAGS = re.compile(
-    _OPEN_BRACKET + r"\s*/?\s*voice\s*[:：]?[ \t]*" + _CLOSE_BRACKET + r"?",
-    re.IGNORECASE,
-)
-_VOICE_RECORD_PREFIX = re.compile(
-    r"^[ \t]*(?:[（(]\s*语音消息\s*[）)]|" + _OPEN_BRACKET + r"\s*语音(?:消息)?\s*" + _CLOSE_BRACKET + r")\s*",
-    re.MULTILINE,
-)
-_VOICE_STANDALONE = re.compile(
-    _OPEN_BRACKET + r"\s*语音(?:消息)?\s*" + _CLOSE_BRACKET + r"|[（(]\s*语音(?:消息)?\s*[）)]",
-    re.IGNORECASE,
-)
-
-# 仅用于朗读文本中去掉非文字标记（face/sticker等），正文中的非文字标记需保留
+VOICE_REQUEST_RE = re.compile(r"语音|声音|听听你|唱[一句段个首]")
 _TAG_RE = re.compile(
-    r"\[quote[:：]\d+\]|[\[［](?:face|sticker|表情)[:：][^\]］]+[\]］]",
+    r"\[(?:quote[:：]\d+|face[:：][^\]]+|sticker[:：][^\]]+|表情[:：][^\]]+)\]|"
+    r"\[/?voice[:：]?\]?|\[语音(?:消息)?\]|（语音消息）",
     re.IGNORECASE,
 )
-_SILENCE_REPLY_RE = re.compile(
-    r"^\s*(?:\[quote[:：]\d+\]\s*)?[\[【［](?:沉默|SILENT|SILENCE)[\]】］]\s*$",
+_VOICE_MARKUP_RE = re.compile(
+    r"\[/?voice[:：]?\]?|\[语音(?:消息)?\]|（语音消息）",
     re.IGNORECASE,
 )
-
-# 句子切分：按句末标点或换行切分
+_PRESERVE_TAG_RE = re.compile(r"\[(?:face|sticker|表情)[:：][^\]]+\]", re.IGNORECASE)
 _PART_RE = re.compile(r"[^。！？!?~～\n]+[。！？!?~～]?|\n")
-
-# 情绪与可读线索
+# 只收“可读成语音”的短语线索，不收单字：单字“想/累/酸/怕/烦/笑”会把
+# “酸奶、会议安排、积累经验”这类普通信息误判成情绪。新增线索必须配真实
+# 失败样例，词表保持在二三十条以内。
 _CUE_RE = re.compile(
     r"晚安|早安|想你|好想|喜欢|舍不得|在意|担心|心疼|难受|委屈|"
     r"开心|难过|生气|好烦|烦死|好累|累死|"
@@ -83,6 +30,7 @@ _CUE_RE = re.compile(
     r"抱抱|哼|不理你|才不|讨厌|笨蛋|坏蛋|欠揍|想得美|不许|呆货|人家|"
     r"我其实|早点睡|别熬夜"
 )
+# 句末语气词；“我明天下午三点交报告吧”只因此得 1 分，仍不够发语音。
 _PARTICLE_RE = re.compile(r"[呀啦嘛呢吧啊哈哟][。！？!?…～~]*$")
 _EMO_PUNCT_RE = re.compile(r"[！？!?…～~]")
 _GENERIC_ACK = {
@@ -91,18 +39,17 @@ _GENERIC_ACK = {
 }
 
 
-def strip_legacy_voice_markup(text: str) -> str:
-    """仅清理明确的旧语音标记，普通【划重点】、[笑哭]、array[0] 原样保留。"""
-    if not text:
-        return ""
-    # 标记前后原本是不同发送段，清成文字时用换行保留边界，避免两句黏在一起。
-    text = _VOICE_PAIR.sub(r"\1\n", text)
-    text = _VOICE_SHORTHAND.sub(r"\1 ", text)
-    text = _VOICE_TAGS.sub("", text)
-    text = _VOICE_RECORD_PREFIX.sub("", text)
-    text = _VOICE_STANDALONE.sub("", text)
-    text = re.sub(r"^[ \t]*语音(?:消息)?\s*[:：]\s*", "", text, flags=re.MULTILINE)
-    return text.strip()
+@dataclass(frozen=True)
+class VoicePlan:
+    mode: str
+    body_text: str
+    voice_text: str = ""
+    reason: str = ""
+    quote_index: Optional[int] = None
+
+    @property
+    def has_voice(self) -> bool:
+        return bool(self.voice_text)
 
 
 def _score(text: str) -> int:
@@ -115,21 +62,11 @@ def _score(text: str) -> int:
     return score
 
 
-@dataclass(frozen=True)
-class VoicePlan:
-    mode: str
-    body_text: str
-    voice_text: str = ""
-    reason: str = ""
-    quote_index: Optional[int] = None
-    requested: bool = False
-    # 有语音时记录原位置：before → voice → after；无语音时为 None。
-    before_text: Optional[str] = None
-    after_text: Optional[str] = None
-
-    @property
-    def has_voice(self) -> bool:
-        return bool(self.voice_text)
+def _common_prefix_length(left: str, right: str) -> int:
+    kept = 0
+    while kept < len(left) and kept < len(right) and left[kept] == right[kept]:
+        kept += 1
+    return kept
 
 
 class VoicePlanner:
@@ -139,142 +76,88 @@ class VoicePlanner:
 
     @staticmethod
     def explicit_request(user_text: str) -> bool:
-        text = user_text or ""
-        if VOICE_REFUSAL_RE.search(text):
-            return False
-        return bool(VOICE_REQUEST_RE.search(text))
+        return bool(VOICE_REQUEST_RE.search(user_text or ""))
 
-    def allows(self, user_text: str, requested: Optional[bool] = None) -> bool:
-        if self.frequency == "off":
-            return False
-        is_req = requested if requested is not None else self.explicit_request(user_text)
-        if self.frequency == "explicit":
-            return is_req
-        return True
+    def allows(self, user_text: str) -> bool:
+        return self.frequency != "off" and (self.frequency != "explicit" or self.explicit_request(user_text))
 
     def _clip(self, text: str) -> str:
+        """截断到 max_chars 以内；省略号分支也不允许多出一字。"""
         clipped = truncate_for_voice(text, self.max_chars).strip()
-        # 省略号不是原文；截断只用原句前缀，余字全部回填文字段。
-        clipped = clipped[:-1].rstrip() if clipped.endswith("…") else clipped
         if len(clipped) <= self.max_chars:
             return clipped
         if clipped.endswith("…"):
             return (clipped[: self.max_chars - 1].rstrip() + "…").strip()
         return clipped[: self.max_chars].strip()
 
-    def plan(
-        self,
-        user_text: str,
-        reply: str,
-        *,
-        voice_allowed: bool,
-        requested: Optional[bool] = None,
-    ) -> VoicePlan:
-        # 1. 防御旧语音标记清理（不调模型，纯正则）
-        cleaned_reply = strip_legacy_voice_markup(reply or "")
-        if _SILENCE_REPLY_RE.match(cleaned_reply):
-            return VoicePlan("text", "[沉默]", reason="她选择沉默", requested=bool(requested))
-
-        # 2. 判定 requested
-        is_requested = requested if requested is not None else self.explicit_request(user_text)
-
-        # 3. 基础闸门与模式检查
-        if not cleaned_reply or self.frequency == "off":
-            return VoicePlan("text", cleaned_reply, reason="语音规划关闭或无内容", requested=is_requested)
+    def plan(self, user_text: str, reply: str, *, voice_allowed: bool) -> VoicePlan:
+        reply = repair_voice_line_shorthand(normalize_voice_syntax_variants((reply or "").strip()))
+        explicit = self.explicit_request(user_text)
+        if not reply or self.frequency == "off":
+            return VoicePlan("text", reply, reason="语音规划关闭或无内容")
         if not voice_allowed:
-            return VoicePlan("text", cleaned_reply, reason="能力闸门未放行", requested=is_requested)
-        if self.frequency == "explicit" and not is_requested:
-            return VoicePlan("text", cleaned_reply, reason="仅响应明确请求", requested=is_requested)
+            return VoicePlan("text", reply, reason="能力闸门未放行")
+        if self.frequency == "explicit" and not explicit:
+            return VoicePlan("text", reply, reason="仅响应明确请求")
 
-        # 4. 解析引用
         quote_index = None
-        working = cleaned_reply
-        quote_match = re.match(r"^\s*\[quote[:：](\d+)\]", working, re.IGNORECASE)
+        working = reply
+        quote_match = re.match(r"^\s*\[quote[:：](\d+)\]", reply, re.IGNORECASE)
         if quote_match:
             quote_index = int(quote_match.group(1))
-            working = working[quote_match.end():].lstrip("\r\n \t")
-
-        # 5. 切分候选正文片段
-        parts: List[Tuple[int, int, str, str]] = []
+            working = reply[quote_match.end():].lstrip()
+        parts = []
         for match in _PART_RE.finditer(working):
-            raw_seg = match.group(0)
-            if not raw_seg.strip():
-                continue
-            cleaned_seg = _TAG_RE.sub("", raw_seg).strip()
-            if cleaned_seg and re.search(r"[A-Za-z0-9\u4e00-\u9fa5]", cleaned_seg):
-                parts.append((match.start(), match.end(), raw_seg, cleaned_seg))
+            cleaned = _TAG_RE.sub("", match.group(0)).strip()
+            if cleaned and re.search(r"[A-Za-z0-9一-龥]", cleaned):
+                parts.append((match.start(), match.end(), cleaned))
+        if not parts or not _TAG_RE.sub("", working).strip():
+            return VoicePlan("text", reply, reason="没有可朗读正文")
 
-        if not parts:
-            return VoicePlan("text", cleaned_reply, reason="没有可朗读正文", quote_index=quote_index, requested=is_requested)
+        best_score, _, best_part = max(
+            ((_score(part[2]), i, part) for i, part in enumerate(parts)),
+            key=lambda item: (item[0], item[1]),
+        )
 
-        # 6. 选择片段
-        selected_parts: Optional[List[Tuple[int, int, str, str]]] = None
-        reason = ""
-
-        if is_requested:
-            scored_parts = [(_score(p[3]), i, p) for i, p in enumerate(parts)]
-            best_score, best_idx, best_p = max(scored_parts, key=lambda item: (item[0], -item[1]))
-
-            joined_all_clean = " ".join(p[3] for p in parts)
+        if explicit:
+            # 明确要语音时不能只念最后两句：情绪句在前就念情绪句；单句短回复
+            # 整句念；多句纯信息且总长放得下才整段念，否则至少念第一句。
+            joined = " ".join(part[2] for part in parts)
             if len(parts) == 1:
-                selected_parts = [parts[0]]
+                selected = parts
             elif best_score >= 2:
-                selected_parts = [best_p]
-            elif len(joined_all_clean) <= self.max_chars:
-                selected_parts = parts
+                selected = [best_part]
+            elif len(joined) <= self.max_chars:
+                selected = parts
             else:
-                selected_parts = [parts[0]]
+                selected = [parts[0]]
             reason = "明确请求优先语音"
-        else:
-            scored_candidates = [(_score(p[3]), -i, p) for i, p in enumerate(parts) if _score(p[3]) >= 2]
-            if not scored_candidates:
-                return VoicePlan("text", cleaned_reply, reason="普通承接或信息内容优先文字", quote_index=quote_index, requested=is_requested)
-            # 优先选择不超过 max_chars 的合适短句
-            short_eligible = [item for item in scored_candidates if len(item[2][3]) <= self.max_chars]
-            if short_eligible:
-                best_item = max(short_eligible, key=lambda item: (item[0], item[1]))
-            else:
-                best_item = max(scored_candidates, key=lambda item: (item[0], item[1]))
-            selected_parts = [best_item[2]]
+        elif best_score >= 2:
+            # 扫描所有段而不是只看末尾，情绪/感受句在中间也能被选中。
+            selected = [best_part]
             reason = "内容适合语音表达"
+        else:
+            return VoicePlan("text", reply, reason="普通承接或信息内容优先文字")
 
-        # 7. 形成语音段与剩余文字段（原话连续片段，选中的正文从 body_text 精确剔除）
-        start_idx = selected_parts[0][0]
-        end_idx = selected_parts[-1][1]
+        start, end = selected[0][0], selected[-1][1]
+        voice_text = " ".join(part[2] for part in selected)
+        selected_raw = working[start:end]
+        preserved = _PRESERVE_TAG_RE.findall(selected_raw)
 
-        raw_selected_span = working[start_idx:end_idx]
-        voice_text = _TAG_RE.sub("", raw_selected_span).strip()
-
-        remainder = ""
-        if len(voice_text) > self.max_chars:
-            clipped_voice = self._clip(voice_text)
-            common_len = 0
-            while common_len < len(clipped_voice) and common_len < len(voice_text) and clipped_voice[common_len] == voice_text[common_len]:
-                common_len += 1
-            remainder = voice_text[common_len:].lstrip("，,、 ").strip()
-            voice_text = clipped_voice
-
+        full_voice_text = voice_text
+        voice_text = self._clip(voice_text)
+        # 省略号不是原文前缀，不能用 startswith 判断余文；按公共前缀回填，
+        # 并放回被选中片段原来的位置，避免余文重复或顺序错乱。
+        remainder = full_voice_text[_common_prefix_length(voice_text, full_voice_text):]
+        remainder = remainder.lstrip("，,、 ").strip()
         if not voice_text:
-            return VoicePlan("text", cleaned_reply, reason="语音正文为空", quote_index=quote_index, requested=is_requested)
+            return VoicePlan("text", reply, reason="语音正文为空")
 
-        preserve_tags = re.findall(r"[\[［](?:face|sticker|表情)[:：][^\]］]+[\]］]", raw_selected_span, re.IGNORECASE)
-
-        before_raw = working[:start_idx]
-        after_raw = working[end_idx:]
-
-        tags_str = ("\n".join(preserve_tags) + "\n") if preserve_tags else ""
-        before_text = before_raw.strip()
-        after_text = (tags_str + remainder + after_raw).strip()
-        body_text = (before_text + ("\n" if before_text and after_text else "") + after_text).strip()
-
-        mode = "mixed" if body_text else "voice"
+        before = _VOICE_MARKUP_RE.sub("", working[:start])
+        after = _VOICE_MARKUP_RE.sub("", working[end:])
+        body = (before + "\n".join(preserved) + remainder + after).strip()
+        body = re.sub(r"\n{3,}", "\n\n", body)
         return VoicePlan(
-            mode=mode,
-            body_text=body_text,
-            voice_text=voice_text,
-            reason=reason,
+            "mixed" if body else "voice", body, voice_text, reason,
             quote_index=quote_index,
-            requested=is_requested,
-            before_text=before_text,
-            after_text=after_text,
         )

@@ -77,8 +77,8 @@ class TestVoiceClaimTruthfulness(unittest.TestCase):
             "发了啊\n你没收到？那我再发一遍\n喏 听到了没有",
             "传过去了，这回听到了吧\n顺路的事就这么定了",
             "我传都传了\n你那边接不住，怪谁",
-            "就发一句语音，听完赶紧放下去睡",
-            "听好了啊，就念这一遍语音",
+            "就发一句，听完赶紧放下去睡",
+            "听好了啊，就念这一遍",
             "收到就好",
         ]
         for raw in cases:
@@ -91,7 +91,7 @@ class TestVoiceClaimTruthfulness(unittest.TestCase):
                     self.assertNotIn(forbidden, out)
 
     def test_口头承诺给一条但没有语音段会说明未落地(self):
-        raw = "行行行，给你一条语音，收着吧"
+        raw = "行行行，给你一条，收着吧"
         self.assertTrue(has_voice_promise(raw))
         out = sanitize_voice_claims(
             raw, voice_allowed=False, previous_voice_sent=False, voice_context=True
@@ -114,13 +114,6 @@ class TestVoiceClaimTruthfulness(unittest.TestCase):
             sanitize_voice_claims(raw, voice_allowed=False, voice_context=True), raw
         )
 
-    def test_普通措辞即使在语音上下文也不误删(self):
-        for raw in ("给你一条毛巾", "你唱一句试试", "听好了，明天校门口集合"):
-            with self.subTest(raw=raw):
-                self.assertEqual(
-                    sanitize_voice_claims(raw, voice_allowed=False, voice_context=True), raw
-                )
-
     def test_非语音上下文不改普通聊天(self):
         raw = "我今天发了一个文件给你"
         self.assertEqual(
@@ -128,11 +121,11 @@ class TestVoiceClaimTruthfulness(unittest.TestCase):
         )
 
 
-class TestVoiceFallbackDelivery(unittest.IsolatedAsyncioTestCase):
-    async def test_onebot失败后只把原句转文字_不调用模型补救(self):
+class TestModelRecoveryDelivery(unittest.IsolatedAsyncioTestCase):
+    async def test_onebot失败后按原稿降级且不调用模型补写(self):
         class Handler:
             async def recover_voice_failure(self, text, reason):
-                raise AssertionError("新链路不得再调用模型补救")
+                return "刚那条没发成，先用文字跟你说。"
 
         with tempfile.TemporaryDirectory() as d:
             tts = _FakeTTS(os.path.join(d, "voice.mp3"))
@@ -200,6 +193,25 @@ def _bot(onebot, tts):
 
 
 class TestActualVoiceDelivery(unittest.IsolatedAsyncioTestCase):
+    async def test_语音成功时record不与reply混合(self):
+        with tempfile.TemporaryDirectory() as d:
+            tts = _FakeTTS(os.path.join(d, "voice.mp3"))
+            ob = _OneBot(record_ok=True)
+            chunk = {"type": "voice", "content": "完整一句话", "_quote": {"message_id": 5002}}
+            await _bot(ob, tts)._send_chunk_to_onebot(chunk)
+            self.assertEqual([s["type"] for s in ob.sent[0]], ["record"])
+            self.assertNotIn("reply", [s["type"] for s in ob.sent[0]])
+            self.assertEqual(chunk["_voice_delivery"], "sent")
+
+    async def test_语音失败降级文字可保留reply(self):
+        with tempfile.TemporaryDirectory() as d:
+            tts = _FakeTTS(os.path.join(d, "voice.mp3"))
+            ob = _OneBot(record_ok=False)
+            chunk = {"type": "voice", "content": "完整一句话", "_quote": {"message_id": 5002}}
+            await _bot(ob, tts)._send_chunk_to_onebot(chunk)
+            self.assertEqual([s["type"] for s in ob.sent[1]], ["reply", "text"])
+            self.assertEqual([s["type"] for s in ob.sent[-1]], ["text"])
+
     async def test_onebot拒绝语音后补文字且不落语音记录(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "voice.mp3")
@@ -235,69 +247,22 @@ class _Gate:
 
 
 class TestCrossTurnVoiceState(unittest.IsolatedAsyncioTestCase):
-    def _handler(self):
+    async def test_上一轮的语音请求下一轮可补偿一次(self):
         handler = TurnHandler.__new__(TurnHandler)
         gate = _Gate()
         handler.tts = gate
-        handler._voice_request_until = None
+        handler._voice_retry_requested = True
         handler._voice_retry_used = False
 
         async def activity():
             return "出远门"
 
         handler._current_activity_text = activity
-        return handler, gate
-
-    async def test_点名要语音后讨价还价几轮都保持放行(self):
-        handler, gate = self._handler()
-        await handler._check_voice_gate("发条语音我就不叫了怎么样")
-        for line in ("成交", "没发！耍赖", "没有！真的"):
-            ok, _ = await handler._check_voice_gate(line)
-            self.assertTrue(ok, line)
-            self.assertTrue(gate.kwargs["user_requested"], line)
-            self.assertTrue(handler._voice_retry_used, line)
-
-    async def test_讨要过了保持时间就失效(self):
-        from datetime import datetime, timedelta
-        from companion.turn_handler import VOICE_REQUEST_HOLD
-
-        handler, gate = self._handler()
-        handler._voice_request_until = datetime.now() - timedelta(seconds=1)
-        await handler._check_voice_gate("成交")
-        self.assertFalse(gate.kwargs["user_requested"])
-        self.assertGreaterEqual(VOICE_REQUEST_HOLD, timedelta(minutes=5))
-
-    async def test_没收到只认明确语音或真实投递_不靠讨要保持(self):
-        from datetime import datetime
-
-        handler, _ = self._handler()
-        handler._last_voice_status = "none"
-        handler._last_voice_at = datetime.now()
-        await handler._check_voice_gate("来条语音听听嘛")
-        self.assertFalse(handler._asks_about_missing_voice("没收到诶"))
-        self.assertTrue(handler._asks_about_missing_voice("语音没收到诶"))
-        handler._last_voice_status = "text_fallback"
-        handler._last_voice_at = datetime.now()
-        handler._last_turn_voice_status = "text_fallback"
-        handler._last_turn_at = handler._last_voice_at
-        self.assertTrue(handler._asks_about_missing_voice("没收到诶"))
-        handler._last_voice_status = "sent"
-        handler._last_voice_at = datetime.now()
-        handler._last_turn_voice_status = "sent"
-        handler._last_turn_at = handler._last_voice_at
-        self.assertFalse(handler._asks_about_missing_voice("没收到诶"))
-
-    async def test_没在聊语音时的没收到不算(self):
-        handler, _ = self._handler()
-        handler._last_voice_sent = False
-        self.assertFalse(handler._asks_about_missing_voice("快递还没收到"))
-        self.assertTrue(handler._asks_about_missing_voice("语音没收到啊"))
-
-    def test_闸门关着的说明不再教她说没发出去(self):
-        from companion.prompts import VOICE_NOT_SENT_NOTE, VOICE_UNAVAILABLE_NOTE
-
-        self.assertNotIn("先承认这条没发出去", VOICE_UNAVAILABLE_NOTE)
-        self.assertIn("本来就没发", VOICE_NOT_SENT_NOTE)
+        ok, _ = await handler._check_voice_gate("成交")
+        self.assertTrue(ok)
+        self.assertTrue(gate.kwargs["user_requested"])
+        self.assertTrue(handler._voice_retry_used)
+        self.assertFalse(handler._voice_retry_requested)
 
 
 class TestMemoryAndHistory(unittest.IsolatedAsyncioTestCase):
@@ -334,7 +299,7 @@ class TestMemoryAndHistory(unittest.IsolatedAsyncioTestCase):
             "在吗", voice_gated_note=True, voice_delivery_note="上一轮语音没有发出"
         )
         self.assertIn("上一轮语音没有发出", prompt)
-        self.assertIn("投递结果以系统记录为准", prompt)
+        self.assertIn("不要说自己已经发了", prompt)
 
 
 if __name__ == "__main__":

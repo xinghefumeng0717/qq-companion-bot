@@ -103,7 +103,7 @@ class TestContinuity(unittest.IsolatedAsyncioTestCase):
         ]
         await check_continuity(
             gateway, "最新", ["原稿"], 0, history=history,
-            her_identity="小艾", his_identity="小明",
+            her_identity="祀", his_identity="管理员",
         )
         kwargs = gateway.calls[0]
         self.assertEqual(kwargs["purpose"], "reply_check")
@@ -112,15 +112,14 @@ class TestContinuity(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs["json_mode"])
         self.assertEqual(kwargs["max_retries"], 0)
         prompt = kwargs["messages"][-1]["content"]
-        self.assertIn("小艾", prompt)
-        self.assertIn("小明", prompt)
+        self.assertIn("祀", prompt)
+        self.assertIn("管理员", prompt)
         self.assertIn("新回复", prompt)
         self.assertNotIn("旧话", prompt)
 
-    def test_默认关闭且超时有上限(self):
-        # 2026-10-25 云端审查：真实对照里常等满 8 秒超时，先默认关，开了照常可用
+    def test_默认开启且超时有上限(self):
         cfg = ReplyConfig()
-        self.assertFalse(cfg.continuity_check)
+        self.assertTrue(cfg.continuity_check)
         self.assertEqual(cfg.continuity_timeout, 8.0)
 
 

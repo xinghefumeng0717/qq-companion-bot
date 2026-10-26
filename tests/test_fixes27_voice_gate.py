@@ -28,7 +28,7 @@ if os.path.join(_REPO_ROOT, "tests") not in sys.path:
 from companion.config import TTSConfig  # noqa: E402
 from companion.prompts import (  # noqa: E402
     PROACTIVE_DECISION_PROMPT,
-    VOICE_PLANNER_RULES,
+    VOICE_PROMPT_BLOCK,
     VOICE_UNAVAILABLE_NOTE,
 )
 from companion.tts import TTSManager, activity_allows_voice  # noqa: E402
@@ -245,15 +245,14 @@ class TestVoiceBlock(unittest.TestCase):
     def test_闸门没过时给不可用说明(self):
         prompt = _assemble(self.card, "在吗", voice_gated_note=True)
         self.assertIn(VOICE_UNAVAILABLE_NOTE, prompt)
-        self.assertIn("这轮语音不可用", prompt)
-        self.assertIn("别承诺能发", prompt)
+        self.assertIn("这会儿你不方便发语音", prompt)
         self.assertNotIn("[voice:", prompt, "不可用时不该教她 [voice:] 写法")
         self.assertEqual(_line_before_routine(prompt), VOICE_UNAVAILABLE_NOTE)
 
     def test_可用时给能力说明且不带不可用说明(self):
         prompt = _assemble(self.card, "在吗", voice_allowed=True)
-        self.assertIn(VOICE_PLANNER_RULES, prompt)
-        self.assertNotIn("你可以把回复中的一小段用 [voice:]", prompt)
+        self.assertIn(VOICE_PROMPT_BLOCK, prompt)
+        self.assertIn("[voice:", prompt)
         self.assertNotIn("这会儿你不方便发语音", prompt)
 
 
@@ -345,17 +344,19 @@ class TestLightBusyWords(unittest.TestCase):
                           .parameters["voice_light_busy_words"].default)
 
 
-class TestVoicePlannerPrompt(unittest.TestCase):
-    """新合同：她只写正文，系统负责从原话选句和真实投递。"""
+class TestVoicePromptLoosened(unittest.TestCase):
+    """所有者拍板「想多听听她的语音」：提示词从"只在躺下/走路/睡前用"
+    放宽成"情绪到位就用"。"""
 
-    def test_不额外鼓励或束缚她(self):
-        self.assertIn("照常聊天", VOICE_PLANNER_RULES)
-        self.assertNotIn("多发语音", VOICE_PLANNER_RULES)
-        self.assertNotIn("不要写", VOICE_PLANNER_RULES)
+    def test_语音规则鼓励情绪到位就用(self):
+        self.assertIn("情绪到位", VOICE_PROMPT_BLOCK)
+        self.assertIn("别总打字", VOICE_PROMPT_BLOCK)
 
-    def test_只保留必要的投递事实(self):
-        self.assertIn("系统", VOICE_PLANNER_RULES)
-        self.assertIn("不要声称语音已经发出", VOICE_PLANNER_RULES)
+    def test_语法纪律没放松(self):
+        """写法/一次一段/别整段念——这些保持不变。"""
+        self.assertIn("[voice:]", VOICE_PROMPT_BLOCK)
+        self.assertIn("最多说一段", VOICE_PROMPT_BLOCK)
+        self.assertIn("不要把整段话都念成语音", VOICE_PROMPT_BLOCK)
 
 
 if __name__ == "__main__":

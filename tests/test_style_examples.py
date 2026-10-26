@@ -6,6 +6,8 @@ import random
 import re
 import unittest
 
+import pytest
+
 from companion.style_examples import BLOCK_HEADER, StyleExampleBank
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -73,10 +75,9 @@ class TestBank(unittest.TestCase):
             os.unlink(path)
 
 
+@pytest.mark.skipif(not os.path.isfile(BANK_PATH), reason="需要私有示例库，公开克隆时明确跳过")
 class TestRealBank(unittest.TestCase):
     def test_库里没有她的招牌口头禅和长英文(self):
-        if not os.path.exists(BANK_PATH):
-            self.skipTest("私有示例库未随公开仓库提供")
         with open(BANK_PATH, encoding="utf-8") as f:
             items = json.load(f)
         self.assertGreater(len(items), 300)

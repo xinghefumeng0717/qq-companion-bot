@@ -3,7 +3,7 @@
 从完整 GB2312 字体里只挑看板真正会渲染的字：ASCII 可打印字符、relative_day 产出的
 相对日期词、固定装饰字，以及指定角色卡的 name / stages[*].name。输出仍是 woff2，
 原完整字体保留作缺字回退。用法:
-  python scripts/util/subset_dashboard_font.py --card characters/example
+  python scripts/util/subset_dashboard_font.py --card characters/si
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_FONT = ROOT / "companion" / "assets" / "lxgw-wenkai-gb2312.woff2"
 DEFAULT_OUTPUT = ROOT / "companion" / "assets" / "lxgw-wenkai-dashboard.woff2"
-DEFAULT_CARD = ROOT / "characters" / "example"
+DEFAULT_CARD = ROOT / "characters" / "qingzi"
 
 MAX_BYTES = 250 * 1024
 

@@ -158,7 +158,7 @@ QUIZ = [
 ]
 
 # ==========================================
-# 预设 si：小艾（明日方舟：终末地），他扮演管理员
+# 预设 si：祀（明日方舟：终末地），他扮演管理员
 # ==========================================
 HIS_FACTS_SI = {
     1: "你最近在帮佩丽卡盯一条新产线，天天开会到很晚",
@@ -216,8 +216,8 @@ QUIZ_SI = [
 def build_admin_user_prompt(scene: Scene) -> str:
     """模拟"管理员"的 system prompt（不用阿俊的真人画像）。"""
     return (
-        "你在扮演《明日方舟：终末地》里的管理员（终末地工业的负责人），正在用终端和小艾聊天。"
-        "小艾是岁的第十三位代理人，开客栈缘缘庄，画境疗伤之后你们成了伙伴。\n\n"
+        "你在扮演《明日方舟：终末地》里的管理员（终末地工业的负责人），正在用终端和祀聊天。"
+        "祀是岁的第十三位代理人，开客栈缘缘庄，画境疗伤之后你们成了伙伴。\n\n"
         f"【今天的情况】{scene.background}\n【你的情绪】{scene.mood_arc}\n"
         f"【收场】觉得今天聊够了，就说类似「{scene.end_markers[0]}」「{scene.end_markers[1]}」的话。\n\n"
         "【纪律】只输出你要发的消息原文，一行一条，最多 3 条，每条简短，句末不打标点，"
@@ -260,9 +260,8 @@ async def run(args: argparse.Namespace) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     config = Config.load(args.config)
     si = args.preset == "si"
-    default_card = "example"
-    config.character.path = f"characters/{args.card or default_card}" if not (args.card and ("/" in args.card or "\\" in args.card)) else (args.card or f"characters/{default_card}")
-    config.character.user_profile = args.profile or ("profiles/default.json" if os.path.exists("profiles/default.json") else "")
+    config.character.path = f"characters/{args.card or ('si' if si else 'qingzi_lean')}"
+    config.character.user_profile = args.profile or ("profiles/endministrator.json" if si else "")
     config.character.meetup_recap = args.meetup_recap
     config.reply.trim_echo = args.trim_echo
     config.reply.candidates = max(1, args.candidates)
@@ -417,7 +416,7 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", choices=("campus", "si"), default="campus", help="剧本预设（campus/si）")
+    ap.add_argument("--preset", choices=("campus", "si"), default="campus", help="campus = 青梓大学生剧本；si = 祀/管理员剧本")
     ap.add_argument("--card", default="", help="角色卡目录名（默认按 preset）")
     ap.add_argument("--profile", default="", help="人物档案路径（默认按 preset）")
     ap.add_argument("--meetup-recap", action="store_true", help="开线下见面自动补记")

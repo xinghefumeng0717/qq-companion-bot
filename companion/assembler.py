@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -24,8 +23,6 @@ from companion.prompts import (
     SYSTEM_PROMPT_TEMPLATE,
     VOICE_PROMPT_BLOCK,
     VOICE_PLANNER_RULES,
-    VOICE_FREQUENT_NOTE,
-    VOICE_EXPLICIT_NOTE,
     VOICE_PLANNER_EXPLICIT_RULES,
     VOICE_PLANNER_OFF_RULES,
     VOICE_UNAVAILABLE_NOTE,
@@ -63,58 +60,6 @@ def gap_note(now_dt: datetime, prev_dt: Optional[datetime], show_date: bool = Tr
     if not show_date:
         return f"（{weekday} {now_dt.strftime('%H:%M')}，离上一句已经过了 {span}）\n"
     return f"（{now_dt.strftime('%m-%d %H:%M')} {weekday}，离上一句已经过了 {span}）\n"
-
-
-REPEAT_SCAN_TURNS = 6
-_CLAUSE_SPLIT_RE = re.compile(r"[，。！？!?,~～…\n]+")
-_NON_WORD_RE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff]")
-
-
-def repeated_phrases(texts: List[str], min_len: int = 4, limit: int = 3) -> List[str]:
-    """她最近几条里说了不止一次的小句（近义也算，字的二元组重合 ≥ 0.6）；返回最近的说法。"""
-    clauses: List[str] = []
-    for text in texts:
-        for raw in _CLAUSE_SPLIT_RE.split(re.sub(r"\[[^\]]*\]", "", text or "")):
-            c = _NON_WORD_RE.sub("", raw)
-            if len(c) >= min_len:
-                clauses.append(c)
-
-    def grams(x: str) -> set:
-        return {x[i:i + 2] for i in range(len(x) - 1)}
-
-    groups: List[List[str]] = []
-    for c in clauses:
-        g = grams(c)
-        for grp in groups:
-            h = grams(grp[0])
-            if g and h and len(g & h) / len(g | h) >= 0.6:
-                grp.append(c)
-                break
-        else:
-            groups.append([c])
-    hits = [grp[-1] for grp in groups if len(grp) >= 2]
-    return hits[-limit:]
-
-
-_FACE_TAG_RE = re.compile(r"\[[^\]]{1,12}\]")
-
-
-_ACK_WORDS = {
-    "", "好", "好的", "好吧", "嗯", "嗯嗯", "嗯呢", "哦", "噢", "喔", "行", "行吧", "ok", "OK",
-    "收到", "知道了", "晓得了", "哈", "哈哈", "哈哈哈", "嘿嘿", "好滴", "好哒",
-}
-
-
-def is_short_ack(text: str) -> bool:
-    """他这句是不是只有"好/嗯/哈哈/表情"这类应答（问候、提问不算）。"""
-    bare = _NON_WORD_RE.sub("", _FACE_TAG_RE.sub("", text or ""))
-    return bare in _ACK_WORDS
-
-
-def last_clause(text: str) -> str:
-    """她一条回复的最后一个小句（去掉标记），用来提示收尾别复读。"""
-    parts = [p.strip() for p in _CLAUSE_SPLIT_RE.split(re.sub(r"\[[^\]]*\]", "", text or "")) if p.strip()]
-    return parts[-1][:20] if parts else ""
 
 
 class PromptAssembler:
@@ -365,10 +310,12 @@ class PromptAssembler:
         composite_aff = float(aff_state.get("composite", 30.0))
         stage_idx = int(aff_state.get("stage", 0))
 
-        # 组装提示词是只读操作：情绪只在明确的结算点推进（观察者每轮结算一次、主动消息
-        # 调度每次醒来一次）。以前这里也推一次——主聊、主动决策、语音补救各组装一次，
-        # 一轮里心情就被推好几步（每步还带随机噪声），光"读状态"就把她改了
-        mood_state = await self.mood.get_state()
+        # 组装前先更新一次情绪自然均值回归 (conv=0)
+        if self.runtime_state_v1:
+            # 实验路径：组装提示词是只读操作，情绪只在明确结算阶段推进
+            mood_state = await self.mood.get_state()
+        else:
+            mood_state = await self.mood.update_mood(composite_affection=composite_aff, stage=stage_idx)
         v = float(mood_state.get("v", 2.0))
         a = float(mood_state.get("a", 1.0))
         t = float(mood_state.get("t", 7.0))
@@ -447,8 +394,9 @@ class PromptAssembler:
         safety_block = f"\n【安全边界】\n{safety_text}" if safety_text else ""
 
         if voice_allowed:
-            # 语音规划与 runtime_state_v1 解耦：她只写正文，系统从原话选句。
-            if self.voice_frequency == "off":
+            if not self.runtime_state_v1:
+                voice_block = VOICE_PROMPT_BLOCK
+            elif self.voice_frequency == "off":
                 voice_block = VOICE_PLANNER_OFF_RULES
             elif self.voice_frequency == "explicit":
                 voice_block = VOICE_PLANNER_EXPLICIT_RULES
@@ -562,23 +510,6 @@ class PromptAssembler:
             # 单条消息的老路径：与 FIXES21 之前逐字一致
             user_text = user_message
         user_text = now_note + user_text
-        # 她最近几条里翻来覆去说的话（生产实锤："到了喊你"一段里说了 4 遍）：点名告诉她，
-        # 比在规则里写"别重复"管用。只附在本轮输入后面，不进系统提示词（缓存照常命中）
-        repeated = repeated_phrases(
-            [t["content"] for t in recent_turns if t.get("role") == "assistant"][-REPEAT_SCAN_TURNS:]
-        )
-        her_recent = [t["content"] for t in recent_turns if t.get("role") == "assistant"]
-        if repeated:
-            user_text += "\n（你最近几条已经说过" + "".join(f"「{p}」" for p in repeated) + "，这轮别再说一遍。）"
-        elif is_short_ack(user_message) and her_recent:
-            # 他只回"好/嗯/表情"时最容易拖尾：把她刚说过的收尾话摆出来，没新事就短收
-            tails = [last_clause(t) for t in her_recent[-2:]]
-            tails = [t for t in tails if t]
-            if tails:
-                user_text += (
-                    "\n（他只回了个短句。你刚才已经说过" + "".join(f"「{t}」" for t in tails)
-                    + "，没有新内容就简短收住，别把同一个意思再讲一遍。）"
-                )
 
         if image_data_url:
             # 只有一步看图（[reply].vision_direct）才会带图进来：让她回完留一行【看到：…】给记录用

@@ -194,11 +194,11 @@ class VoicePlannerTests(unittest.TestCase):
         self.assertNotIn("sticker", plan.voice_text)
 
         # 省略号分支：无标点长文本也不能丢尾文，且语音长度必须真 ≤ max_chars。
-        long_text = "我有点累但还是想把这句没有标点的话说完整后面还有个末尾关键词测试在这里"
+        long_text = "我有点累但还是想把这句没有标点的话说完整后面还有个末尾关键词青梓在这里"
         clipped = VoicePlanner("frequent", max_chars=20).plan("在干嘛", long_text, voice_allowed=True)
         self.assertTrue(clipped.has_voice)
         self.assertLessEqual(len(clipped.voice_text), 20)
-        self.assertTrue(clipped.body_text.endswith("测试在这里"))
+        self.assertTrue(clipped.body_text.endswith("青梓在这里"))
         self.assertTrue(long_text.endswith(clipped.body_text))
         self.assertTrue(long_text.startswith(clipped.voice_text.rstrip("…")))
 

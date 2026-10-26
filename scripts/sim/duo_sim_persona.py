@@ -9,7 +9,7 @@ FIXES18 任务 0：从**真实语料**算出“他”的说话画像，产出给
      路径**必填**：命令行 `--export` 或环境变量 `DUO_SIM_EXPORT`，两者都没有就报错退出。
      导出文件是私有语料，**绝不入库**（本仓库是公开仓库，第三方姓名不得出现在跟踪文件里）。
   2. 生产库前两世备份 `data/backups/*.db` 的 `turns` 表 `role='user'`
-     —— 他对**小艾**的真实发言（与对真人的语风对照用）。自动剔除互为子集的快照。
+     —— 他对**青梓**的真实发言（与对真人的语风对照用）。自动剔除互为子集的快照。
   3. `data/archive/real_chat_analysis.md` —— 已有结论直接引用，不重算。
 
 产出：
@@ -150,7 +150,7 @@ SCENE_RULES: Tuple[Dict[str, Any], ...] = (
 
 @dataclass
 class Msg:
-    """一条语料消息。who 固定 '我'/'她'/'user'（user=他对小艾的发言）。"""
+    """一条语料消息。who 固定 '我'/'她'/'user'（user=他对青梓的发言）。"""
 
     date: str
     time: str
@@ -229,7 +229,7 @@ def load_export(path: str) -> Tuple[List[Msg], List[Msg], Dict[str, Any]]:
 
 
 def load_prod_corpus(backup_glob: str) -> Tuple[List[Msg], Dict[str, Any]]:
-    """从备份库抽 role='user' 的消息（= 他对小艾说的）。
+    """从备份库抽 role='user' 的消息（= 他对青梓说的）。
 
     多个快照常是同一世的嵌套子集（同一起点、逐日递增），直接全量相加会把同一条
     消息重复计 N 次。这里按 (created_at, content) 集合做**极大集筛选**：任一快照的
@@ -772,7 +772,7 @@ def render_brief(
     if prod_meta.get("available"):
         rng = prod_meta.get("date_range") or ["?", "?"]
         A(
-            f"- **对照源（他对她/对小艾的真实发言）**：`data/backups/` 生产库快照 "
+            f"- **对照源（他对她/对青梓的真实发言）**：`data/backups/` 生产库快照 "
             f"{'、'.join('`' + x + '`' for x in prod_meta.get('kept_snapshots', []))}，"
             f"共 **{prod_meta['count']} 条** user 消息，{rng[0]} ~ {rng[1]}；"
             f"已自动剔除互为子集的嵌套快照 {'、'.join('`' + x + '`' for x in prod_meta.get('dropped_nested', [])) or '（无）'}。"
@@ -895,7 +895,7 @@ def render_brief(
     if prod_stats:
         p = prod_stats
         pln, ppun, pq = p["length"], p["punctuation"], p["questions"]
-        A("## 2. 他对小艾的真实发言（生产库对照）")
+        A("## 2. 他对青梓的真实发言（生产库对照）")
         A("")
         A(f"- 样本 **{p['counts']['text']} 条**（纯文本），字数中位 **{pln['median']}**、均值 {pln['mean']}、"
           f"max {pln['max']}；≤5 字占 {pln['le5_rate'] * 100:.1f}%，≤15 字占 {pln['le15_rate'] * 100:.1f}%。")
@@ -904,8 +904,8 @@ def render_brief(
         A(f"- 称呼：带称呼词 {p['address']['bearing_msgs']} 条"
           f"（{p['address']['bearing_rate'] * 100:.1f}%）"
           f"{'：' + fmt_counter_top(list(p['address']['term_freq'].items()), 8) if p['address']['term_freq'] else '（本轮语料里一次也没叫过她“小W同学”，与零称呼基线一致）'}。")
-        A("- **这条最重要**：仿真器模拟的“他”必须贴近**这一列**（他对小艾的真实说话方式），"
-          "而不是他对真人的语风——对小艾时他更正式一点、句子更完整。")
+        A("- **这条最重要**：仿真器模拟的“他”必须贴近**这一列**（他对青梓的真实说话方式），"
+          "而不是他对真人的语风——对青梓时他更正式一点、句子更完整。")
         A("")
 
     A("## 3. 原句示例（语料原文，未改写）")
@@ -930,7 +930,7 @@ def render_brief(
 
     A("## 4. 真人毛病清单（模拟器必须复现的缺陷）")
     A("")
-    A("这些是**要如实复刻**的特征，不是要修的东西。仿真器的价值就在于让小艾在这些点上被真实地戳。")
+    A("这些是**要如实复刻**的特征，不是要修的东西。仿真器的价值就在于让青梓在这些点上被真实地戳。")
     A("")
     if not flaws:
         A("> **本节不可用**：QQ 导出主源缺失，语料为空，无任何证据可引。")

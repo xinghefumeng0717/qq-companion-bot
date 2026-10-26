@@ -173,6 +173,20 @@ class TestDirectPipeline(unittest.TestCase):
         settled = handler.observer.settle_turn.call_args.kwargs["user_message"]
         self.assertIn("一碗清汤锅底", settled, "观察者也要知道图里是什么")
 
+    def test_continuity_cannot_reintroduce_seen_note(self):
+        raw = "好家伙\n【看到：一碗清汤锅底】"
+        handler, _, _ = _handler([raw])
+        handler.config.reply.continuity_check = True
+        with mock.patch(
+            "companion.turn_handler.check_continuity",
+            AsyncMock(return_value=(raw, {"changed": True})),
+        ):
+            _run(handler)
+        sent = handler.replier.parse_reply.call_args[0][0]
+        self.assertEqual(sent, "好家伙")
+        saved = handler.memory.save_turn_pair.call_args.kwargs["user_msg"]
+        self.assertIn("[发来一张照片：一碗清汤锅底]", saved)
+
     def test_missing_note_falls_back_to_plain_marker(self):
         handler, _, _ = _handler(["好家伙"])
         _run(handler)

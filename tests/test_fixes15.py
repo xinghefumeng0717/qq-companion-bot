@@ -57,7 +57,7 @@ _REAL_SLEEP = asyncio.sleep
 def _persona(routine: List[RoutineItem]) -> Persona:
     """最小可用 Persona（只需作息表，测试不碰人设渲染）"""
     return Persona(
-        name="小艾",
+        name="青梓",
         user_address="你",
         core_description="",
         chat_style=ChatStyle(),

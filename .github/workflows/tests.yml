@@ -36,8 +36,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest anyio
       - name: Run ${{ matrix.file }}
-        run: python -m unittest discover -s tests -p "$(basename '${{ matrix.file }}')"
+        run: python -m pytest -q "${{ matrix.file }}"
         # 无卡环境下测试自动回落到 characters/example（见 README 开发者小节）；
         # duo_sim 相关 skip 属预期（缺私有画像简报）。
