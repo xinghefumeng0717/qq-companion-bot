@@ -107,8 +107,7 @@ class TestM3Engines(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(diaries), 1)
         self.assertIn("清晰地记得", diaries[0])
 
-        # 回忆加固测试：消息含"还记得"，走关键词分支（新语义：只加固强度 >= 0.5 的日记，
-        # 本条 importance=8 且刚写入，强度足够，仍会被加固）
+        # 只有当前消息与日记命中同一二字词组才加固；本条仍有足够强度。
         await memory.reinforce_memories("你还记得那次在星空下散步吗？")
         row = await self.db.fetchone("SELECT recall_count FROM diary WHERE id = 1")
         self.assertGreaterEqual(row["recall_count"], 1)
@@ -120,8 +119,8 @@ class TestM3Engines(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(facts), 1)
         self.assertEqual(facts[0], "机主喜欢喝拿铁")
 
-    async def test_keyword_reinforce_skips_faded_diaries(self):
-        """关键词加固带遗忘闸门：强度 < 0.5 的旧日记不被复活，只有新日记被加固"""
+    async def test_generic_longing_does_not_reinforce_unrelated_diaries(self):
+        """只说想念时，吃饭与其他旧事都不能被批量加固或复活。"""
         memory = MemoryManager(self.db)
         old_time = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d %H:%M")
         await self.db.execute(
@@ -142,10 +141,25 @@ class TestM3Engines(unittest.IsolatedAsyncioTestCase):
         await memory.reinforce_memories("想你了")
 
         rows = await self.db.fetchall("SELECT content, recall_count, last_recall_at FROM diary ORDER BY id")
-        # 200 天前 importance=1 的旧日记强度远低于 0.5，不得复活
         self.assertEqual(rows[0]["recall_count"], 0)
-        # 新日记被正常加固
-        self.assertEqual(rows[1]["recall_count"], 1)
+        self.assertEqual(rows[1]["recall_count"], 0)
+
+    async def test_diary_recall_gives_bounded_boost_to_current_topic(self):
+        memory = MemoryManager(self.db)
+        await self.db.execute(
+            "INSERT INTO diary (content, importance, sentiment, recall_count, created_at, last_recall_at) "
+            "VALUES ('上次一起复习了现代汉语。', 10, '平静', 0, ?, ?)",
+            (now_str(), now_str()),
+        )
+        await self.db.execute(
+            "INSERT INTO diary (content, importance, sentiment, recall_count, created_at, last_recall_at) "
+            "VALUES ('上次一起吃了新开的火锅。', 6, '温暖', 0, ?, ?)",
+            (now_str(), now_str()),
+        )
+        plain = await memory.get_active_diaries()
+        related = await memory.get_active_diaries(query="还记得那次火锅吗")
+        self.assertIn("现代汉语", plain[0])
+        self.assertIn("火锅", related[0])
 
     async def test_hours_since_last_chat_ignores_assistant_turns(self):
         """冷落信号只看 user 行：机器人主动消息不得刷新/伪造最近对话时间"""

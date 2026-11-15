@@ -43,7 +43,7 @@ async def collect_memory_blocks(
     facts_task = _safe(_facts(memory, query))
     impressions_task = _safe(_impressions(memory)) if impressions else None
     self_task = _safe(_self_facts(memory, query)) if self_memory else None
-    diaries_task = _safe(_diaries(memory, valence, now))
+    diaries_task = _safe(_diaries(memory, valence, now, query))
     followups_task = _safe(_followups(memory, now))
     desires_task = _safe(_desires(memory, now))
     meetups_task = _safe(_meetups(meetups, now)) if meetups is not None else None
@@ -101,8 +101,8 @@ async def _self_facts(memory: Any, query: str) -> str:
     return _lines("你的历史自述", "", items)
 
 
-async def _diaries(memory: Any, valence: float, now: datetime) -> str:
-    items = await memory.get_active_diaries(current_valence=valence, now=now)
+async def _diaries(memory: Any, valence: float, now: datetime, query: str) -> str:
+    items = await memory.get_active_diaries(current_valence=valence, now=now, query=query)
     return _lines("她的记忆｜历史聊天摘要", "", items)
 
 
