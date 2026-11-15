@@ -100,11 +100,12 @@ def make_engine_stack(
             mood=mood,
             memory=memory,
             stickers=stickers,
-            replier=replier,
             gateway=gateway,
             db=db,
-            send_msg_fn=send_msg_fn,
         )
+        # 仅供离线测试发送器复用旧假 QQ 记录形状；生产调度器不持有这些入口。
+        proactive._test_replier = replier
+        proactive._test_send_msg_fn = send_msg_fn
 
     admin = None
     if include_admin:
@@ -152,6 +153,113 @@ def make_mock_gateway(
         mock_gw.chat = AsyncMock()
     mock_gw.stream_chat = AsyncMock()
     return mock_gw
+
+
+def attach_proactive_test_handler(
+    scheduler: ProactiveScheduler, *, reply_text: Optional[str] = None,
+    send_msg_fn: Optional[Any] = None, replier: Optional[Any] = None,
+):
+    """把旧主动测试的假 QQ/临时库接到新处理器；只用于测试，不是生产回退。"""
+    from types import SimpleNamespace
+
+    from companion.kernel.context import ContextBuilder
+    from companion.kernel.contracts import SendReceipt
+    from companion.kernel.delivery import (
+        DeliveryExecutor, DeliveryRejectedError, UnconfirmedDeliveryError,
+    )
+    from companion.kernel.kernel import DialogueKernel
+    from companion.kernel.production import KernelTurnHandler
+    from companion.kernel.psychology import PsychologicalSnapshotBuilder
+    from companion.kernel.tracing import generate_trace_id
+    from companion.runtime_state import runtime_v1_enabled
+
+    class ChatGateway:
+        config = scheduler.gateway.config
+
+        async def stream_chat(self, messages, model, purpose="main_chat", **_kwargs):
+            text = reply_text
+            if text is None:
+                text = await scheduler.gateway.chat(
+                    messages=messages, model=model, purpose=purpose,
+                )
+            yield str(text or "")
+
+    class NullTracer:
+        def new_trace(self):
+            return generate_trace_id("trace")
+
+        def record(self, *_args, **_kwargs):
+            return None
+
+    kernel = DialogueKernel(
+        gateway=ChatGateway(), persona=scheduler.persona,
+        snapshot_builder=PsychologicalSnapshotBuilder(
+            affection_engine=scheduler.affection,
+            mood_engine=scheduler.mood,
+            persona=scheduler.persona,
+            holidays_provider=scheduler.get_holidays,
+        ),
+        context_builder=ContextBuilder(), tracer=NullTracer(),
+        memory=scheduler.memory, arcs=scheduler.arcs,
+        self_memory=getattr(scheduler.assembler, "self_memory", False),
+        impressions=getattr(scheduler.assembler, "impressions", False),
+        meetups=getattr(scheduler.assembler, "meetups", None),
+        model=scheduler.gateway.config.text_model,
+    )
+
+    send_msg_fn = send_msg_fn or getattr(scheduler, "_test_send_msg_fn", None)
+    replier = replier or getattr(scheduler, "_test_replier", None)
+    if send_msg_fn is None or replier is None:
+        raise ValueError("离线主动测试必须显式提供假发送器与节奏记录器")
+
+    class ChunkSender:
+        def __init__(self):
+            self.next_id = 0
+
+        async def _send(self, chunk):
+            await send_msg_fn(chunk)
+            status = str(chunk.get("_voice_delivery") or chunk.get("_delivery") or "")
+            if status in {"failed", "rejected", "reject"}:
+                raise DeliveryRejectedError("offline rejected")
+            if status in {"unconfirmed", "unknown"}:
+                raise UnconfirmedDeliveryError("offline unknown")
+            self.next_id += 1
+            return SendReceipt(message_id=self.next_id)
+
+        async def send_text(self, text, quote_message_id=None):
+            chunk = {"type": "text", "content": text}
+            if quote_message_id is not None:
+                chunk["_quote"] = {"message_id": quote_message_id}
+            return await self._send(chunk)
+
+        async def send_voice(self, text, quote_message_id=None, **_options):
+            return await self._send({
+                "type": "voice", "content": text, "_voice_user_text": "",
+            })
+
+        async def send_sticker(self, sticker):
+            return await self._send({"type": "sticker", "sticker": sticker})
+
+    async def before_send(bubble, action, action_index):
+        chunk = {"type": action.channel, "content": bubble.text}
+        await replier.wait_before_chunk(chunk, action_index)
+
+    runtime_enabled = runtime_v1_enabled(None, scheduler.assembler)
+    legacy = SimpleNamespace(
+        assembler=scheduler.assembler,
+        runtime_events=scheduler.runtime_events,
+        config=SimpleNamespace(reply=SimpleNamespace(runtime_state_v1=runtime_enabled)),
+        _voice_max_chars=lambda: getattr(
+            getattr(scheduler.tts, "config", None), "max_chars", 60
+        ),
+    )
+    handler = KernelTurnHandler(
+        kernel=kernel, runtime=legacy, memory=scheduler.memory,
+        observer=SimpleNamespace(settle_turn=AsyncMock()), proactive=scheduler,
+        delivery_executor=DeliveryExecutor(ChunkSender(), before_send=before_send),
+    )
+    scheduler.kernel_turn_handler = handler
+    return handler
 
 
 def card_path() -> str:

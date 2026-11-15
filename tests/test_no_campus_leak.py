@@ -18,6 +18,9 @@ from companion.assembler import PromptAssembler
 from companion.db import Database
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
+from companion.kernel.context import ContextBuilder
+from companion.kernel.contracts import PsychologicalSnapshot
+from companion.kernel.semantic import build_proactive_turn_input
 from companion.persona import NEUTRAL_WORLD, Persona, World
 from companion.proactive import NEUTRAL_DATE_SENSE, ProactiveScheduler, weekday_date_sense
 from companion.prompts import (
@@ -35,10 +38,8 @@ from companion.prompts import (
     OBSERVER_SELF_FACTS_RULES,
     OBSERVER_SYSTEM_PROMPT,
     PROACTIVE_DECISION_PROMPT,
-    PROACTIVE_GENERATE_PROMPT,
     QUOTE_USAGE_EXAMPLES,
     QUOTE_USAGE_RULES,
-    REPLY_CHECK_PROMPT,
     VOICE_PROMPT_BLOCK,
     diary_system_prompt,
     holiday_prompt_note,
@@ -67,7 +68,6 @@ PROMPT_CONSTANTS = {
     "meetup_recap": MEETUP_RECAP_PROMPT,
     "core_consolidate": CORE_CONSOLIDATE_PROMPT,
     "impressions": IMPRESSIONS_PROMPT + IMPRESSIONS_USER,
-    "reply_check": REPLY_CHECK_PROMPT,
 }
 
 
@@ -99,16 +99,25 @@ class TestNoCampusLeak(unittest.TestCase):
                 st = StickerManager(os.path.join(p.base_dir, p.stickers_dir), db)
                 asm = PromptAssembler(p, aff, mood, mem, st, db)
                 msgs, _ = await asm.assemble_messages("在吗", None, [], True)
+                now = datetime(2026, 10, 27, 20, 23)
+                snapshot = PsychologicalSnapshot(
+                    turn_id="no-campus", frozen_at=now, state_version=1,
+                    stage_index=0, prompt_hint="", action_context={}, affection={}, mood={},
+                )
+                proactive_msgs = ContextBuilder().build_messages(
+                    p, snapshot, [], build_proactive_turn_input("今天想主动找他", now),
+                )
                 await db.close()
-                return p, "\n".join(m["content"] for m in msgs if isinstance(m["content"], str))
+                main_text = "\n".join(m["content"] for m in msgs if isinstance(m["content"], str))
+                proactive_text = "\n".join(m["content"] for m in proactive_msgs)
+                return p, main_text, proactive_text
 
-        p, text = asyncio.run(go())
+        p, text, proactive_text = asyncio.run(go())
         self.assertIsNone(CAMPUS.search(text), CAMPUS.search(text) and text[max(0, CAMPUS.search(text).start() - 40):][:100])
-        gen = PROACTIVE_GENERATE_PROMPT.format(
-            user_address="管理员", chat_medium=p.world.chat_medium, typing_habit=p.world.typing_habit,
-            current_time="", topic_material="", recent_chat="", stickers_list="", face_block="",
+        self.assertIsNone(
+            CAMPUS.search(proactive_text),
+            CAMPUS.search(proactive_text) and proactive_text[max(0, CAMPUS.search(proactive_text).start() - 40):][:100],
         )
-        self.assertNotIn("手机", gen)
         self.assertIsNone(CAMPUS.search(holiday_prompt_note(5, p.world)))
 
 

@@ -111,7 +111,7 @@ class FakeSender:
         }
         self.text_calls.append(record)
         self.all_calls.append(record)
-        return SendReceipt(message_id=msg_id)
+        return SendReceipt(message_id=msg_id, actual_quote_message_id=quote_message_id)
 
     async def send_voice(
         self, text: str, quote_message_id: Optional[int] = None, **options: Any
@@ -253,7 +253,8 @@ async def test_voice_success_original_text():
     assert m0.bubble_id == b0.bubble_id
     assert m0.channel == "voice"
     assert m0.text == "这是一条需要转为语音的消息。"
-    assert m0.quote_message_id == 22222
+    # 生产语音是 record-only：请求可带到 sender，但实际没有显示引用。
+    assert m0.quote_message_id is None
     assert m0.attachment is False
     assert m0.fallback_from is None
 
@@ -465,7 +466,8 @@ async def test_voice_and_sticker_combination():
     assert m_voice.channel == "voice"
     assert m_voice.text == "既有语音又有贴纸的气泡。"
     assert m_voice.attachment is False
-    assert m_voice.quote_message_id == 55555
+    # 贴纸附件与 record-only 语音都不伪造显示引用。
+    assert m_voice.quote_message_id is None
 
     # 验证底层调用：先发送贴纸，再发送语音；且 sticker 从语音 options 中被安全剔除
     assert len(sender.all_calls) == 2

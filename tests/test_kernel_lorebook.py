@@ -38,3 +38,31 @@ def test_multiple_quotes_use_latest_explicit_focus():
     # 回复目标是当前用户消息 2，而不是被引用的历史消息 101/202
     assert turn.reply_to_message_id == 2
     assert turn.quoted_text == "乙"
+
+
+def test_multiple_quotes_lorebook_keeps_latest_focus_not_all_quotes():
+    persona = Persona.load("characters/example")
+    persona.lorebook = Lorebook(
+        always="",
+        entries=[
+            LoreEntry(keys=["早引词"], content="较早引用不应触发的词条"),
+            LoreEntry(keys=["晚引词"], content="最新引用应该触发的词条"),
+        ],
+    )
+    snapshot = PsychologicalSnapshot(
+        turn_id="t2", frozen_at=datetime.now(), state_version=1,
+        stage_index=0, prompt_hint="", action_context={}, affection={}, mood={},
+    )
+    turn = build_turn_input("s", [
+        IncomingMessage(
+            message_id=1, text="先说普通内容", quoted_message_id=101,
+            payload={"source_scope": 1, "quoted_text": "早引词", "quoted_role": "user"},
+        ),
+        IncomingMessage(
+            message_id=2, text="再说普通内容", quoted_message_id=202,
+            payload={"source_scope": 2, "quoted_text": "晚引词", "quoted_role": "assistant"},
+        ),
+    ])
+    prompt = ContextBuilder().build_messages(persona, snapshot, [], turn)[0]["content"]
+    assert "较早引用不应触发的词条" not in prompt
+    assert "最新引用应该触发的词条" in prompt

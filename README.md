@@ -1,147 +1,136 @@
 # QQ 伴侣机器人 (QQ Companion Bot)
 
-部署于 Linux (Ubuntu 22.04) 或本地 Windows 上的 24 小时运行 **QQ 私聊角色扮演伴侣机器人**。
+一个在 QQ 上和你一对一私聊的角色扮演伴侣。它 24 小时挂在一台 Linux 服务器或你自己的 Windows 电脑上，用一个 QQ 小号登录，只回你一个人。
 
-- **机主私聊专属**：机主使用自己的 QQ 大号与机器人登录的 QQ 小号 1v1 私聊；
-- **人设与代码彻底解耦**：系统代码不包含任何特定角色设定，角色完全通过外置角色卡 JSON 配置；
-- **真实聊天感（最高优先级）**：绝对禁止小说式括号旁白描写，像真人在手机 QQ 聊天一样分段发送、模拟打字节奏、支持收发与收藏表情包；
-- **丰富内部引擎**：六维好感度系统（数学动力学模型）、三维 PAD 连续情绪引擎（带 O-U 均值回归与冷落惩罚）、三层记忆系统（工作记忆、情景日记遗忘曲线、语义事实）、主动消息三层调度（规则闸门 + 潜意识决策 + 素材优选）。
+她是谁由一张角色卡决定，代码里不写任何具体角色。她会记事、会忘事，有心情和关系进度，有自己的作息和生活，偶尔主动找你，也能发语音。
 
-> **想把部署交给 AI 助手？** 本仓库自带写给 AI 的零基础部署说明书 [`docs/DEPLOY_FOR_AI.md`](docs/DEPLOY_FOR_AI.md)：包含服务器/本机双路线与分档带教指南。
+> **想把部署交给 AI 助手？** 仓库里有一份专门写给 AI 的部署说明书 [`docs/DEPLOY_FOR_AI.md`](docs/DEPLOY_FOR_AI.md)，覆盖服务器和本机两条路线。把它丢给你的 AI 助手，照着带你做就行。
 
 ---
 
 ## 目录
 
-1. [第一设计原则：手机聊天感与主模型减负](#1-第一设计原则手机聊天感与主模型减负)
-2. [新内核架构 (DialogueKernel)](#2-新内核架构-dialoguekernel)
-3. [输入分流与旧链路回退 (Fallback)](#3-输入分流与旧链路回退-fallback)
-4. [语音与多动作系统：职责分离与原稿冻结](#4-语音与多动作系统职责分离与原稿冻结)
-5. [配置项与开关说明 (use_kernel)](#5-配置项与开关说明-use_kernel)
-6. [环境准备与依赖](#6-环境准备与依赖)
-7. [NapCat 协议端部署 (Docker)](#7-napcat-协议端部署-docker)
-8. [机器人配置与启动](#8-机器人配置与启动)
-9. [角色卡编写教程](#9-角色卡编写教程)
-10. [状态仪表盘访问 (SSH 隧道)](#10-状态仪表盘访问-ssh-隧道)
-11. [Systemd 服务守护与开机自启](#11-systemd-服务守护与开机自启)
-12. [工具、仿真沙箱与 full_sandbox](#12-工具仿真沙箱与-full_sandbox)
-13. [开发者：单元测试与冒烟](#13-开发者单元测试与冒烟)
-14. [部署边界与安全规范](#14-部署边界与安全规范)
+1. [她能做什么](#1-她能做什么)
+2. [这个项目在意什么](#2-这个项目在意什么)
+3. [一条消息怎么变成她的回复](#3-一条消息怎么变成她的回复)
+4. [安装](#4-安装)
+5. [部署 NapCat](#5-部署-napcat)
+6. [配置与启动](#6-配置与启动)
+7. [写你自己的角色卡](#7-写你自己的角色卡)
+8. [看板](#8-看板)
+9. [后台常驻运行](#9-后台常驻运行)
+10. [出了问题怎么查](#10-出了问题怎么查)
+11. [测试](#11-测试)
+12. [隐私与安全](#12-隐私与安全)
+13. [代码地图](#13-代码地图)
+14. [更多文档](#14-更多文档)
 
 ---
 
-## 1. 第一设计原则：手机聊天感与主模型减负
+## 1. 她能做什么
 
-机器人必须像一个真人在手机 QQ 上聊天，**绝对禁止**小说式角色扮演风格（如括号心理描写、第三人称陈述）。
+**聊天**
+- 像真人用手机聊天那样说话：短句，一次回一到几条，不写括号里的动作和心理描写。
+- 等你把话说完再回。你连发几条，她会当成一轮来读。
+- 看得懂你发的图片、QQ 小黄脸和你引用的旧消息。
+- 你要语音时发语音，聊到晚安、想你这类话时也会自己挑一句念出来。语音没发出去会原话改成文字；你要的那条还会在下一轮补发一次。
+- 偶尔顺手发一个表情包或 QQ 小黄脸，也会收藏你发的图。
+- 不秒回：她拿起手机的第一条会先晾一会儿，忙的时候晾得更久；回之前你能看到"对方正在输入"。
+- 你说了去忙、去睡之后只补一个表情，她不会再追一句。
 
-在经历多次线上迭代演变后，系统确立了**「主模型减负与防漂移」**核心原则：
-1. **主模型只负责根据干净上下文生成自然语言**：不再要求模型理解、解析或在正文内嵌内部协议标签（禁止 `[label:1]`、`[voice:xxx]`、`[quote:xxx]`、`[吃糖]` 等内嵌指令污染生成正文）；
-2. **先做减法，再做加法**：优先精简重复模板与矛盾提示词。主模型只接收清晰、精简的心理学结论与上下文，内部复杂的数学动力学（好感度、PAD 动量）由系统内部计算与冻结；
-3. **原稿冻结与职责分离**：主模型生成的自然语言草稿一旦定稿（`ReplyDraft`），文字语义不可变；系统投递动作只引用冻结气泡，禁止通过正则二次润色、抽空正文或前后删改补救；
-4. **系统管理非文本行为**：语音规划、表情选择、引用消息投递、沉默权判定均由系统架构在主模型生成前后完成。
+**记忆**
+- 最近 10 轮对话原样记得。
+- 更早的聊天会写成日记，按遗忘曲线慢慢淡掉，被提起时又会想起来。
+- 关于你的事、她自己说过的事、答应过要跟进的事、约好的见面，分别记着。
 
----
+**状态**
+- 六个维度的好感和十个关系阶段，决定她此刻跟你多亲近。
+- 连续变化的心情，会被聊天内容影响，也会自己慢慢回到平常的样子。冷落她会不高兴。
+- 自己的作息表和持续好几天的生活事件，所以她有的可聊，也有不方便的时候。
 
-## 2. 新内核架构 (DialogueKernel)
-
-为了实现主模型减负与契约化解耦，系统引入了离线对话内核（`companion/kernel/`），由四大核心数据契约贯穿单轮生命周期：
-
-```
-[标准化输入 TurnInput]
-       │
-       ▼
-[快照与只读组装 PreparedTurn] ─── (冻结心理快照 PsychologicalSnapshot + 只读记忆视图 + 精简示例)
-       │
-       ▼
-[主模型生成单轮纯文本]
-       │
-       ▼
-[不可变原稿 ReplyDraft] ──────── (切分为固定 ReplyBubble 气泡，严禁后续正则篡改)
-       │
-       ▼
-[动作规划 DeliveryPlan] ──────── (绑定气泡 ID、引用消息 ID、外部投递通道)
-       │
-       ▼
-[投递执行 DeliveryResult] ────── (支持文字、系统语音、真实收据验证)
-```
-
-- **`StandardizedTurnInput`**：保留真实 QQ `message_id`，同时归一化提取用户输入的自然语义文本，将历史引用语义提前解析；
-- **`PreparedTurn`**：一轮内只读准备结果。包含当轮唯一冻结的 `PsychologicalSnapshot`（精简 `prompt_hint` 与内部 `action_context`）、记忆只读视图（`MemoryPromptBlocks`）与冻结动态示例，生成准备过程不污染状态；
-- **`ReplyDraft`**：主模型单次调用产出的原始文本响应及其切分出的 `ReplyBubble` 气泡列表。原稿在此冻结，作为后续所有投递动作的真实事实源；
-- **`DeliveryPlan`**：投递动作计划。每个动作（`DeliveryAction`）仅引用 `bubble_id` 并指定通道（如 `text`、`voice`），支持明确绑定的 `quote_message_id` 与生成前沉默判定。
+**主动**
+- 按规则、心情和手头的素材决定要不要主动找你。你一直不回，她会降低频率直到不再发。
 
 ---
 
-## 3. 输入分流与旧链路回退 (Fallback)
+## 2. 这个项目在意什么
 
-在当前阶段，新内核与生产环境通过桥接器 `KernelTurnHandler`（位于 `companion/kernel/production.py`）连接，实行严格且安全的分流策略：
+**说的和做的要对得上。** 她说了什么、系统实际发出去了什么、数据库里存了什么、下一轮模型读到什么，这四样必须一致。这是整条主链唯一的硬要求，后面的设计都是为它服务的。
 
-1. **普通纯文字输入进入新内核**：用户发送的普通纯文字私聊消息，由 `DialogueKernel` 完成端到端准备、单次生成与安全校验；
-2. **特殊输入生成前回退旧链路**：
-   - 包含图片消息；
-   - 历史消息复合引用、非纯文本引用；
-   - 包含旧版表情内嵌协议（如 `[face:xxx]`、`[sticker:xxx]`）或特殊富文本；
-   - 包含非语音请求的括号标签。
-   以上输入在**调用模型前**由 `can_use_kernel_text` 判定并安全回退至原有 `Replier` 链路处理，确保现有功能完备性不受影响；
-3. **不可恢复异常时的失败回退**：若新内核生成过程中出现不可用异常，系统保障安全拦截，绝不调用第二个模型二次润色，更不篡改原稿。
+**模型只负责写话。** 发不发语音、带不带表情、引用哪条消息、这一轮回不回，都由程序决定。模型不需要学任何标记，输出里出现标记会被当成无效回复。
+
+**原话不改。** 模型写出来的话只生成一次，之后不润色、不裁剪、不重写，也不会让第二个模型来补救。
+
+**角色和代码分开。** 换一个角色只需要换一张卡，不用改代码。
 
 ---
 
-## 4. 语音与多动作系统：职责分离与原稿冻结
+## 3. 一条消息怎么变成她的回复
 
-系统支持 MiniMax TTS 语音回复与 QQ 动作投递，并在新架构下实现严格的职责划分：
-
-- **系统统一规划**：当用户提出明确语音诉求（或符合语音触发规则）时，语音调度由系统独立规划（`plan_explicit_voice`），主模型无需输出任何特殊的语音控制字符；
-- **原稿真实投递**：被选为语音播报的气泡必须是主模型原稿中真实存在的气泡，正文原样送入合成器；
-- **合成/发送失败降级保底**：当 TTS 服务不可用、额度耗尽或 OneBot 发送失败时，系统将该气泡真实降级为普通文字发出，**绝不静默吞字丢话**，也不会出现删句后只留空白的事故。
-
----
-
-## 5. 配置项与开关说明 (use_kernel)
-
-新内核目前采用渐进式开关控制：
-
-```toml
-[reply]
-use_kernel = false   # 对话内核总开关：默认关闭 (False)
+```text
+你发消息
+  │
+  ▼
+聚合器         等你停手，把连发的几条合成一轮
+  │
+  ▼
+先存你的话     之后哪一步出事，这句都不会丢
+  │
+  ▼
+晾一会儿       只有她"拿起手机"的第一条才等，聊开了就不等
+  │
+  ▼
+准备上下文     角色卡 + 关系阶段 + 记忆 + 最近 10 轮对话 + 她此刻的状态
+  │            （要不要发语音在这里就定好，并作为事实告诉她）
+  ▼
+模型写一次     得到原稿，按换行拆成几条气泡
+  │
+  ▼
+正在输入       按字数演一会儿；同时由系统决定要不要补一个表情
+  │
+  ▼
+逐条发送       每条都等 QQ 的回执
+  │
+  ▼
+只存发到了的   被拒绝就停在那里；不确定有没有发到就不重发
+  │
+  ▼
+事后结算       另一个模型在后台更新好感、心情、记事，不拖慢回复
 ```
 
-- **`use_kernel = false`（当前默认值）**：全量走稳定的传统回复链路（`TurnHandler` + `Replier`）；
-- **`use_kernel = true`**：启用新内核桥接（`KernelTurnHandler`）。普通纯文字经由 `DialogueKernel` 处理，特殊消息与多模态在生成前平滑回退旧链路。
+几个值得知道的细节：
 
-> **注意**：线上生产环境建议在离线沙箱与测试集充分验证后，再按需开启。
+- **发到一半停机**：已经送达的那几条照样会存下来。
+- **模型出错**：发一句固定的兜底短句（比如"你刚才说什么？再说一次"），不会换个模型重来。
+- **语音**：哪一句是用语音发的、哪次没发出去，会作为一条投递记录跟在那一轮对话后面。她下一轮读得到，所以知道刚才那条语音你到底有没有收到。
+- **她此刻的状态**：心情和"刚发生了什么"（比如你两天没找她、她找过你两次你没回）写成一两句话，紧挨着你这一轮的话给她看。放在最后、并且说事实而不是形容词，她才真的会带着这个状态说话。
+- **好感和心情还直接管几个开关**：关系近了，她闲的时候回得快一点、主动找你勤一点；心情差的时候少发表情、不自己挑句子发语音、主动找你也少一些。这些由程序直接控制，不靠模型演，所以一定生效。幅度都不大，你明确要语音不受影响。
+- **你发的表情**：小黄脸会带上一句意思再给她看，免得她把"吃糖"当成你真在吃糖。
+- **她发的表情**：她写完话之后，由一次很小的后台调用决定要不要顺手补一个，跟在最后一条后面。她的原话不会因此改动；最近几轮发过就不再发，所以只是偶尔出现。可以用 `[reply].expressions = false` 关掉。
+
+更完整的机制说明见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 ---
 
-## 6. 环境准备与依赖
+## 4. 安装
 
-### 基础环境
-- Linux (Ubuntu 22.04 LTS 推荐) 或 Windows 10/11
-- Python 3.10+
-- Docker（用于运行 NapCat 容器）
-
-### 安装步骤
+需要 Python 3.10 以上，以及用来跑 NapCat 的 Docker。
 
 ```bash
-# 克隆代码仓库
 git clone <你的仓库地址>
 cd <仓库目录>
 
-# 创建并激活 Python 虚拟环境
 python3 -m venv venv
-source venv/bin/activate  # Windows: .\venv\Scripts\activate
+source venv/bin/activate        # Windows: .\venv\Scripts\activate
 
-# 安装依赖
 pip install -r requirements.txt
 ```
 
 ---
 
-## 7. NapCat 协议端部署 (Docker)
+## 5. 部署 NapCat
 
-NapCat 是底层 QQ 协议端实现（基于 NTQQ），通过 OneBot v11 WebSocket 与本项目通信。
-
-### 7.1 运行 NapCat 容器
+NapCat 负责登录 QQ 小号，并通过 OneBot v11 WebSocket 和机器人通信。
 
 ```bash
 docker run -d \
@@ -155,232 +144,205 @@ docker run -d \
   mlikiowa/napcat-docker:latest
 ```
 
-### 7.2 扫码登录与 WebSocket 配置
+然后：
 
-1. 浏览器访问 `http://<服务器IP或本地地址>:6099/webui`；
-2. 在 WebUI 中使用机器人的 QQ 小号扫码登录；
-3. 进入 NapCat 网络配置，启用 **WebSocket 服务端 (WS)**：
-   - 监听端口：`3001`
-   - 访问 Token：设置一个安全的随机字符串。
+1. 浏览器打开 `http://<服务器地址>:6099/webui`；
+2. 用机器人的 QQ 小号扫码登录；
+3. 在网络配置里启用 **WebSocket 服务端**，端口 `3001`，访问 Token 设成一串随机字符。
 
 ---
 
-## 8. 机器人配置与启动
+## 6. 配置与启动
 
-### 8.1 配置文件
+复制配置模板再编辑：
 
-复制配置模板：
 ```bash
 cp config.example.toml config.toml
 ```
 
-编辑 `config.toml`（示例）：
+最少要填这些：
+
 ```toml
 [account]
-allowed_user_id = 123456789        # 机主大号 QQ 号（只响应此人）
-bot_qq = 987654321                 # 小号 QQ 号
+allowed_user_id = 123456789        # 你自己的 QQ 号，她只回这个人
+bot_qq = 987654321                 # 机器人小号
 
 [onebot]
 ws_url = "ws://127.0.0.1:3001"
-access_token = "与 NapCat WebUI 中一致的 token"
+access_token = "和 NapCat 里设的 Token 一致"
 
 [llm]
-current = "deepseek"
-thinking_chat = true
-thinking_effort_chat = "low"
-thinking_tasks = false
-thinking_effort_tasks = "low"
+current = "deepseek"               # 用哪一家模型，对应下面的 [models.xxx]
 
 [models.deepseek]
 provider = "deepseek"
 base_url = "https://api.deepseek.com"
 api_key = "sk-xxxxxxxx"
-chat = "deepseek-v4-pro"
-vision = "deepseek-flash"
-tasks = "deepseek-flash"
+chat = "deepseek-flash"            # 主聊
+vision = "deepseek-flash"          # 看图，留空则不看图
+tasks = "deepseek-flash"           # 后台结算、日记等
 
 [character]
-path = "characters/example"        # 激活的角色卡目录
-
-[reply]
-use_kernel = false                 # 内核开关：默认 false
+path = "characters/example"        # 用哪张角色卡
 ```
 
-### 8.2 验证运行
+其余选项在 `config.example.toml` 里都有注释。语音默认关闭，要用的话把 `[tts].enabled` 改成 `true`；想用火山引擎的音色，开通步骤见 [`docs/VOLCENGINE_SETUP.md`](docs/VOLCENGINE_SETUP.md)。
+
+启动：
 
 ```bash
 python -m companion.main
 ```
 
-启动后连接 OneBot 成功，使用机主大号给机器人发送一条测试消息，确认能收到角色口吻回复。
+看到 OneBot 连接成功后，用你的 QQ 给小号发一句话试试。
 
 ---
 
-## 9. 角色卡编写教程
+## 7. 写你自己的角色卡
 
-角色设定与系统完全解耦。仓库自带公开模板卡 `characters/example/`。
+仓库自带一张公开的模板卡 `characters/example/`，复制一份改就行。
 
-- [docs/CUSTOMIZE.md](docs/CUSTOMIZE.md)：定制角色的完整指引；
-- [docs/CARD_CRAFT.md](docs/CARD_CRAFT.md)：《怎么写出不像 AI 的角色卡》方法论；
-- **目录结构**：
-  ```
-  characters/your_character/
-  ├── character.json       # 人设核心配置（世界观、语气、关系阶段、作息、生活主线）
-  └── stickers/
-      ├── index.json       # 表情包语用索引（按语用功能匹配，而非画面）
-      └── *.png / *.jpg    # 表情包图片文件
-  ```
-
----
-
-## 10. 状态仪表盘访问 (SSH 隧道)
-
-机器人内置轻量 Web 状态仪表盘（默认端口 `8080`）。
-
-### 访问方式 (推荐 SSH 隧道)
-
-在本地电脑终端执行端口转发：
-```bash
-ssh -N -L 8080:127.0.0.1:8080 ubuntu@<你的服务器IP>
+```text
+characters/your_character/
+├── character.json       # 人设、说话方式、关系阶段、作息、生活主线
+└── stickers/
+    ├── index.json       # 表情包索引
+    └── *.png / *.jpg
 ```
-在本地浏览器打开 `http://127.0.0.1:8080` 即可查看好感度趋势、当前 PAD 情绪坐标、记忆摘要与系统日志。
+
+- [`docs/CUSTOMIZE.md`](docs/CUSTOMIZE.md)：每个字段是干什么的；
+- [`docs/CARD_CRAFT.md`](docs/CARD_CRAFT.md)：怎么写才不像 AI。
+
+一条经验：模型主要是照着示范的样子说话，其次才是听规则。想让她怎么说，就把那样的句子写进示范；光写"不要怎样"效果有限，有时还会适得其反。
 
 ---
 
-## 11. Systemd 服务守护与开机自启
+## 8. 看板
 
-用于在 Linux 服务器后台持久化运行：
+机器人自带一个网页看板，默认端口 `8080`，可以看好感走势、当前心情、她记得的事和费用。
+
+看板默认只监听本机。在服务器上跑的话，从你的电脑开一条 SSH 隧道：
 
 ```bash
-# 复制服务模板到系统目录
+ssh -N -L 8080:127.0.0.1:8080 ubuntu@<你的服务器地址>
+```
+
+然后浏览器打开 `http://127.0.0.1:8080`。
+
+---
+
+## 9. 后台常驻运行
+
+Linux 服务器上用 systemd：
+
+```bash
 sudo cp deploy/qq-companion.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now qq-companion
 ```
 
-- 状态查看：`sudo systemctl status qq-companion`
-- 日志跟踪：`journalctl -u qq-companion -f` 或 `tail -f data/logs/bot.log`
-- 重启服务：`sudo systemctl restart qq-companion`
+- 看状态：`sudo systemctl status qq-companion`
+- 看日志：`journalctl -u qq-companion -f`
+- 重启：`sudo systemctl restart qq-companion`
+
+升级前先备份代码目录和 `data/companion.db`。主对话只有一条链路，没有可以切回旧版的开关，出问题时靠恢复备份回退。
 
 ---
 
-## 12. 工具、仿真沙箱与 full_sandbox
+## 10. 出了问题怎么查
 
-仓库提供了多层次的本地仿真测试工具，无需依赖真实 QQ 客户端即可验证系统逻辑：
+每一轮对话都会在 `data/turn_traces/` 里按天记一份 JSONL。同一个 `trace_id` 下面有：
 
-### 12.1 交互式对话沙箱 (`companion.chat`)
-在命令行与当前角色卡直接文字交互，便于快速微调人设：
-```bash
-python -m companion.chat
-```
+- 发给模型的完整提示词；
+- 她写的原稿；
+- 实际发出去的每一条和 QQ 的回执。
 
-### 12.2 全流程端到端沙箱 (`scripts/sim/full_sandbox.py`)
-完全启动与生产环境相同的 `CompanionBot` 接线（包括聚合器、观察者、日记事实、主动消息、语音判定），仅将外部依赖进行桩实现替换：
-- **假 OneBot 客户端**：记录所有发出的文字/语音/表情，支持主动注入“发送失败”异常；
-- **假 TTS 语音合成**：无需真实费用，支持注入“合成失败”以校验真实降级文字逻辑；
-- **拨动假时钟**：模拟跨天、作息切换与多轮剧情演进，中途执行模拟重启校验记忆连续性。
+想知道"她为什么这么说"就看提示词，想知道"到底发没发出去"就看投递结果。
 
-运行命令：
-```bash
-python scripts/sim/full_sandbox.py --max-cost 3
-```
-运行结果会保存在 `data/full_sandbox/<run_id>/`（包含可读的 `transcript.md` 与详细检查点 `checks.json`）。
+另外两点：
+
+- `model_raw` 里的 `served_model` 是接口实际返回的模型名。配置里写的可能只是个别名，厂商换了底层版本从这里看得出来。
+- 这些文件不会自动清理，里面是完整的聊天内容。长期运行请定期删旧的，也别把它们发给别人。
 
 ---
 
-## 13. 开发者：单元测试与冒烟
-
-仓库包含完善的单元测试集，覆盖底层动力学、记忆视图、新内核各契约组件与投递验证：
+## 11. 测试
 
 ```bash
-# 安装测试依赖（开发环境）
 pip install pytest anyio
-
-# 运行完整测试
 python -m pytest -q tests
 ```
 
-- **公开克隆可跑通用测试**：使用仓库自带的 `characters/example/` 模板卡；依赖私有配置、角色卡、历史数据库或真实语料的用例会明确标记跳过，不把这些资产打包进公开仓库；
-- **显式指定角色卡测试**：
-  ```bash
-  QQC_TEST_CARD=characters/example python -m pytest -q tests
-  ```
-- **真实 API 冒烟提示**：`scripts/smoke/` 下的脚本会直接调用外部在线 LLM / TTS 接口并产生真实费用，请勿批量执行。
+不需要任何私有文件就能跑，默认用 `characters/example/` 这张卡；依赖私有角色卡或档案的用例会自动跳过。想指定别的卡：
+
+```bash
+QQC_TEST_CARD=characters/example python -m pytest -q tests
+```
+
+主链的行为集中在 `tests/test_main_chain.py`：用真实的数据库和真实的投递器，只把模型和 QQ 换成脚本化的假件。改主链时先看它。
+
+改角色卡或提示词之前，可以先用 `scripts/sim/prompt_probe.py` 量一下：它取一轮真实对话当时发给模型的提示词，只改你指定的一处，各跑几次，把她的回复并排打出来。"这样写她到底听不听"，量一下比猜准。用法见脚本开头的说明，它会调用真实模型，费用很小。
+
+`scripts/smoke/` 下的脚本会调用真实的在线接口并产生费用，不要批量跑。
 
 ---
 
-## 14. 部署边界与安全规范
+## 12. 隐私与安全
 
-1. **绝对保护核心机密与配置**：
-   - 严禁提交包含真实 QQ 账号、OneBot Token、模型 API 密钥的 `config.toml`；
-   - 严禁将私人服务器真实 IP、私有路径与敏感环境变量写入公开代码或文档；
-2. **私有角色卡与数据隔离**：
-   - `characters/` 下自定义私有角色卡及 `data/` 运行时数据库已被 `.gitignore` 拦截；
-   - 仓库代码保持完全通用，不硬编码任何专属角色设定或作品分支；
-3. **架构演进边界**：
-   - 当前新内核处于平稳推进阶段，生产默认关闭开关（`use_kernel = false`），多模态与特殊消息按既定策略安全回退；
-   - 更多部署指引参见官方公开部署手册 [`docs/DEPLOY_FOR_AI.md`](docs/DEPLOY_FOR_AI.md) 与 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
+- `config.toml` 里有你的 QQ 号、OneBot Token 和模型密钥，已被 `.gitignore` 拦截，不要提交。
+- `data/` 里是聊天记录、记忆和追踪文件，同样不入库。
+- 你自己的角色卡默认也不入库，仓库只带 `characters/example/`。
+- 不要把服务器地址、本机路径写进代码或文档。
+- 她只回 `allowed_user_id` 这一个号，别人发的消息会被忽略。
 
 ---
 
-## 15. 代码目录地图
+## 13. 代码地图
 
 ```text
 companion/
-├── main.py                 # 生产组合入口：装配、生命周期与 OneBot 连接
-├── turn_handler.py         # 旧流水线：特殊消息与既有能力回退
-├── aggregator.py           # 私聊消息聚合、真实 message_id 保留
-├── kernel/
-│   ├── contracts.py        # 不可变输入、快照、原稿与投递契约
-│   ├── kernel.py           # 公共准备 + 单次生成 + 结果校验
-│   ├── production.py       # 生产薄桥接与事前分流
-│   ├── context.py          # system/history/user messages 构建
-│   ├── psychology.py       # 每轮唯一只读心理快照
-│   ├── memory_view.py      # 只读记忆与来源视图
-│   ├── semantic.py         # 输入归一、历史语义、原稿与计划
-│   ├── delivery.py         # 动作校验、语音通道分配与执行
-│   ├── style_view.py       # 可选示例的确定性只读视图（默认不推广）
-│   └── tracing.py          # JSONL 脱敏追踪
-├── replier.py              # 既有发送分段、表情和兼容逻辑
-├── tts.py                  # TTS 合成、日额度与合成闸门
-└── memory.py               # 工作记忆、日记、事实与自我记忆
-
-scripts/
-├── sim/full_sandbox.py     # 全流程端到端沙箱
-└── ab/                     # 离线 A/B 实验工具（默认只组装估价）
-
-tests/                      # 单元、契约、集成与沙箱测试
-docs/                       # 部署、定制与历史设计文档
-characters/example/         # 可公开的示例角色卡
-deploy/                     # systemd 服务模板（部署 tar 包不入库）
+├── main.py                 # 入口：把各部分接起来，连接 QQ，负责真实发送
+├── aggregator.py           # 等你说完，把连发的消息合成一轮
+├── onebot.py               # 和 NapCat 的 WebSocket 通信
+├── kernel/                 # 主对话
+│   ├── production.py       # 一轮的全过程：先存输入、生成、投递、入库
+│   ├── kernel.py           # 准备上下文并调用模型一次
+│   ├── context.py          # 提示词怎么拼
+│   ├── semantic.py         # 把输入整理成自然的话；原稿拆气泡
+│   ├── delivery.py         # 逐条发送，只认回执
+│   ├── expression.py       # 系统替她挑表情
+│   ├── memory_view.py      # 每轮带进提示词的记忆
+│   ├── psychology.py       # 每轮的心情与关系快照
+│   ├── contracts.py        # 上面这些模块之间传递的数据结构
+│   └── tracing.py          # 轮次追踪
+├── turn_runtime.py         # 语音闸门、作息、首条延迟与"正在输入"
+├── behavior_tuning.py      # 好感和心情怎么调这些开关，全部集中在这一个文件
+├── voice_planner.py        # 什么算"要语音"，没要的时候挑哪句念
+├── tts.py                  # 语音合成与每日上限
+├── observer.py             # 事后结算：好感、心情、记事、见面
+├── memory.py               # 聊天记录、日记、事实、待跟进
+├── affection.py / mood.py  # 好感与心情的计算
+├── proactive.py            # 主动消息的调度
+├── arcs.py                 # 她自己的生活事件
+├── meetups.py              # 约好的见面与事后纪要
+├── persona.py / lorebook.py# 角色卡与世界书的读取
+├── stickers.py / faces.py  # 表情包与 QQ 小黄脸
+├── runtime_state.py        # 真实动作与语音结果的账本
+├── admin.py / dashboard*.py# 看板与管理页
+├── backup.py / reset.py    # 每日备份与数据重置
+└── replier.py / assembler.py / prompts.py / chat.py
+                            # 早期流水线留下的模块，仍被后台任务和工具复用
 ```
 
 ---
 
-## 16. 当前验证口径与已知边界
+## 14. 更多文档
 
-### 验证分三层
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：原理篇，讲记忆、心情、关系、主动消息这些机制是怎么算的。
+- [`docs/DEPLOY.md`](docs/DEPLOY.md)：完整的部署手册。
+- [`docs/DEPLOY_FOR_AI.md`](docs/DEPLOY_FOR_AI.md)：写给 AI 助手的部署说明书。
+- [`docs/CUSTOMIZE.md`](docs/CUSTOMIZE.md) 与 [`docs/CARD_CRAFT.md`](docs/CARD_CRAFT.md)：角色卡。
+- [`docs/RELEASE_NOTES_v2.2.0.md`](docs/RELEASE_NOTES_v2.2.0.md)：这一版改了什么、升级要注意什么。
+- [`docs/PLAN.md`](docs/PLAN.md) 与 [`docs/REFACTOR.md`](docs/REFACTOR.md)：早期的设计蓝图和重构任务书，属于历史记录，细节可能已经和现在的代码不一致。
 
-1. **契约与单元测试**：心理数学不变、输入输出契约、引用目标、原稿顺序、语音/文字/引用组合；
-2. **离线沙箱**：同一输入下 `prepare_turn` 与 `handle_turn` 上下文一致，准备阶段不调用模型、不推进心理；
-3. **完整剧情沙箱**：跨天剧情、真实 LLM、假 QQ/TTS、故障注入和重启记忆。每次真实运行还会输出费用、逐拍对话、记忆表与检查表，便于判断是结构错误还是单纯的文风问题。
-
-### 当前边界
-
-- 新内核并不替代所有旧能力。多模态、特殊富文本和主动消息仍有旧路径参与；
-- 动态示例虽支持确定性回放，但实测没有稳定收益，不进入默认推广范围；
-- 沙箱通过不代表所有客户端和所有网络条件都相同。上线仍应检查真实 QQ、NapCat 与 TTS；
-- 模型原稿冻结不等于模型永远不会写出不自然的话，它只保证系统不再二次修剪或补救正文。
-
-### 费用提醒
-
-`python scripts/sim/full_sandbox.py` 的假 QQ 和假 TTS 不产生 QQ/TTS 费用，但**主模型、观察者和模拟用户仍会调用真实 LLM**。 `--max-cost` 是费用保险丝，不是免费测试开关。默认先查看测试脚本与估价方式，再决定运行范围。
-
----
-
-## 17. 开发与发布约定
-
-- 新功能先证明它不会增加主模型不必要的阅读、协议和格式负担；
-- 修改生产路径必须带对应离线测试，不能只凭一段手工对话宣称通过；
-- 真实配置、私人角色卡、生产数据库、私有对话、备份包和本地路径不进入发布物；
-- Release 只包含可公开复现的代码、示例卡、公开文档与验证结果。私有聊天原文、内部交接和部署备份信息不进入公开 Release。
+License：MIT。

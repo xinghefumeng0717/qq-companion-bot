@@ -26,9 +26,7 @@ from typing import Any, Callable, List, Mapping, Optional, Protocol
 from companion.kernel.contracts import PsychologicalSnapshot
 from companion.persona import SLEEP_WORDS, holiday_span, is_sleep_activity
 from companion.prompts import (
-    get_frustration_description,
     get_mood_description,
-    get_neglect_description,
     get_trust_description,
 )
 
@@ -54,6 +52,33 @@ class MoodReader(Protocol):
 
     async def get_hours_since_last_chat(self, now: Optional[datetime] = None) -> float:
         ...
+
+
+def _gap_span(hours: float) -> str:
+    """把小时数写成"2 天 3 小时"这样的说法（向下取整）。"""
+    days, rest = divmod(int(hours), 24)
+    if days and rest:
+        return f"{days} 天 {rest} 小时"
+    return f"{days} 天" if days else f"{rest} 小时"
+
+
+def _neglect_facts(hours_since_chat: float, frustration: float, unanswered: int) -> str:
+    """把冷落写成事实：他多久没来、她找过几次没回、那口气消没消。没有就返回空串。"""
+    parts: list[str] = []
+    if hours_since_chat > 12.0:
+        line = f"他已经 {_gap_span(hours_since_chat)}没找你了"
+        if unanswered > 0:
+            line += f"，这期间你主动找过他 {unanswered} 次，他都没回"
+        parts.append(line)
+        if frustration > 6.0:
+            parts.append("你憋着一口气")
+    elif unanswered > 0:
+        parts.append(f"你之前主动找过他 {unanswered} 次，他到现在才回")
+    elif frustration > 6.0:
+        parts.append("前阵子他晾了你很久，这口气你还没消")
+    elif frustration > 3.0:
+        parts.append("前阵子他有一阵没理你，你还有点记着")
+    return "。".join(parts) + "。" if parts else ""
 
 
 _ADDITIONAL_SLEEP_WORDS = ("睡", "梦乡", "做梦", "歇息", "休息中")
@@ -109,6 +134,8 @@ class PsychologicalSnapshotBuilder:
         user_message: str = "",
         now: Optional[datetime] = None,
         state_version: int = 1,
+        history_before_id: Optional[int] = None,
+        unanswered_proactive: int = 0,
     ) -> PsychologicalSnapshot:
         """异步构建 PsychologicalSnapshot。
 
@@ -147,9 +174,17 @@ class PsychologicalSnapshotBuilder:
         hours_since_chat = 0.0
         if self.mood_engine is not None:
             try:
-                hours_since_chat = float(
-                    await self.mood_engine.get_hours_since_last_chat(now=now_dt)
-                )
+                if history_before_id is None:
+                    hours_since_chat = float(
+                        await self.mood_engine.get_hours_since_last_chat(now=now_dt)
+                    )
+                else:
+                    # 他这句话已经先入库：隔了多久要从他上一次发言量起。
+                    hours_since_chat = float(
+                        await self.mood_engine.get_hours_since_last_chat(
+                            now=now_dt, before_id=history_before_id
+                        )
+                    )
             except Exception:
                 hours_since_chat = 0.0
 
@@ -199,6 +234,7 @@ class PsychologicalSnapshotBuilder:
             hours_since_chat=hours_since_chat,
             composite_aff=composite_aff,
             effective_activity=effective_activity,
+            unanswered_proactive=unanswered_proactive,
         )
 
         # 5. 内部 action_context 留存完整上下文供内部决策
@@ -241,6 +277,7 @@ class PsychologicalSnapshotBuilder:
         hours_since_chat: float,
         composite_aff: float,
         effective_activity: str,
+        unanswered_proactive: int = 0,
     ) -> str:
         """合成精简的 1~2 句自然语言 prompt_hint 给主模型。
 
@@ -275,11 +312,10 @@ class PsychologicalSnapshotBuilder:
 
         # 情绪/心理体验
         mood_text = get_mood_description(v, a)
-        trust_text = get_trust_description(t)
-        frust_text = get_frustration_description(frustration)
-        neglect_text = get_neglect_description(hours_since_chat, composite_aff)
-
-        emotional_text = f"{mood_text}，{trust_text}{frust_text}{neglect_text}".strip("，。； ")
+        trust_text = get_trust_description(t, other="对方")
+        emotional_text = f"{mood_text}，{trust_text}".strip("，。； ")
+        # 冷落不写成形容词，写成发生了什么：模型知道一个人碰上这种事会怎么说话。
+        happened_text = _neglect_facts(hours_since_chat, frustration, unanswered_proactive)
 
         # 组织精炼的 1~2 句话
         # 句 1：当前客观交流状态 + 阶段相处分寸
@@ -291,8 +327,8 @@ class PsychologicalSnapshotBuilder:
         # 句 2：内心感受与情绪
         sentence2 = f"内心感受：{emotional_text}。" if emotional_text else ""
 
-        # 如果只有一句或者两句，拼接输出
-        result = f"{sentence1}{sentence2}".strip()
+        # 先说发生了什么，再说感受
+        result = f"{sentence1}{happened_text}{sentence2}".strip()
         # 再次兜底过滤动作语法和原始数值格式
         for token in ["[sticker", "[沉默", "[吃糖", "[voice", "[label:"]:
             result = result.replace(token, "")

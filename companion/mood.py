@@ -75,11 +75,24 @@ class MoodEngine:
     async def save_state(self, state: Dict[str, Any]) -> None:
         await self.db.set_state_json(STATE_KEY_MOOD, state)
 
-    async def get_hours_since_last_chat(self, now: Optional[datetime] = None) -> float:
-        """获取距机主最近一次发言的小时数（只看 user 行，机器人主动消息不计）"""
-        row = await self.db.fetchone(
-            "SELECT created_at FROM turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
-        )
+    async def get_hours_since_last_chat(
+        self, now: Optional[datetime] = None, before_id: Optional[int] = None
+    ) -> float:
+        """获取距机主最近一次发言的小时数（只看 user 行，机器人主动消息不计）
+
+        before_id：本轮他的话已经先入库时传它的记录 id，只看它之前的发言；
+        否则量到的永远是"刚刚"，隔了多久这件事就读不出来了。
+        """
+        if before_id is None:
+            row = await self.db.fetchone(
+                "SELECT created_at FROM turns WHERE role = 'user' ORDER BY id DESC LIMIT 1"
+            )
+        else:
+            row = await self.db.fetchone(
+                "SELECT created_at FROM turns WHERE role = 'user' AND id < ? "
+                "ORDER BY id DESC LIMIT 1",
+                (int(before_id),),
+            )
         if not row or not row["created_at"]:
             return 0.0
         last_dt = parse_dt(row["created_at"])

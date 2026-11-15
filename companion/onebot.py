@@ -16,8 +16,11 @@ import uuid
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 import aiohttp
 
+from companion.aggregator import StructuredText
 from companion.config import OneBotConfig
 from companion.faces import segment_face_tag
+from companion.kernel.contracts import SendReceipt
+from companion.kernel.delivery import DeliveryRejectedError, UnconfirmedDeliveryError
 
 logger = logging.getLogger(__name__)
 
@@ -476,13 +479,25 @@ class OneBotClient:
         FIXES21：入站事件里本来就带着 message_id，这里把它一起交出去（**原样透传，
         不做类型转换**——id 是 QQ 服务端给的 int，转成字符串再转回来只会多一个出错点；
         取不到就是 None，下游据此判"这条不可被引用"）。
+
+        表情的**类型**在段这一层就已经知道了（face / mface / image+summary），
+        拼成方括号文字之后类型就丢了。所以这里同时保留**段级事实**（parts）：
+        文字与表情按原始顺序各自成段，kind 直接来自 OneBot 段类型。
+        拼出来的文本与改动前逐字节相同（旧链路一个字不变），
+        段事实只作为附加元数据随文本一起交下去（回调签名没动）。
         """
         text_parts = []
+        # 段级事实：kind 来自 OneBot 段类型（text / face / voice），顺序即原始顺序
+        parts: List[Dict[str, Any]] = []
         image_local_path: Optional[str] = None
         reply_prefix: Optional[str] = None
+        quoted_message_id: Any = None
+        quoted_text: Optional[str] = None
+        quoted_role = "unknown"
 
         if isinstance(raw_msg, str):
             text_parts.append(raw_msg)
+            parts.append({"kind": "text", "text": raw_msg})
         elif isinstance(raw_msg, list):
             for seg in raw_msg:
                 if not isinstance(seg, dict):
@@ -496,22 +511,31 @@ class OneBotClient:
                 face_tag = segment_face_tag(seg)
                 if face_tag is not None:
                     text_parts.append(face_tag)
+                    parts.append({"kind": "face", "text": face_tag})
                     continue
 
                 if stype == "text":
-                    text_parts.append(sdata.get("text", ""))
+                    seg_text = sdata.get("text", "")
+                    text_parts.append(seg_text)
+                    parts.append({"kind": "text", "text": seg_text})
                 elif stype == "reply":
                     # OneBot 引用回复段：取被引消息文本并入本轮输入
                     if reply_prefix is None:
-                        reply_prefix = await self._fetch_reply_context(sdata.get("id"))
+                        rid = sdata.get("id")
+                        reply_prefix, quoted_text, quoted_role = await self._fetch_reply_details(rid)
+                        if reply_prefix is not None:
+                            quoted_message_id = rid
                 elif stype == "record":
                     rec_url = sdata.get("url") or sdata.get("file")
                     if rec_url:
                         if self.voice_processor:
                             voice_text = await self.voice_processor.process_voice(rec_url, self._session)
-                            text_parts.append(voice_text)
                         else:
-                            text_parts.append("[对方发来一条语音，但没能听清]")
+                            voice_text = "[对方发来一条语音，但没能听清]"
+                        text_parts.append(voice_text)
+                        # 语音在协议层已经转成文字，类型仍是 text：
+                        # 改动前它就是一条普通文本，路由与语义都不变。
+                        parts.append({"kind": "text", "text": voice_text})
                 elif stype == "image":
                     img_url = sdata.get("url") or sdata.get("file")
                     if img_url:
@@ -524,8 +548,21 @@ class OneBotClient:
             # 引用上下文进入文本流，与普通文本共用聚合窗口
             full_text = f"{reply_prefix}\n{full_text}" if full_text else reply_prefix
 
+        message: Any = full_text
+        has_face = any(part.get("kind") == "face" for part in parts)
+        has_quote = quoted_message_id is not None
+        if has_face or has_quote:
+            # 带表情或引用事实时带上结构化元数据；普通纯文本消息仍是普通 str
+            message = StructuredText(
+                full_text,
+                parts,
+                quoted_message_id=quoted_message_id,
+                quoted_text=quoted_text,
+                quoted_role=quoted_role,
+            )
+
         if self.on_message_callback:
-            await self.on_message_callback(full_text, image_local_path, message_id)
+            await self.on_message_callback(message, image_local_path, message_id)
 
     async def _download_image(self, url: str) -> Optional[str]:
         """下载 QQ 图片到本地 data/images/（智能判断图片扩展名）"""
@@ -643,32 +680,43 @@ class OneBotClient:
             return text[:80]
         return cls._quoted_media_desc(msg_data)
 
-    async def _fetch_reply_context(self, reply_id: Any) -> Optional[str]:
-        """取被引用消息，拼成「（他引用了你之前说的「XXX」）」前缀。
-        任何失败都返回 None（调用方按无引用继续），不阻塞主流程。
-        """
+    async def _fetch_reply_details(
+        self, reply_id: Any
+    ) -> Tuple[Optional[str], Optional[str], str]:
+        """一次取回被引消息的旧文本、自然语义和说话人角色。"""
         if reply_id is None:
-            return None
+            return None, None, "unknown"
 
         data = await self._call_action("get_msg", {"message_id": reply_id}, timeout=2.0)
         if not data:
-            return None
+            return None, None, "unknown"
 
         try:
             sender_id = (data.get("sender") or {}).get("user_id")
             desc = self._describe_quoted_message(data)
+            quoted_role = "unknown"
+            if sender_id is not None:
+                # 当前入口只接允许机主的私聊；沿用旧前缀既有的双方身份边界。
+                quoted_role = "user" if sender_id == self.allowed_user_id else "assistant"
 
-            if sender_id is not None and sender_id == self.allowed_user_id:
+            if quoted_role == "user":
                 # 引用的是机主自己发过的消息（同样 80 字截断）
                 body = f"「{desc}」" if desc else "一条消息"
-                return f"（他之前说的{body}）"
+                return f"（他之前说的{body}）", desc or "一条消息", quoted_role
 
             if not desc:
-                return "（他引用了你的一条消息）"
-            return f"（他引用了你之前说的「{desc}」）"
+                return "（他引用了你的一条消息）", "一条消息", quoted_role
+            return f"（他引用了你之前说的「{desc}」）", desc, quoted_role
         except Exception as e:
             logger.warning(f"[OneBot] 解析引用消息异常，降级为无引用: {e}")
-            return None
+            return None, None, "unknown"
+
+    async def _fetch_reply_context(
+        self, reply_id: Any
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """兼容旧调用方：仍只返回旧前缀与被引文本，不重复取消息。"""
+        reply_prefix, quoted_text, _ = await self._fetch_reply_details(reply_id)
+        return reply_prefix, quoted_text
 
     async def set_input_status(self, user_id: int, typing: bool) -> bool:
         """设置/取消"正在输入"状态（FIXES15 打字视觉签名）。
@@ -683,6 +731,77 @@ class OneBotClient:
             timeout=2.0,
         )
         return data is not None
+
+    async def send_private_msg_receipt(
+        self,
+        user_id: int,
+        message_segments: List[Dict[str, Any]],
+    ) -> SendReceipt:
+        """单次提交并返回真实回执；已提交但结果未知时绝不盲目重发。"""
+        if not self.is_connected or not self._ws:
+            raise RuntimeError("WebSocket 未连接，消息尚未提交")
+
+        echo_id = str(uuid.uuid4())
+        payload = {
+            "action": "send_msg",
+            "params": {
+                "message_type": "private",
+                "user_id": user_id,
+                "message": message_segments,
+            },
+            "echo": echo_id,
+        }
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_echoes[echo_id] = fut
+        try:
+            try:
+                await self._ws.send_str(json.dumps(payload))
+                res = await asyncio.wait_for(fut, timeout=10.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise UnconfirmedDeliveryError(
+                    "消息已尝试提交，但未取得可确认的回包"
+                ) from exc
+
+            status = res.get("status")
+            retcode = res.get("retcode")
+            status_known = status is None or status in ("ok", "failed")
+            retcode_known = retcode is None or type(retcode) is int
+            if not status_known or not retcode_known:
+                raise UnconfirmedDeliveryError("回包含未知状态或畸形返回码")
+
+            succeeded = (
+                (status == "ok" and (retcode is None or retcode == 0))
+                or (status is None and retcode == 0)
+            )
+            rejected = (
+                (status == "failed" and (retcode is None or retcode != 0))
+                or (status is None and retcode is not None and retcode != 0)
+            )
+            if succeeded:
+                data = res.get("data")
+                if data is None:
+                    data = {}
+                if not isinstance(data, dict):
+                    raise UnconfirmedDeliveryError("成功回包的数据结构无法确认")
+                raw_id = data.get("message_id")
+                message_id = None
+                if type(raw_id) is int:
+                    message_id = raw_id
+                elif isinstance(raw_id, str):
+                    try:
+                        message_id = int(raw_id.strip())
+                    except ValueError:
+                        message_id = None
+                return SendReceipt(message_id=message_id)
+            if rejected:
+                raise DeliveryRejectedError(f"QQ 明确拒绝发送: status={status}, retcode={retcode}")
+            raise UnconfirmedDeliveryError(
+                f"回包状态矛盾或无法解释: status={status}, retcode={retcode}"
+            )
+        finally:
+            self._pending_echoes.pop(echo_id, None)
 
     async def send_private_msg(
         self,

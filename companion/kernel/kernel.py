@@ -22,7 +22,7 @@ from companion.kernel.memory_view import collect_memory_blocks
 from companion.kernel.psychology import PsychologicalSnapshotBuilder
 from companion.kernel.semantic import create_delivery_plan, create_reply_draft, validate_delivery_plan
 from companion.kernel.style_view import collect_style_examples
-from companion.kernel.tracing import JsonlTraceRecorder
+from companion.kernel.tracing import JsonlTraceRecorder, generate_trace_id
 
 
 _INTERNAL_PROTOCOL_RE = re.compile(
@@ -46,6 +46,7 @@ class DialogueKernel:
         self_memory: bool = False,
         impressions: bool = False,
         meetups: Optional[Any] = None,
+        runtime_events: Optional[Any] = None,
         style_examples: Optional[Any] = None,
         model: Optional[str] = None,
         history_limit: int = 10,
@@ -62,6 +63,7 @@ class DialogueKernel:
         self.self_memory = self_memory
         self.impressions = impressions
         self.meetups = meetups
+        self.runtime_events = runtime_events
         self.style_examples = style_examples
         self.model = model
         self.history_limit = history_limit
@@ -75,16 +77,46 @@ class DialogueKernel:
             return self.gateway.config.active().chat
         return getattr(self.gateway.config, "observer_model", "deepseek-flash")
 
-    async def _history(self) -> Sequence[Any]:
+    async def _history(self, before_id: Optional[int] = None) -> Sequence[Any]:
         if self.memory is None:
             return []
-        return await self.memory.get_recent_turns(limit=self.history_limit)
+        if before_id is None:
+            turns = await self.memory.get_recent_turns(limit=self.history_limit)
+        else:
+            turns = await self.memory.get_recent_turns(
+                limit=self.history_limit, before_id=before_id
+            )
+        return await self._with_delivery_notes(turns)
+
+    async def _with_delivery_notes(self, turns: Sequence[Any]) -> Sequence[Any]:
+        """把真实语音结果挂到对应的历史轮次上；读取失败时历史照常使用。"""
+        reader = getattr(self.runtime_events, "delivery_notes_for_turns", None)
+        if not callable(reader) or not turns:
+            return turns
+        ids = [
+            turn.get("id") for turn in turns
+            if isinstance(turn, dict) and turn.get("role") == "assistant" and turn.get("id")
+        ]
+        if not ids:
+            return turns
+        try:
+            notes = await reader(ids)
+        except Exception:
+            return turns
+        if not notes:
+            return turns
+        annotated = []
+        for turn in turns:
+            note = notes.get(turn.get("id")) if isinstance(turn, dict) else None
+            annotated.append({**turn, "delivery_note": note} if note else turn)
+        return annotated
 
     async def prepare_turn(
         self,
         turn_input: StandardizedTurnInput,
         *,
         trace_id: Optional[str] = None,
+        history_before_id: Optional[int] = None,
     ) -> PreparedTurn:
         """只读准备一轮上下文；不调用主模型，不推进任何心理状态。"""
         event_trace_id = trace_id or self.tracer.new_trace()
@@ -97,14 +129,17 @@ class DialogueKernel:
 
         snapshot = await self.snapshot_builder.build_snapshot(
             event_trace_id,
-            user_message=turn_input.text,
+            # 主动事件可供本轮参考，但不是用户刚发来的消息。
+            user_message=turn_input.text if turn_input.source == "user" else "",
             now=turn_input.received_at,
+            history_before_id=history_before_id,
+            unanswered_proactive=int(getattr(turn_input, "unanswered_proactive", 0) or 0),
         )
         self.tracer.record(
             "psychological_snapshot", snapshot, trace_id=event_trace_id,
         )
 
-        history = tuple(await self._history())
+        history = tuple(await self._history(history_before_id))
         memory_blocks: Optional[MemoryPromptBlocks] = None
         if self.memory is not None:
             memory_blocks = await collect_memory_blocks(
@@ -157,10 +192,18 @@ class DialogueKernel:
             style_examples=style_examples,
         )
 
-    async def handle_turn(self, turn_input: StandardizedTurnInput) -> KernelResult:
-        """保持原入口：公共准备后立即生成，整轮只创建一个心理快照。"""
+    async def handle_turn(
+        self,
+        turn_input: StandardizedTurnInput,
+        *,
+        history_before_id: Optional[int] = None,
+    ) -> KernelResult:
+        """保持原入口：公共准备后立即生成，整轮只创建一个心理快照。
+
+        history_before_id：本轮用户原话已先入库时传它的记录 id，历史只取它之前的部分。
+        """
         started = time.perf_counter()
-        prepared = await self.prepare_turn(turn_input)
+        prepared = await self.prepare_turn(turn_input, history_before_id=history_before_id)
         return await self._generate_prepared(prepared, started)
 
     async def handle_prepared_turn(self, prepared: PreparedTurn) -> KernelResult:
@@ -195,8 +238,14 @@ class DialogueKernel:
             raise
 
         raw_text = "".join(parts)
-        self.tracer.record("model_raw", {"text": raw_text}, trace_id=trace_id)
-        draft = create_reply_draft(raw_text)
+        # 配置里的模型名可能只是别名；把接口实际返回的模型名一并记下，底层换了版本才看得出来。
+        self.tracer.record(
+            "model_raw",
+            {"text": raw_text, "served_model": getattr(self.gateway, "last_served_model", "")},
+            trace_id=trace_id,
+        )
+        # 每次生成都是一份新原稿：独立 draft_id，跨轮复用的执行器不会把同秒同文的两轮认成同一稿。
+        draft = create_reply_draft(raw_text, draft_id=generate_trace_id("draft"))
         errors: list[str] = []
         if not raw_text.strip():
             errors.append("empty_draft")

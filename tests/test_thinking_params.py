@@ -35,11 +35,13 @@ class TestThinkingParams(unittest.TestCase):
         self.assertTrue(gw.config.thinking_chat)
 
     def test_thinking_per_purpose_whitelist(self):
-        """用户可见行文的后台用途（日记/识图描述/主动消息）默认开思考，其余关"""
+        """用户可见行文的后台用途（日记/识图描述/生活主线）默认开思考，其余关"""
         cfg = LLMConfig()
         self.assertTrue(cfg.thinking_for_purpose("diary_archive"))
         self.assertTrue(cfg.thinking_for_purpose("vision_perception"))
-        self.assertTrue(cfg.thinking_for_purpose("proactive_message"))
+        self.assertTrue(cfg.thinking_for_purpose("life_arc"))
+        self.assertFalse(cfg.thinking_for_purpose("proactive_message"))
+        self.assertFalse(cfg.thinking_for_purpose("reply_check"))
         self.assertFalse(cfg.thinking_for_purpose("observer"))
         self.assertFalse(cfg.thinking_for_purpose("sticker_desc"))
         self.assertFalse(cfg.thinking_for_purpose("proactive_decision"))

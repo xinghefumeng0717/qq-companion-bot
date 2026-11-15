@@ -8,7 +8,27 @@ from typing import Optional
 from companion.tts import truncate_for_voice
 from companion.replier import normalize_voice_syntax_variants, repair_voice_line_shorthand
 
-VOICE_REQUEST_RE = re.compile(r"语音|声音|听听你|唱[一句段个首]")
+# 只认"请她出声"的说法：讨要的动词在前、语音/声音在后（发条语音、赏个语音、想听你声音），
+# 或者直接追问"语音呢"。仅仅提到这两个词不算请求
+# （"QQ 还吃语音""外面声音好吵""刚才那条语音真好听"）。
+VOICE_REQUEST_RE = re.compile(
+    r"(?:发|来|录|整|听|赏|给|要|求|讨)[^，。！？!?\s]{0,6}(?:语音|声音)"
+    r"|语音呢|听听你|想听你|唱[一句段个首]"
+)
+_VOICE_REQUEST_NEGATION_RE = re.compile(
+    r"(?:别|(?<!要)不要|不用|不必|不需要)[^，。！？!?\s]{0,6}(?:语音|声音|唱[一句段个首])"
+)
+
+
+def is_voice_refusal(user_text: str) -> bool:
+    """他是否明确说了不要语音。"""
+    return bool(_VOICE_REQUEST_NEGATION_RE.search(user_text or ""))
+
+
+def is_voice_request(user_text: str) -> bool:
+    """明确否定优先；只有剩下的讨要说法才请求语音。"""
+    text = user_text or ""
+    return bool(VOICE_REQUEST_RE.search(text)) and not is_voice_refusal(text)
 _TAG_RE = re.compile(
     r"\[(?:quote[:：]\d+|face[:：][^\]]+|sticker[:：][^\]]+|表情[:：][^\]]+)\]|"
     r"\[/?voice[:：]?\]?|\[语音(?:消息)?\]|（语音消息）",
@@ -76,7 +96,7 @@ class VoicePlanner:
 
     @staticmethod
     def explicit_request(user_text: str) -> bool:
-        return bool(VOICE_REQUEST_RE.search(user_text or ""))
+        return is_voice_request(user_text)
 
     def allows(self, user_text: str) -> bool:
         return self.frequency != "off" and (self.frequency != "explicit" or self.explicit_request(user_text))

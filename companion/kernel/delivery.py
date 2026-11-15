@@ -23,8 +23,20 @@ _ACTION_CHANNELS = {"text", "voice", "sticker"}
 _BODY_OVERRIDE_KEYS = {"text", "content", "bubble_id"}
 
 
+class DeliveryRejectedError(RuntimeError):
+    """对端明确拒绝；只有这类失败才允许按既定规则降级或去引用。"""
+
+
 class UnconfirmedDeliveryError(RuntimeError):
     """发送结果不确定：可能已到达，禁止自动补发或降级重试。"""
+
+
+class ConfirmedDeliveryCancelled(asyncio.CancelledError):
+    """回执已确认、后续记账被 cancel；携带回执供执行器保全实际消息。"""
+
+    def __init__(self, receipt: SendReceipt):
+        super().__init__()
+        self.receipt = receipt
 
 
 def validate_action_delivery_plan(plan: DeliveryPlan, draft: ReplyDraft) -> None:
@@ -59,7 +71,7 @@ def validate_action_delivery_plan(plan: DeliveryPlan, draft: ReplyDraft) -> None
             raise ValueError("动作参数不得复制或覆盖冻结原稿正文")
         if action.channel == "sticker" and not action.extra.get("sticker"):
             raise ValueError("sticker 动作必须提供附加资源")
-        if action.channel == "text" and set(action.extra) - {"sticker"}:
+        if action.channel == "text" and set(action.extra) - {"sticker", "sticker_after"}:
             raise ValueError("text 动作只允许 sticker 附加参数")
         seen.add(action.bubble_id)
     missing = set(bubbles) - seen
@@ -79,10 +91,12 @@ def plan_explicit_voice(
     allowed: bool,
     max_chars: int,
     min_chars: int = 4,
+    preferred_text: Optional[str] = None,
 ) -> DeliveryPlan:
-    """为明确语音请求分配一个完整气泡；只改 channel，不改任何正文。
+    """为语音分配一个完整气泡；只改 channel，不改任何正文。
 
     没有合适气泡、未请求或闸门未放行时，原计划逐字段保持不变。
+    系统语音可指定内容规划选中的原文；没有完整同文气泡时宁可保持文字。
     """
     validate_action_delivery_plan(plan, draft)
     if plan.silent or not requested or not allowed:
@@ -105,6 +119,7 @@ def plan_explicit_voice(
             and action.channel == "text"
             and len(text.strip()) >= minimum
             and len(text) <= limit
+            and (preferred_text is None or text.strip() == preferred_text.strip())
         ):
             action = DeliveryAction(
                 bubble_id=action.bubble_id,
@@ -138,10 +153,12 @@ class DeliveryExecutor:
         *,
         recorder: Optional[Any] = None,
         tracer: Optional[JsonlTraceRecorder] = None,
+        before_send: Optional[Any] = None,
     ) -> None:
         self.sender = sender
         self.recorder = recorder
         self.tracer = tracer
+        self.before_send = before_send
         self._results: dict[str, DeliveryResult] = {}
         self._requests: dict[str, tuple[ReplyDraft, DeliveryPlan]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -176,7 +193,27 @@ class DeliveryExecutor:
                 self._trace("delivery_result", result, trace_id)
                 return result
 
-            result = await self._execute_validated(draft, plan)
+            messages: list[SentMessage] = []
+            errors: list[str] = []
+            try:
+                result = await self._execute_validated(draft, plan, messages, errors)
+            except asyncio.CancelledError:
+                # 取消不是普通发送失败：保全已确认部分并禁止同稿从头重试。
+                errors.append("cancelled")
+                result = DeliveryResult(
+                    draft_id=draft.draft_id,
+                    status="failed",
+                    messages=tuple(messages),
+                    errors=tuple(errors),
+                )
+                self._requests[draft.draft_id] = (draft, plan)
+                self._results[draft.draft_id] = result
+                self._trace("delivery_result", result, trace_id)
+                if self.recorder is not None and result.messages:
+                    recorded = self.recorder.record_delivery(result)
+                    if inspect.isawaitable(recorded):
+                        await recorded
+                raise
             # 所有终态都缓存：零消息的未决失败同样禁止调用方盲目重试。
             self._requests[draft.draft_id] = (draft, plan)
             self._results[draft.draft_id] = result
@@ -187,18 +224,36 @@ class DeliveryExecutor:
                     await recorded
             return result
 
-    async def _execute_validated(self, draft: ReplyDraft, plan: DeliveryPlan) -> DeliveryResult:
+    def result_for(self, draft_id: str) -> Optional[DeliveryResult]:
+        """同一原稿已有的实际结果（含被取消时保全的已确认部分）；没有执行过返回 None。"""
+        return self._results.get(draft_id)
+
+    async def _execute_validated(
+        self,
+        draft: ReplyDraft,
+        plan: DeliveryPlan,
+        messages: Optional[list[SentMessage]] = None,
+        errors: Optional[list[str]] = None,
+    ) -> DeliveryResult:
         bubbles = {bubble.bubble_id: bubble for bubble in draft.bubbles}
-        messages: list[SentMessage] = []
-        errors: list[str] = []
+        if messages is None:
+            messages = []
+        if errors is None:
+            errors = []
         quote_pending = plan.quote_message_id
         text_only = False
         stopped = False
 
-        for action in plan.actions:
+        for action_index, action in enumerate(plan.actions):
             bubble = bubbles[action.bubble_id]
+            if self.before_send is not None:
+                awaited = self.before_send(bubble, action, action_index)
+                if inspect.isawaitable(awaited):
+                    await awaited
             sticker = _sticker_of(action)
-            if not text_only and sticker is not None:
+            # sticker_after：表情跟在这条气泡后面发，是整轮话说完之后顺手补的一个附件。
+            sticker_after = bool(sticker is not None and action.extra.get("sticker_after"))
+            if not text_only and sticker is not None and not sticker_after:
                 try:
                     receipt = await self.sender.send_sticker(sticker)
                     messages.append(self._sent(bubble, "sticker", receipt, attachment=True))
@@ -219,6 +274,17 @@ class DeliveryExecutor:
                     bubble, requested, quote_pending, action.extra, fallback_from
                 )
                 messages.append(message)
+            except ConfirmedDeliveryCancelled as exc:
+                message = self._sent(
+                    bubble,
+                    requested,
+                    exc.receipt,
+                    quote_message_id=exc.receipt.actual_quote_message_id,
+                    fallback_from=fallback_from,
+                )
+                messages.append(message)
+                errors.append(self._error(bubble, f"{requested}_confirmed_cancelled", exc))
+                raise asyncio.CancelledError
             except UnconfirmedDeliveryError as exc:
                 errors.append(self._error(bubble, f"{requested}_unconfirmed", exc))
                 stopped = True
@@ -239,6 +305,18 @@ class DeliveryExecutor:
                     errors.append(self._error(bubble, "text", text_exc))
                     stopped = True
                     break
+
+            if sticker_after and not stopped and any(
+                m.bubble_id == bubble.bubble_id and not m.attachment for m in messages
+            ):
+                # 正文已经送达才补表情；表情发不出去不影响已经说出口的话。
+                try:
+                    receipt = await self.sender.send_sticker(sticker)
+                    messages.append(self._sent(bubble, "sticker", receipt, attachment=True))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    errors.append(self._error(bubble, "sticker", exc))
 
         delivered = {message.bubble_id for message in messages if not message.attachment}
         complete = delivered == set(bubbles)
@@ -264,7 +342,10 @@ class DeliveryExecutor:
         fallback_from: Optional[str],
     ) -> Tuple[SentMessage, Optional[int]]:
         if channel == "voice":
-            options = {key: value for key, value in extra.items() if key != "sticker"}
+            options = {
+                key: value for key, value in extra.items()
+                if key not in {"sticker", "sticker_after"}
+            }
             receipt = await self.sender.send_voice(
                 bubble.text, quote_message_id=quote_message_id, **options
             )
@@ -276,10 +357,10 @@ class DeliveryExecutor:
             bubble,
             channel,
             receipt,
-            quote_message_id=quote_message_id,
+            quote_message_id=receipt.actual_quote_message_id,
             fallback_from=fallback_from,
         )
-        # 显示引用只消费一次，且只附着于原稿消息而非贴纸附件。
+        # 请求引用只消费一次；实际是否显示只认回执，不向下一气泡迁移。
         return message, None
 
     @staticmethod
@@ -309,4 +390,10 @@ class DeliveryExecutor:
         return f"{bubble.bubble_id}:{channel}:{type(exc).__name__}:{exc}"
 
 
-__all__ = ["DeliveryExecutor", "UnconfirmedDeliveryError", "validate_action_delivery_plan"]
+__all__ = [
+    "DeliveryExecutor",
+    "DeliveryRejectedError",
+    "ConfirmedDeliveryCancelled",
+    "UnconfirmedDeliveryError",
+    "validate_action_delivery_plan",
+]

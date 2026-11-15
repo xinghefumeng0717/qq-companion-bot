@@ -74,6 +74,8 @@ class LLMGateway:
     def __init__(self, config: LLMConfig, db: Optional[Database] = None):
         self.config = config
         self.db = db
+        # 最近一次主聊请求里接口实际返回的模型名（配置名可能只是别名）。
+        self.last_served_model = ""
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -270,6 +272,9 @@ class LLMGateway:
                             chunk = json.loads(data_part)
                         except json.JSONDecodeError:
                             continue
+
+                        if purpose == "main_chat" and chunk.get("model"):
+                            self.last_served_model = str(chunk["model"])
 
                         # 捕获 usage 信息
                         if "usage" in chunk and chunk["usage"]:

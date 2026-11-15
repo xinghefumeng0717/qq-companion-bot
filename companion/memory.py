@@ -155,23 +155,71 @@ class MemoryManager:
     # 1. 工作记忆 (turns)
     # ==========================================
 
-    async def get_recent_turns(self, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_recent_turns(
+        self, limit: int = 10, before_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         """获取最近的工作记忆（最近 limit 轮，即最多 limit*2 条消息，按时间升序）
         截取后若首条为 assistant 则裁掉到以 user 开头为止（保持严格的 user/assistant 对话结构）
+
+        before_id：只取这条记录之前的历史。本轮用户原话已先入库时，用它把"当前这句"
+        排除在历史之外，避免同一句话在提示词里出现两次。
         """
-        rows = await self.db.fetchall(
-            """
-            SELECT id, role, content, proactive, has_image, created_at
-            FROM turns
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit * 2,),
-        )
+        if before_id is None:
+            rows = await self.db.fetchall(
+                """
+                SELECT id, role, content, proactive, has_image, created_at
+                FROM turns
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit * 2,),
+            )
+        else:
+            rows = await self.db.fetchall(
+                """
+                SELECT id, role, content, proactive, has_image, created_at
+                FROM turns
+                WHERE id < ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(before_id), limit * 2),
+            )
         turns = [dict(r) for r in reversed(rows)]
         while turns and turns[0]["role"] != "user":
             turns.pop(0)
         return turns
+
+    async def save_user_turn(self, user_msg: str, has_image: bool = False) -> int:
+        """他的话一到就先入库，返回记录 id；生成或投递中途出事也不会丢他这句。"""
+        cur = await self.db.execute(
+            """
+            INSERT INTO turns (role, content, proactive, has_image, created_at)
+            VALUES ('user', ?, 0, ?, ?)
+            """,
+            (user_msg, 1 if has_image else 0, now_str()),
+        )
+        return int(cur.lastrowid or 0)
+
+    async def save_assistant_turn(self, bot_msg: str) -> int:
+        """只保存确认送达的正文，返回记录 id，供真实动作记录挂靠到这一轮。"""
+        cur = await self.db.execute(
+            """
+            INSERT INTO turns (role, content, proactive, has_image, created_at)
+            VALUES ('assistant', ?, 0, 0, ?)
+            """,
+            (bot_msg, now_str()),
+        )
+        return int(cur.lastrowid or 0)
+
+    async def finish_turn(self) -> None:
+        """一轮收尾：递增总轮数，并在后台非阻塞触发日记归档检查。"""
+        await self.db.execute(
+            "UPDATE counters SET value = value + 1 WHERE key = ?",
+            (COUNTER_KEY_TOTAL_TURNS,),
+        )
+        # 异步非阻塞执行日记归档检查（加锁防并发，PLAN §1.1）
+        asyncio.create_task(self.check_and_trigger_diary_archive())
 
     async def save_turn_pair(
         self,
@@ -179,46 +227,22 @@ class MemoryManager:
         bot_msg: Optional[str],
         has_image: bool = False,
     ) -> None:
-        """保存一轮对话（用户消息 + 机器人回复），递增总轮数，并在后台非阻塞触发日记归档。
-
-        bot_msg 传 None 表示她本轮选择沉默（[沉默]）：只落用户消息，不落 assistant 记录，
-        避免 turns 里出现空回复污染后续工作记忆。
-        """
-        current_time = now_str()
-        await self.db.execute(
-            """
-            INSERT INTO turns (role, content, proactive, has_image, created_at)
-            VALUES ('user', ?, 0, ?, ?)
-            """,
-            (user_msg, 1 if has_image else 0, current_time),
-        )
+        """一次保存一轮对话（用户消息 + 机器人回复）；bot_msg 为 None 时只落用户消息。"""
+        await self.save_user_turn(user_msg, has_image=has_image)
         if bot_msg is not None:
-            await self.db.execute(
-                """
-                INSERT INTO turns (role, content, proactive, has_image, created_at)
-                VALUES ('assistant', ?, 0, 0, ?)
-                """,
-                (bot_msg, current_time),
-            )
+            await self.save_assistant_turn(bot_msg)
+        await self.finish_turn()
 
-        # 更新计数器
-        await self.db.execute(
-            "UPDATE counters SET value = value + 1 WHERE key = ?",
-            (COUNTER_KEY_TOTAL_TURNS,),
-        )
-
-        # 异步非阻塞执行日记归档检查（加锁防并发，PLAN §1.1）
-        asyncio.create_task(self.check_and_trigger_diary_archive())
-
-    async def save_proactive_turn(self, bot_msg: str) -> None:
-        """保存一条机器人主动发送的消息"""
-        await self.db.execute(
+    async def save_proactive_turn(self, bot_msg: str) -> int:
+        """保存一条机器人主动发送的消息，返回记录 id"""
+        cur = await self.db.execute(
             """
             INSERT INTO turns (role, content, proactive, has_image, created_at)
             VALUES ('assistant', ?, 1, 0, ?)
             """,
             (bot_msg, now_str()),
         )
+        return int(cur.lastrowid or 0)
 
     async def get_last_assistant_turn_time(self) -> Optional[datetime]:
         """最近一条 assistant 消息的落库时间；她从没回过话（或时间戳损坏）返回 None。
@@ -612,7 +636,7 @@ class MemoryManager:
             return []
 
         now_dt = now or datetime.now()
-        scored_diaries: List[Tuple[float, float, str]] = []
+        scored_diaries: List[Tuple[float, float, str, Any]] = []
 
         for r in rows:
             importance = float(r["importance"] or 5)
@@ -630,7 +654,7 @@ class MemoryManager:
                 sort_weight = strength
                 if current_valence < 0 and sentiment in NEGATIVE_SENTIMENTS:
                     sort_weight *= 1.5
-                scored_diaries.append((sort_weight, strength, r["content"]))
+                scored_diaries.append((sort_weight, strength, r["content"], r["created_at"]))
 
         # 按加权排序降序，取最多 15 条
         scored_diaries.sort(key=lambda x: x[0], reverse=True)
@@ -638,14 +662,16 @@ class MemoryManager:
 
         # 前缀分级：>=5 "清晰地记得"、>=2 "记得"、>=0.5 "隐约记得"
         result = []
-        for _, strength, content in top_diaries:
+        for _, strength, content, created_at in top_diaries:
             if strength >= 5.0:
                 prefix = "清晰地记得: "
             elif strength >= 2.0:
                 prefix = "记得: "
             else:
                 prefix = "隐约记得: "
-            result.append(f"{prefix}{content}")
+            # 带上写下的日期：摘要里的"明晚/今天"按那天算，隔天再读不会错位。
+            day = mmdd_of(created_at)
+            result.append(f"{prefix}{content}（{day} 写下）" if day else f"{prefix}{content}")
 
         return result
 
