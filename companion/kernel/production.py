@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional, Sequence
 
+from companion.behavior_tuning import allow_content_voice
 from companion.kernel.contracts import (
     DeliveryPlan,
     DeliveryResult,
@@ -453,11 +454,13 @@ class KernelTurnHandler:
         except Exception as exc:
             logger.warning("[Kernel] 正在输入异常，直接发送: %s", exc)
 
-    def _content_voice(self, draft: Any, plan: DeliveryPlan, planner: Any, allowed: bool) -> tuple[DeliveryPlan, str]:
+    def _content_voice(self, draft: Any, plan: DeliveryPlan, planner: Any, allowed: bool, mood: Any = None) -> tuple[DeliveryPlan, str]:
         """她没被要求发语音时，由程序看内容挑一句适合念的；只换载体，不改原话。
 
         挑中的那句必须恰好是一条完整气泡，否则保持文字。普通回复和主动消息共用这一处。
         """
+        if mood is not None and not allow_content_voice(mood):
+            return plan, "心情或冷落状态不适合自动语音"
         choose = getattr(planner, "plan", None)
         if not callable(choose):
             return plan, ""
@@ -481,7 +484,7 @@ class KernelTurnHandler:
 
         async def _pick() -> Any:
             try:
-                turns = await self.memory.get_recent_turns(limit=6)
+                turns = await self.memory.get_recent_turns(limit=8)   # 心情差时冷却会拉长到 7 轮，要取够
                 ids = [t["id"] for t in turns if t.get("role") == "assistant" and t.get("id")]
                 return await picker.pick(user_text, draft.text, ids)
             except Exception as exc:
@@ -604,7 +607,7 @@ class KernelTurnHandler:
             max_chars=self._runtime._voice_max_chars(),
         )
         allowed = await self.proactive._voice_gate_ok()
-        plan, voice_reason = self._content_voice(result.draft, result.plan, planner, allowed)
+        plan, voice_reason = self._content_voice(result.draft, result.plan, planner, allowed, result.snapshot.mood)
 
         # typing 只计算仍以文字投递的气泡；语音不是她“打出来”的字。
         actions_by_bubble = {action.bubble_id: action for action in plan.actions}
@@ -805,7 +808,8 @@ class KernelTurnHandler:
             try:
                 gate_ok, _why = await self._runtime._check_voice_gate("")
                 plan, _reason = self._content_voice(
-                    result.draft, plan, getattr(self._runtime, "voice_planner", None), gate_ok
+                    result.draft, plan, getattr(self._runtime, "voice_planner", None), gate_ok,
+                    result.snapshot.mood,
                 )
             except Exception as exc:
                 logger.warning("[Kernel] 内容语音规划异常，本轮按文字发送: %s", exc)

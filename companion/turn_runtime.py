@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Callable, Coroutine, List, Optional, Tuple
 
 from companion.assembler import PromptAssembler
+from companion.behavior_tuning import first_reply_free_bounds
 from companion.config import Config
 from companion.persona import holiday_span
 from companion.voice_planner import VoicePlanner, is_voice_request
@@ -80,7 +81,12 @@ class TurnRuntime:
         if is_busy:
             delay = random.uniform(timing.first_reply_busy_delay_min, timing.first_reply_busy_delay_max)
         else:
-            delay = random.uniform(timing.first_reply_free_delay_min, timing.first_reply_free_delay_max)
+            try:
+                affection = await self.assembler.affection.get_state()
+            except Exception:
+                affection = {}
+            low, high = first_reply_free_bounds(timing, affection)
+            delay = random.uniform(low, high)
         logger.info(
             "[Timing] 首条延迟 %.1f 秒（作息：%s，%s）", delay, activity, "忙" if is_busy else "闲"
         )

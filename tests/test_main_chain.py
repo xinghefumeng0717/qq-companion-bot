@@ -11,6 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from companion.behavior_tuning import (
+    expression_cooldown_turns,
+    first_reply_free_bounds,
+    proactive_interval_bounds,
+)
 from companion.kernel.context import ContextBuilder
 from companion.kernel.contracts import SendReceipt
 from companion.kernel.delivery import (
@@ -100,6 +105,7 @@ class Chain:
         stack = make_engine_stack(db, persona_path=card_path())
         self.db = db
         self.memory = stack.memory
+        self.mood = stack.mood
         self.events = RuntimeEventStore(db)
         self.gateway = ScriptedGateway(replies)
         self.sender = ScriptedSender(sender_script)
@@ -524,17 +530,17 @@ async def test_plain_information_is_not_voiced(make_chain):
 # ---------- 系统替她挑表情 ----------
 
 async def test_system_picked_sticker_follows_the_last_bubble_and_is_read_back(make_chain):
-    chain = await make_chain(["第一句\n第二句", "嗯"], picks=["开心"])
+    chain = await make_chain(["第一句\n第二句", "嗯"], picks=["庆祝"])
     await chain.say("今天发工资了")
     assert [channel for channel, _ in chain.sender.sent] == ["text", "text", "sticker"]
     assert (await chain.turns())[1] == ("assistant", "第一句\n第二句")   # 表情不进正文
     await chain.say("哈哈")
     notes = chain.delivery_notes()
-    assert notes and "还发了一个表情“开心”" in notes[0]
+    assert notes and "还发了一个表情“庆祝”" in notes[0]
 
 
 async def test_expression_cools_down_and_ignores_unknown_names(make_chain):
-    chain = await make_chain(["甲", "乙", "丙"], picks=["开心", "收到", "不存在的名字"])
+    chain = await make_chain(["甲", "乙", "丙"], picks=["庆祝", "收到", "不存在的名字"])
     await chain.say("一")
     await chain.say("二")          # 冷却中：不调用挑选，也不发
     assert len(chain.pick_calls) == 1
@@ -542,7 +548,7 @@ async def test_expression_cools_down_and_ignores_unknown_names(make_chain):
 
 
 async def test_sticker_send_failure_keeps_the_words_she_said(make_chain):
-    chain = await make_chain(["就这句"], picks=["开心"], sender_script=["ok", "reject"])
+    chain = await make_chain(["就这句"], picks=["庆祝"], sender_script=["ok", "reject"])
     await chain.say("在吗")
     assert chain.sender.sent == [("text", "就这句")]
     assert await chain.turns() == [("user", "在吗"), ("assistant", "就这句")]
@@ -574,3 +580,24 @@ async def test_unanswered_proactive_pings_are_part_of_what_happened(make_chain):
     chain.handler.proactive.get_unanswered_count = chain.unanswered_getter
     await chain.say("刚醒")
     assert "你之前主动找过他 1 次，他到现在才回" in chain.state_note()
+
+# ---------- 心理状态只微调系统旋钮，不改明确请求 ----------
+
+def test_behavior_tuning_keeps_the_agreed_directions_and_caps():
+    timing = SimpleNamespace(first_reply_free_delay_min=5.0, first_reply_free_delay_max=30.0)
+    assert first_reply_free_bounds(timing, {"composite": 80}) == (4.0, 24.0)
+    assert first_reply_free_bounds(timing, {"composite": 20}) == (6.0, 36.0)
+
+    proactive = SimpleNamespace(wake_interval_min=20, wake_interval_max=40)
+    assert proactive_interval_bounds(proactive, {"composite": 80}, {"v": 2}) == (17.0, 34.0)
+    assert proactive_interval_bounds(proactive, {"composite": 20}, {"v": -1}) == (30.0, 60.0)
+    assert expression_cooldown_turns({"v": 6, "a": 3}) == 4
+    assert expression_cooldown_turns({"v": -1, "a": 1}) == 7
+
+
+async def test_bad_mood_suppresses_content_voice_but_not_an_explicit_request(make_chain):
+    chain = await make_chain(["晚安，早点睡", "就这一句"], content_voice=True)
+    await chain.mood.save_state({"v": -1.0, "a": 1.0, "t": 7.0, "frustration": 0.0})
+    await chain.say("我去睡了")
+    await chain.say("发条语音听听")
+    assert chain.sender.sent == [("text", "晚安，早点睡"), ("voice", "就这一句")]

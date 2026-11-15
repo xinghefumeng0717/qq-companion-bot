@@ -9,6 +9,7 @@ import asyncio
 import logging
 from typing import Any, Optional, Sequence
 
+from companion.behavior_tuning import expression_cooldown_turns
 from companion.faces import face_id_by_name, is_sendable_face_id
 from companion.gateway import parse_llm_json
 from companion.prompts import PROMPT_FACE_LIST
@@ -31,6 +32,7 @@ class ExpressionPicker:
         runtime_events: Any,
         *,
         enabled: bool = True,
+        mood: Any = None,
         cooldown_turns: int = 5,
         no_repeat: int = 5,
         timeout: float = 6.0,
@@ -39,6 +41,7 @@ class ExpressionPicker:
         self.stickers = stickers
         self.runtime_events = runtime_events
         self.enabled = enabled
+        self.mood = mood
         self.cooldown_turns = max(0, int(cooldown_turns))
         self.no_repeat = max(0, int(no_repeat))
         self.timeout = timeout
@@ -86,7 +89,9 @@ class ExpressionPicker:
             return None
         try:
             recent = await self._recent()
-            cooling = set(list(recent_assistant_turn_ids)[-self.cooldown_turns:]) if self.cooldown_turns else set()
+            mood = await self.mood.get_state() if self.mood is not None else {}
+            cooldown = expression_cooldown_turns(mood, self.cooldown_turns)
+            cooling = set(list(recent_assistant_turn_ids)[-cooldown:]) if cooldown else set()
             if any(row.get("evidence_turn_id") in cooling for row in recent):
                 return None
             exclude = {str(row.get("content") or "") for row in recent[: self.no_repeat]}

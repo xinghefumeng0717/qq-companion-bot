@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from companion.affection import AffectionEngine
+from companion.behavior_tuning import proactive_interval_bounds
 from companion.datefmt import relativize_dates
 from companion.config import ProactiveConfig, TimingConfig
 from companion.db import (
@@ -704,9 +705,13 @@ class ProactiveScheduler:
         """后台轮询主循环"""
         while self._running:
             # 随机休眠 [min, max] 分钟
-            interval_min = random.uniform(
-                self.config.wake_interval_min, self.config.wake_interval_max
-            )
+            try:
+                affection = await self.affection.get_state()
+                mood = await self.mood.get_state()
+            except Exception:
+                affection, mood = {}, {}
+            low, high = proactive_interval_bounds(self.config, affection, mood)
+            interval_min = random.uniform(low, high)
             sleep_sec = interval_min * 60.0
             logger.debug(f"[Proactive] 主动调度器休眠 {interval_min:.1f} 分钟")
             try:

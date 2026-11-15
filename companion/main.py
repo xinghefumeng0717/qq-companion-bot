@@ -289,6 +289,7 @@ class CompanionBot:
             vision_gateway=self.gateway,
             expression_picker=ExpressionPicker(
                 self.gateway, self.stickers, self.runtime_events,
+                mood=self.mood,
                 enabled=getattr(config.reply, "expressions", True) is True,
             ),
         )
