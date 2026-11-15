@@ -80,6 +80,17 @@ def test_format_incoming_messages_single_and_sugar_face():
     assert "[face:" not in combined
 
 
+def test_sticker_image_is_a_tone_attachment_not_a_photo():
+    msg = IncomingMessage(
+        message_id=1, quoted_message_id=None,
+        text="偷笑，带点故意逗你的意思", kind="image",
+        payload={"media_role": "sticker"},
+    )
+    result = format_incoming_messages([msg])
+    assert result == "附带表情的语气：偷笑，带点故意逗你的意思"
+    assert "图片" not in result
+
+
 def test_format_incoming_messages_merges_text_and_face_in_both_orders():
     """测试文本+表情（两种顺序）合成一个自然整体，表情不成为独立话题。"""
     text_msg = IncomingMessage(message_id=201, text="睡了啊那肯定", kind="text")

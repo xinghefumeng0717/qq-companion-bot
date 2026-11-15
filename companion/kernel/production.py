@@ -63,13 +63,14 @@ _FACE_KINDS = {"face", "emoji", "sticker"}
 
 
 def _is_face_only(user_text: str, batch: Sequence[dict[str, Any]], has_image: bool) -> bool:
-    """这一批是不是只有表情：没有任何文字、图片或引用。"""
-    if has_image:
-        return False
+    """这一批是不是只有表情：没有文字或普通图片；表情的视觉附件不算新话题。"""
     structured = [item.get("parts") for item in batch if item.get("parts") is not None]
     if structured and len(structured) == len(batch):
         kinds = [str(part.get("kind") or "text").lower() for parts in structured for part in parts]
+        # 商城表情下载的图片只是视觉附件，不改变“整轮只有表情”的事实。
         return bool(kinds) and all(kind in _FACE_KINDS for kind in kinds)
+    if has_image:
+        return False
     return bool(_FACE_ONLY_TEXT_RE.match(user_text or ""))
 
 
@@ -186,13 +187,16 @@ def _turn_input(
                 )
             if item_has_image:
                 # 附加图片消息，复用该消息的 message_id 与引用 payload
+                image_payload = dict(payload)
+                if any(str(part.get("kind") or "").lower() in _FACE_KINDS for part in parts):
+                    image_payload["media_role"] = "sticker"
                 messages.append(
                     IncomingMessage(
                         message_id=message_id,
                         quoted_message_id=quoted_id,
                         text=item_image_desc,
                         kind="image",
-                        payload=payload,
+                        payload=image_payload,
                     )
                 )
             elif not has_parts and quoted_id is not None:
@@ -500,6 +504,55 @@ class KernelTurnHandler:
         ),)
         return dataclasses.replace(plan, actions=actions)
 
+    async def _face_reaction(self, user_text: str, image_desc: str, user_turn_id: int) -> None:
+        """纯表情不硬写话：由系统挑选回一个表情，或保持不回；只认真实回执。"""
+        picked = None
+        picker = self.expression_picker
+        if picker is not None:
+            try:
+                turns = await self.memory.get_recent_turns(limit=6)
+                ids = [t["id"] for t in turns if t.get("id")]
+                reaction_input = user_text + (f"\n表情语气：{image_desc}" if image_desc else "")
+                picked = await picker.pick(reaction_input, "", ids, reaction_only=True)
+            except Exception as exc:
+                logger.info("[Expression] 纯表情反应挑选失败，本轮不回: %s", exc)
+        tracer = self.delivery_executor.tracer
+        trace_id = tracer.new_trace()
+        if not picked:
+            tracer.record("expression_reaction", {"status": "silent"}, trace_id=trace_id)
+            logger.info("[Kernel] 纯表情轮次由系统收住，不调用主模型")
+            return
+        try:
+            receipt = await self.delivery_executor.sender.send_sticker(picked)
+        except Exception as exc:
+            tracer.record(
+                "expression_reaction", {"status": "failed", "error": str(exc)}, trace_id=trace_id
+            )
+            logger.info("[Kernel] 纯表情反应发送失败，不补写文字: %s", exc)
+            return
+        tracer.record(
+            "expression_reaction",
+            {"status": "sent", "message_id": receipt.message_id, "sticker": picked},
+            trace_id=trace_id,
+        )
+        events = self._delivery_action_events()
+        if events is not None:
+            try:
+                await events.record_delivery_actions(
+                    [{
+                        "channel": "sticker",
+                        "content": str(picked.get("desc") or ""),
+                        "metadata": {
+                            "message_id": receipt.message_id,
+                            "source": "expression_reaction",
+                            "sticker_desc": str(picked.get("desc") or ""),
+                        },
+                    }],
+                    evidence_turn_id=user_turn_id,
+                )
+            except Exception as exc:
+                logger.warning("[Kernel] 纯表情动作记录失败: %s", exc)
+
     async def _deliver(
         self, result: Any, plan: DeliveryPlan
     ) -> tuple[DeliveryResult, bool]:
@@ -739,6 +792,12 @@ class KernelTurnHandler:
         if await self._closing_face_only(user_text, batch, has_image_turn, user_turn_id):
             logger.info("[Kernel] 他已道别后只补了表情，本轮不回复")
             await self.memory.finish_turn()
+            return
+        if _is_face_only(user_text, batch, has_image_turn):
+            try:
+                await self._face_reaction(user_text, image_desc or "", user_turn_id)
+            finally:
+                await self.memory.finish_turn()
             return
 
         # 她拿起手机的第一条先晾一会儿（相当于还没看到消息）；等完再取时间、定语音、拼提示词。
