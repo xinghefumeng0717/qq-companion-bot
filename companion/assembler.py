@@ -200,9 +200,9 @@ class PromptAssembler:
             logger.error(f"[Assembler] 生成看法块异常: {e}")
             return ""
 
-    async def _build_diaries_block(self, current_v: float, now: Optional[datetime] = None) -> str:
+    async def _build_diaries_block(self, current_v: float, now: Optional[datetime] = None, query: str = "") -> str:
         try:
-            diaries = await self.memory.get_active_diaries(current_valence=current_v, now=now)
+            diaries = await self.memory.get_active_diaries(current_valence=current_v, now=now, query=query)
             if not diaries:
                 return ""
             items = "\n".join([f"  - {d}" for d in diaries])
@@ -377,7 +377,7 @@ class PromptAssembler:
             + await self._build_impressions_block()
             + await self._build_self_facts_block(user_message)
         )
-        diaries_block = await self._build_diaries_block(v, now=now_dt)
+        diaries_block = await self._build_diaries_block(v, now=now_dt, query=user_message)
         followups_block = await self._build_followups_block(now=now_dt) + await self._build_meetups_block(now=now_dt)
         suppressed_block = await self._build_suppressed_block(now=now_dt)
         if self.runtime_state_v1:

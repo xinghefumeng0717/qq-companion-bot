@@ -57,7 +57,7 @@ class FakeMemory:
         self._maybe_raise("get_self_facts_for_prompt")
         return ["我住在城西（10-08 说的）"]
 
-    async def get_active_diaries(self, current_valence: float = 2.0, now=None) -> List[str]:
+    async def get_active_diaries(self, current_valence: float = 2.0, now=None, query="") -> List[str]:
         self.calls.append("get_active_diaries")
         self._maybe_raise("get_active_diaries")
         return ["清晰地记得: 我们在食堂吃的火锅"]
@@ -182,7 +182,7 @@ async def test_model_sourced_memory_is_unverified_but_text_is_preserved():
     """模型自述和摘要保留原文，但不能包装成已核实的地点、计划或经历。"""
     memory = FakeMemory()
     memory.get_self_facts_for_prompt = lambda query="": _self_fact_text()
-    memory.get_active_diaries = lambda current_valence=2.0, now=None: _diary_text()
+    memory.get_active_diaries = lambda current_valence=2.0, now=None, query="": _diary_text()
     memory.get_live_desires_readonly = lambda limit=5, now=None: _desire_rows()
 
     blocks = await collect_memory_blocks(memory, self_memory=True)

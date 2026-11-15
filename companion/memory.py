@@ -568,51 +568,21 @@ class MemoryManager:
         return strength
 
     async def reinforce_memories(self, user_message: str) -> None:
-        """回忆加固：含‘还记得’/‘想你’时强度 >= 0.5 的日记 +1；与日记有 >= 3 个共同汉字时该条+1（同样只加固强度 >= 0.5 的日记）"""
+        """只加固与当前消息命中同一二字词组的可见日记；泛化的思念或问句不批量刷新。"""
         if not user_message:
             return
-
+        query_grams = self._bigram_set(user_message)
+        if not query_grams:
+            return
+        query_chars = self._content_chars(user_message)
+        rows = await self.db.fetchall(
+            "SELECT id, content, importance, recall_count, sentiment, created_at, last_recall_at FROM diary"
+        )
         current_time = now_str()
         now_dt = datetime.now()
-        # 1. 触发关键词加固（只加固当前强度 >= 0.5 的日记，与回忆注入可见阈值一致）
-        if "还记得" in user_message or "想你" in user_message:
-            rows = await self.db.fetchall(
-                """
-                SELECT id, importance, recall_count, sentiment, created_at, last_recall_at
-                FROM diary
-                """
-            )
-            reinforced = 0
-            for r in rows:
-                if self.calc_row_strength(r, now_dt, current_time) < RECALL_VISIBLE_THRESHOLD:
-                    continue
-                await self.db.execute(
-                    "UPDATE diary SET recall_count = recall_count + 1, last_recall_at = ? WHERE id = ?",
-                    (current_time, r["id"]),
-                )
-                reinforced += 1
-            if reinforced:
-                logger.info(f"[Memory] 触发关键词回忆加固 {reinforced} 条")
-            else:
-                logger.info("[Memory] 关键词触发但无可加固日记（强度均低于 0.5）")
-            return
-
-        # 2. 汉字共现加固 (≥ 3 个共同汉字)，与关键词分支同语义：已淡出的日记不得被复活
-        user_hanzi = set(re.findall(r"[\u4e00-\u9fa5]", user_message))
-        if len(user_hanzi) < 3:
-            return
-
-        rows = await self.db.fetchall(
-            """
-            SELECT id, content, importance, recall_count, sentiment, created_at, last_recall_at
-            FROM diary
-            """
-        )
         reinforced = 0
         for r in rows:
-            diary_hanzi = set(re.findall(r"[\u4e00-\u9fa5]", r["content"]))
-            common = user_hanzi.intersection(diary_hanzi)
-            if len(common) < 3:
+            if self._topic_relevance(query_grams, query_chars, r["content"]) <= 0:
                 continue
             if self.calc_row_strength(r, now_dt, current_time) < RECALL_VISIBLE_THRESHOLD:
                 continue
@@ -622,10 +592,12 @@ class MemoryManager:
             )
             reinforced += 1
         if reinforced:
-            logger.info(f"[Memory] 汉字共现回忆加固 {reinforced} 条")
+            logger.info(f"[Memory] 当前话题加固 {reinforced} 条日记")
 
-    async def get_active_diaries(self, current_valence: float = 2.0, now: Optional[datetime] = None) -> List[str]:
-        """按遗忘曲线计算记忆强度，返回按强度降序且分级前缀格式化的日记列表（最多 15 条）"""
+    async def get_active_diaries(
+        self, current_valence: float = 2.0, now: Optional[datetime] = None, query: str = ""
+    ) -> List[str]:
+        """遗忘强度决定能记起什么；当前话题命中时最多加倍排序权重，最多 15 条。"""
         rows = await self.db.fetchall(
             """
             SELECT id, content, importance, sentiment, recall_count, created_at, last_recall_at
@@ -637,6 +609,7 @@ class MemoryManager:
 
         now_dt = now or datetime.now()
         scored_diaries: List[Tuple[float, float, str, Any]] = []
+        query_grams, query_chars = self._bigram_set(query), self._content_chars(query)
 
         for r in rows:
             importance = float(r["importance"] or 5)
@@ -654,6 +627,8 @@ class MemoryManager:
                 sort_weight = strength
                 if current_valence < 0 and sentiment in NEGATIVE_SENTIMENTS:
                     sort_weight *= 1.5
+                relevance = self._topic_relevance(query_grams, query_chars, r["content"])
+                sort_weight *= 1.0 + min(relevance, 1.0)
                 scored_diaries.append((sort_weight, strength, r["content"], r["created_at"]))
 
         # 按加权排序降序，取最多 15 条
@@ -780,6 +755,12 @@ class MemoryManager:
         """字面相关度：两字词命中算 2 分、实字命中算 1 分，按事实长度开方归一（短句不吃亏也不占便宜）。"""
         hits = 2 * len(query_grams & self._bigram_set(fact)) + len(query_chars & self._content_chars(fact))
         return hits / math.sqrt(max(len(fact), 1))
+
+    def _topic_relevance(self, query_grams: set, query_chars: set, text: str) -> float:
+        """话题相关至少要有二字词组命中；单字撞上不加固也不提升日记排序。"""
+        if not query_grams & self._bigram_set(text):
+            return 0.0
+        return self._relevance(query_grams, query_chars, text)
 
     async def _closest_self_fact(self, text: str) -> Tuple[Optional[int], str, float, int]:
         target = self._char_set(text)
