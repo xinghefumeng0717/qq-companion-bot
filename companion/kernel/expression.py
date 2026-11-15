@@ -16,6 +16,12 @@ from companion.prompts import PROMPT_FACE_LIST
 
 logger = logging.getLogger(__name__)
 
+PICK_REACTION_SYSTEM_PROMPT = (
+    "对方刚单独发了一个表情，当前没有新的文字内容。请判断要不要顺手回一个表情。"
+    "大多数时候不回；只有这个反应明显适合当前情境时才选。不要输出任何解释。"
+    '只输出 JSON：{"pick": "表情名"}；不选时输出 {"pick": ""}。'
+)
+
 PICK_SYSTEM_PROMPT = (
     "聊天里的一方刚写完几句回复。请判断：发完这几句之后，要不要再顺手发一个表情。\n"
     "大多数时候不需要。只有某个表情的用法和这几句话的意思明显对得上时才选；拿不准就不选。\n"
@@ -83,9 +89,10 @@ class ExpressionPicker:
         user_text: str,
         reply_text: str,
         recent_assistant_turn_ids: Sequence[int] = (),
+        reaction_only: bool = False,
     ) -> Optional[dict[str, Any]]:
-        """返回要发的表情（{"desc", "file"} 或 {"desc", "face_id"}）；不发返回 None。"""
-        if not self.enabled or not (reply_text or "").strip():
+        """返回要发的表情；reaction_only 允许没有文字原稿的纯表情反应。"""
+        if not self.enabled or (not (reply_text or "").strip() and not reaction_only):
             return None
         try:
             recent = await self._recent()
@@ -103,10 +110,15 @@ class ExpressionPicker:
                 f"这一方回：\n{reply_text.strip()}\n\n"
                 "可选的表情：\n" + "\n".join(lines)
             )
+            if reaction_only:
+                user_prompt = (
+                    f"对方单独发了一个表情：\n{(user_text or '').strip()}\n\n"
+                    "可选的回应表情：\n" + "\n".join(lines)
+                )
             raw = await asyncio.wait_for(
                 self.gateway.chat(
                     messages=[
-                        {"role": "system", "content": PICK_SYSTEM_PROMPT},
+                        {"role": "system", "content": PICK_REACTION_SYSTEM_PROMPT if reaction_only else PICK_SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.3,

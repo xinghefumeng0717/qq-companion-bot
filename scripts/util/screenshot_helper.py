@@ -4,12 +4,11 @@
 data/screenshot_demo.db —— 绝不使用生产库 data/companion.db，
 否则会把假日记、假事实、假计费记录混进真实相处数据里。
 
-命令行参数（都已给默认值，不带参数跑 = 与旧版行为一致：青梓 + journal、桌面 1200x960、原输出目录）：
+命令行参数（都已给默认值，不带参数跑 = 默认卡 + 卡里的皮肤（journal 兜底）、桌面 1200x960、原输出目录）：
   --width/--height  截图视口尺寸（默认 1200x960 = 桌面端）
   --sizes           一次跑多档宽度，如 "1200x960,390x844"（给定时忽略 --width/--height，
                     文件名自动加 _{宽} 后缀，避免互相覆盖）
-  --card            角色卡目录（默认 characters/qingzi；指定带 theme/skin.json 的卡
-                    如 characters/si 时，主题会按卡里的皮肤走）
+  --card            角色卡目录（默认 characters/qingzi；默认按卡里的皮肤走主题）
   --theme           journal / plain / endfield（显式指定时优先于卡里的皮肤声明）
   --out             输出目录（默认仍是原来的绝对路径）
   --keep            保留临时浏览器 profile 目录（排查 CDP 问题时用）
@@ -220,9 +219,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help=f"视口宽度，默认 {DEFAULT_WIDTH}")
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT, help=f"视口高度，默认 {DEFAULT_HEIGHT}")
     parser.add_argument("--sizes", type=str, default="", help='多档尺寸，如 "1200x960,390x844"')
-    parser.add_argument("--card", type=str, default="characters/qingzi", help="角色卡目录")
+    parser.add_argument("--card", type=str, default="characters/qingzi", help="角色卡目录（默认按卡里的皮肤走主题）")
     parser.add_argument("--theme", type=str, default="", choices=["", "journal", "plain", "endfield"],
-                        help="看板主题；留空交给 config/角色卡皮肤决定")
+                        help="看板主题；留空交给角色卡皮肤决定（journal 兜底）")
     parser.add_argument("--out", type=str, default=OUTPUT_DIR, help="输出目录，默认沿用原路径")
     parser.add_argument("--keep", action="store_true", help="保留临时浏览器 profile 目录（排查用）")
     return parser.parse_args(argv)
@@ -272,6 +271,16 @@ def ensure_demo_log() -> str:
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(DEMO_LOG_LINES) + "\n")
     return path
+
+
+def admin_config_for(theme_arg: str) -> AdminConfig:
+    """只有显式 --theme 才写进 AdminConfig（任何实参都会触发 theme_explicit 哨兵）；
+    留空保持哨兵默认，让角色卡的 theme/pages / skin.json 决定主题（journal 兜底）。
+    """
+    kwargs = {"host": "127.0.0.1", "port": 8899}
+    if theme_arg:
+        kwargs["theme"] = theme_arg
+    return AdminConfig(**kwargs)
 
 
 async def main(args=None):
@@ -360,7 +369,7 @@ async def main(args=None):
         is_connected = True
 
     admin = AdminServer(
-        config=AdminConfig(host="127.0.0.1", port=8899, theme=args.theme or "journal"),
+        config=admin_config_for(args.theme),
         persona=persona,
         affection=affection,
         mood=mood,

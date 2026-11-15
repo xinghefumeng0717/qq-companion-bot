@@ -448,6 +448,26 @@ class TestOneBotInputStatus(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.seen, [], "别人的输入状态跟我们无关")
         self.assertFalse(self.client._peer_typing)
 
+    async def test_商城表情保留类型并进入图片下载(self):
+        seen = []
+
+        async def callback(message, image_path, message_id):
+            seen.append((message, image_path, message_id))
+
+        async def fake_download(_url):
+            return "/tmp/sticker.gif"
+
+        self.client.on_message_callback = callback
+        self.client._download_image = fake_download
+        await self.client._process_incoming_message([
+            {"type": "image", "data": {"summary": "动画表情", "emoji_id": "abc", "url": "https://img"}}
+        ], 123)
+        self.assertEqual(len(seen), 1)
+        message, image_path, message_id = seen[0]
+        self.assertEqual(message.parts, ({"kind": "face", "text": "[动画表情]"},))
+        self.assertEqual(image_path, "/tmp/sticker.gif")
+        self.assertEqual(message_id, 123)
+
     async def test_陌生事件不进这条链(self):
         await self.feed(_typing_event(1, sub_type="poke"))
         await self.feed(_typing_event(7))

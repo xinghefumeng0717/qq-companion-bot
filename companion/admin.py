@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 from companion import dashboard
 from companion import dashboard_pages as pages
+from companion import skin_api
 from companion.admin_render import (
     HTML_STYLE,
     format_chinese_date,
@@ -107,6 +108,8 @@ __all__ = [
 # 皮肤对应的看板主题：skin.json 可以写 "theme" 显式声明（plain / endfield）；
 # 没写时按 endfield——终末地工业风是专门承接角色卡皮肤的那套外壳。
 SKIN_DEFAULT_THEME = "endfield"
+# 新式皮肤：服务端只出 /api/v1/* 数据，页面来自角色卡 theme/pages/（缺页用 companion/skins/default/）
+SKIN_PAGES_THEME = "skin"
 
 
 def card_theme(char_dir: str) -> str:
@@ -138,13 +141,19 @@ def resolve_theme(config: AdminConfig, char_dir: str) -> str:
 
     `theme_explicit` 由 Config.load 记录（dataclass 哨兵也保证程序里显式传值算显式）：
     · 显式写了（包括 journal）→ 严格用 config，不再看卡；
+    · 没写但卡目录有 theme/pages/ → skin（角色卡自己的整套页面，见 skin_api.py）；
     · 没写但卡目录有 theme/skin.json → 皮肤的 theme（没声明就 endfield）；
     · 都没有 → journal（旧卡行为不变）。
     """
     theme = str(getattr(config, "theme", "") or "").strip().lower()
     explicit = bool(getattr(config, "theme_explicit", False)) or theme != "journal"
     if explicit:
+        if theme == SKIN_PAGES_THEME:
+            return theme
         return theme if theme in dashboard.THEMES else "journal"
+    # 卡里有 theme/pages/（新式皮肤：每个角色自己画的整套页面）优先于旧式 skin.json
+    if skin_api.card_pages_dir(char_dir):
+        return SKIN_PAGES_THEME
     return card_theme(char_dir) or "journal"
 
 
@@ -163,6 +172,7 @@ class AdminServer:
         onebot: Optional[Any] = None,
         db_path: str = "data/companion.db",
         backup_dir: str = "data/backup/daily",
+        trace_dir: str = "data/turn_traces",
     ):
         self.config = config
         self.persona = persona
@@ -176,6 +186,7 @@ class AdminServer:
         self.onebot = onebot
         self.db_path = db_path
         self.backup_dir = backup_dir
+        self.trace_dir = trace_dir
         self.start_time = datetime.now()
         self._runner: Optional[web.AppRunner] = None
         # 主题三层：config 显式 > 卡里的皮肤 > journal（旧卡不变）
@@ -226,12 +237,20 @@ class AdminServer:
     async def start(self) -> None:
         warn_if_admin_exposed_without_token(self.config)
         app = web.Application()
-        app.router.add_get("/", self.handle_overview)
+        if self.theme == SKIN_PAGES_THEME:
+            for path, page in skin_api.PAGES.items():
+                app.router.add_get(path, self._skin_page_handler(page))
+        else:
+            app.router.add_get("/", self.handle_overview)
+            app.router.add_get("/memory", self.handle_memory)
+            app.router.add_get("/debug", self.handle_debug)
+            app.router.add_get("/costs", self.handle_costs)
+            app.router.add_get("/stickers", self.handle_stickers)
+            app.router.add_get("/logs", self.handle_logs)
+            app.router.add_get("/admin", self.handle_admin)
+        app.router.add_get("/theme/{path:.+}", self.handle_theme_file)
+        app.router.add_get("/api/v1/{name}", self.handle_api_v1)
         app.router.add_get("/api/status", self.handle_api_status)
-        app.router.add_get("/memory", self.handle_memory)
-        app.router.add_get("/debug", self.handle_debug)
-        app.router.add_get("/costs", self.handle_costs)
-        app.router.add_get("/stickers", self.handle_stickers)
         app.router.add_get("/stickers/img/{name}", self.handle_sticker_image)
         app.router.add_get("/favicon.png", self.handle_favicon)
         app.router.add_get("/apple-touch-icon.png", self.handle_apple_touch_icon)
@@ -239,8 +258,6 @@ class AdminServer:
         app.router.add_get("/assets/{font}", self.handle_display_font)
         app.router.add_get("/skin/{path:.+}", self.handle_skin_file)
         app.router.add_get("/api/home", self.handle_api_home)
-        app.router.add_get("/logs", self.handle_logs)
-        app.router.add_get("/admin", self.handle_admin)
         app.router.add_post("/admin/backup", self.handle_admin_backup)
         app.router.add_post("/admin/restart", self.handle_admin_restart)
         app.router.add_post("/admin/reset", self.handle_admin_reset)
@@ -1199,7 +1216,12 @@ class AdminServer:
         if not self._read_authorized(request):
             return self._read_forbidden_response(request)
         skin = self._image_skin()
-        return web.json_response(await dashboard.collect_home(self, skin, self._token_query()))
+        data = await dashboard.collect_home(self, skin, self._token_query())
+        try:
+            data.update(await skin_api.home_extra(self))
+        except Exception as e:  # 多出来的字段取不到不影响原来的小窝
+            logger.warning(f"[Admin] /api/home 附加字段取数失败: {e}")
+        return web.json_response(data)
 
     # ==========================================
     # 6. /logs 日志 (纸面小票风日志窗)
@@ -1238,6 +1260,65 @@ class AdminServer:
     # ==========================================
     # 7. /api/status 状态 API (JSON)
     # ==========================================
+    # ==========================================
+    # 新式皮肤（theme = skin）：页面来自角色卡，数据走 /api/v1/*
+    # ==========================================
+    def _skin_page_handler(self, page: str):
+        async def handler(request: web.Request) -> web.Response:
+            if not self._read_authorized(request):
+                return self._read_forbidden_response(request)
+            path = skin_api.find_file(self._skin_pages_dir(), f"{page}.html")
+            if path is None:
+                return web.Response(text="这一页皮肤里没有，默认皮肤也缺了。", status=404)
+            with open(path, "r", encoding="utf-8") as f:
+                return web.Response(text=f.read(), content_type="text/html", headers={"Cache-Control": "no-store"})
+
+        return handler
+
+    def _skin_pages_dir(self) -> Optional[str]:
+        return skin_api.card_pages_dir(getattr(self.persona, "base_dir", "") or "")
+
+    async def handle_theme_file(self, request: web.Request) -> web.Response:
+        """皮肤里的静态文件（css/js/字体/图片）。不带 token 也能读：
+        这些只是页面的样子，和仓库里的文件一样；数据一律走带鉴权的 /api/v1/*。
+        所以 theme/pages/ 里不要放任何隐私。"""
+        rel = request.match_info.get("path", "")
+        path = skin_api.find_file(self._skin_pages_dir(), rel)
+        if path is None:
+            return web.Response(text="Not Found", status=404)
+        cache = "public, max-age=31536000" if path.endswith(".woff2") else "no-cache"
+        with open(path, "rb") as f:
+            body = f.read()
+        return web.Response(body=body, headers={"Content-Type": skin_api.content_type(path), "Cache-Control": cache})
+
+    async def handle_api_v1(self, request: web.Request) -> web.Response:
+        if not self._read_authorized(request):
+            return web.json_response({"status": "error", "error": "未授权：缺少或错误的 admin token"}, status=403)
+        name = request.match_info.get("name", "")
+        try:
+            if name == "now":
+                data = await skin_api.api_now(self)
+            elif name == "memory":
+                data = await skin_api.api_memory(self)
+            elif name == "debug":
+                data = await skin_api.api_debug(self, request.query.get("turn", ""))
+            elif name == "costs":
+                data = await skin_api.api_costs(self)
+            elif name == "stickers":
+                data = skin_api.api_stickers(self)
+            elif name == "logs":
+                data = skin_api.api_logs(self, request.query.get("level", ""))
+            elif name == "admin":
+                data = await skin_api.api_admin(self)
+            else:
+                return web.json_response({"status": "error", "error": f"没有这个接口：{name}"}, status=404)
+        except Exception as e:
+            logger.exception(f"[SkinAPI] /api/v1/{name} 取数失败")
+            return web.json_response({"status": "error", "error": str(e)}, status=500)
+        return web.json_response(
+            data, dumps=lambda o: json.dumps(o, ensure_ascii=False), headers={"Cache-Control": "no-store"}
+        )
+
     async def handle_api_status(self, request: web.Request) -> web.Response:
         # 读页面鉴权一并覆盖 /api/status：它不只是"活着没"的健康检查，
         # 还带着 stage_name / composite / today_cost——关系状态与开销。

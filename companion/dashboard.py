@@ -902,6 +902,7 @@ async def collect_memory(srv: Any) -> Dict[str, Any]:
             item = {
                 "t": r["content"],
                 "d": _rel(parse_dt(r["created_at"]), now),
+                "at": r["created_at"] or "",
                 "prev": (r["prev"] if table == "self_facts" else "") or "",
             }
             out["core" if r["core"] else "recent"].append(item)
@@ -916,14 +917,14 @@ async def collect_memory(srv: Any) -> Dict[str, Any]:
         strength, _ = calc_diary_strength(float(r["importance"] or 5), int(r["recall_count"] or 0), str(r["sentiment"] or "平静"), days)
         diaries.append({
             "t": r["content"], "mood": r["sentiment"] or "平静",
-            "d": _rel(parse_dt(r["created_at"]), now),
+            "d": _rel(parse_dt(r["created_at"]), now), "at": r["created_at"] or "",
             # 墨迹随记忆强度变淡，但最淡也要看得清
             "op": round(0.62 + 0.38 * max(0.0, min(1.0, strength / 10.0)), 2),
         })
 
     meetups = [
         {"place": r["place"] or "", "plan": r["plan"] or "", "recap": r["recap"] or "",
-         "when": _rel(parse_dt(r["when_at"]), now), "pending": int(r["status"]) == 0}
+         "when": _rel(parse_dt(r["when_at"]), now), "at": r["when_at"] or "", "pending": int(r["status"]) == 0}
         for r in await srv.db.fetchall(
             "SELECT when_at, place, plan, status, recap FROM meetups WHERE status IN (0, 1) ORDER BY when_at DESC LIMIT 8"
         )

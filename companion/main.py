@@ -330,6 +330,7 @@ class CompanionBot:
             onebot=self.onebot,
             db_path=self.db_path,
             backup_dir="data/backup/daily",
+            trace_dir=config.reply.trace_dir,
         )
 
     async def _daily_arcs_topup(self) -> None:

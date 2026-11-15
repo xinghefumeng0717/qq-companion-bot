@@ -12,6 +12,12 @@ from companion.prompts import VISION_PERCEPTION_PROMPT
 
 logger = logging.getLogger(__name__)
 
+STICKER_VISION_PROMPT = (
+    "这是聊天中附带的一个表情。用一句短话说明它在对话里的语气或用途，"
+    "例如偷笑、撒娇、无语、告别、故意逗对方；先看画面和神态，不要写成图片赏析，"
+    "不要逐条罗列颜色与构图。拿不准就只说画面神态。"
+)
+
 
 async def extract_image_description(
     gateway: Any,

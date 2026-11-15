@@ -436,19 +436,35 @@ async def test_face_only_after_goodbye_gets_no_reply_but_is_remembered(make_chai
     assert chain.sender.sent[-1] == ("text", "新的一句")
 
 
-async def test_face_only_in_ordinary_chat_is_answered(make_chain):
-    chain = await make_chain(["下午画了幅山", "卖什么乖"])
+async def test_face_only_in_ordinary_chat_does_not_call_main_model(make_chain):
+    chain = await make_chain(["下午画了幅山"], picks=[""])
     await chain.say("下午在干嘛")
+    calls = len(chain.gateway.calls)
     await chain.say("[吃糖]")
-    assert chain.sender.sent[-1] == ("text", "卖什么乖")
+    assert len(chain.gateway.calls) == calls
+    assert (await chain.turns())[-1] == ("user", "[吃糖]")
 
 
-async def test_structured_face_is_shown_with_its_meaning(make_chain):
-    chain = await make_chain(["卖什么乖"])
+async def test_face_only_can_get_system_sticker_without_main_model(make_chain):
+    chain = await make_chain(["下午画了幅山"], picks=["", "庆祝"])
+    await chain.say("下午在干嘛")
+    calls = len(chain.gateway.calls)
+    await chain.say("[吃糖]")
+    assert len(chain.gateway.calls) == calls
+    assert [channel for channel, _ in chain.sender.sent] == ["text", "sticker"]
+    await chain.say("[吃糖]")
+    assert len(chain.pick_calls) == 2
+    assert [channel for channel, _ in chain.sender.sent] == ["text", "sticker"]
+    assert (await chain.turns())[-1] == ("user", "[吃糖]")
+
+
+async def test_structured_face_only_uses_system_reaction(make_chain):
+    chain = await make_chain([], picks=[""])
     batch = [{"index": 1, "text": "[吃糖]", "message_id": 1, "has_image": False,
               "parts": [{"kind": "face", "text": "[吃糖]"}]}]
     await chain.say("[吃糖]", batch)
-    assert "“吃糖”（卖萌、心情好）" in chain.last_prompt()[-1]["content"]
+    assert chain.gateway.calls == []
+    assert (await chain.turns()) == [("user", "[吃糖]")]
 
 
 # ---------- 主动消息走同一条链 ----------

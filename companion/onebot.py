@@ -506,12 +506,17 @@ class OneBotClient:
                 sdata = seg.get("data", {})
 
                 # 表情段先判：face / mface / 被 NapCat 转成 image 段的大表情。
-                # 命中即整段消费完：只并入文字标签，不再走下载/识图那条路
-                # （商城大表情虽然长得像图片，但它是一张脸，不该被当成"他发来一张照片"）。
+                # 保留表情类型；商城大表情同时下载画面，沿现有视觉链路识别，不当成照片。
                 face_tag = segment_face_tag(seg)
                 if face_tag is not None:
                     text_parts.append(face_tag)
                     parts.append({"kind": "face", "text": face_tag})
+                    if stype in {"mface", "image"}:
+                        img_url = sdata.get("url") or sdata.get("file")
+                        if img_url:
+                            local_path = await self._download_image(img_url)
+                            if local_path:
+                                image_local_path = local_path
                     continue
 
                 if stype == "text":

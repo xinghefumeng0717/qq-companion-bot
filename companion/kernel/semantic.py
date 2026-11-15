@@ -68,6 +68,8 @@ def _incoming_semantic(msg: IncomingMessage) -> str:
     if kind == "voice":
         return f"发来一条语音，内容是：“{raw}”" if raw else "发来一条语音"
     if kind == "image":
+        if msg.payload.get("media_role") == "sticker":
+            return f"附带表情的语气：{raw}" if raw else "附带表情的语气没有识别出来"
         return f"发来一张图片：{raw}" if raw else "发来一张图片"
     return raw
 

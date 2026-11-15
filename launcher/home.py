@@ -7,7 +7,9 @@
 - 她叫什么、皮肤（头像/插图/说法）从本地 config.toml 的 [character].path 指的卡里读；
 - 在线状态、心情、阶段从服务器看板的 /api/status、/api/home 读（经 SSH 隧道）；
 - 只监听 127.0.0.1；按钮操作要带本次启动随机生成的口令（防别的网页偷偷调用）；
-- 窗口关掉 90 秒后自动退出并断开隧道。
+- 窗口关掉 90 秒后自动退出并断开隧道；
+- 角色卡带新式皮肤（theme/pages/launcher.html）时，窗口用卡里那一页，样式文件走 /theme/，
+  卡里没有的文件用 companion/skins/default/ 兜底；窗口大小读那一页的 <meta name="launcher-size">。
 
 用法：
   pythonw launcher\\home.py              启动并弹出窗口
@@ -93,6 +95,27 @@ def load_identity(card_dir: str) -> Dict[str, Any]:
     return {"name": name, "skin": skin}
 
 
+def skin_launcher_page(card_dir: str) -> Optional[str]:
+    """角色卡皮肤里的小窝页面（theme/pages/launcher.html）；没有就 None，用 launcher/home.html。"""
+    path = os.path.join(card_dir, "theme", "pages", "launcher.html")
+    return path if os.path.isfile(path) else None
+
+
+def launcher_window_size(page_path: Optional[str]) -> str:
+    """皮肤页面可以用 <meta name="launcher-size" content="440,752"> 定窗口大小。"""
+    if page_path:
+        try:
+            import re
+
+            with open(page_path, "r", encoding="utf-8") as f:
+                m = re.search(r'<meta\s+name="launcher-size"\s+content="(\d{3,4}),(\d{3,4})"', f.read(4096))
+            if m:
+                return f"{m.group(1)},{m.group(2)}"
+        except OSError:
+            pass
+    return "980,660"
+
+
 def port_open(port: int, timeout: float = 1.5) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout):
@@ -117,7 +140,9 @@ class Home:
         cfg = read_local_config()
         self.token_query = f"?token={cfg['token']}" if cfg["token"] else ""
         self.theme = cfg["theme"]
-        ident = load_identity(os.path.join(PROJECT_ROOT, cfg["card"]))
+        self.card_dir = os.path.join(PROJECT_ROOT, cfg["card"])
+        self.skin_page = skin_launcher_page(self.card_dir)
+        ident = load_identity(self.card_dir)
         self.name: str = ident["name"]
         self.skin = ident["skin"]
         self.secret = secrets.token_urlsafe(16)
@@ -294,7 +319,7 @@ class Home:
 
 
 def make_handler(home: Home):
-    page_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home.html")
+    page_path = home.skin_page or os.path.join(os.path.dirname(os.path.abspath(__file__)), "home.html")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args: Any) -> None:  # 静默
@@ -325,6 +350,16 @@ def make_handler(home: Home):
                 if name in FONT_FILES and os.path.isfile(full):
                     with open(full, "rb") as f:
                         return self._send(200, f.read(), "font/woff2", "public, max-age=31536000")
+            if path.startswith("/theme/") and home.skin_page:
+                from urllib.parse import unquote
+
+                from companion.skin_api import content_type, find_file
+
+                full = find_file(os.path.dirname(home.skin_page), unquote(path[len("/theme/"):]))
+                if full and not full.endswith(".html"):
+                    with open(full, "rb") as f:
+                        cache = "public, max-age=31536000" if full.endswith(".woff2") else "no-cache"
+                        return self._send(200, f.read(), content_type(full), cache)
             if path.startswith("/skin/") and home.skin is not None:
                 from urllib.parse import unquote
 
@@ -368,11 +403,11 @@ def make_handler(home: Home):
     return Handler
 
 
-def open_window(url: str) -> None:
+def open_window(url: str, size: str = "980,660") -> None:
     """优先用 Edge 应用模式打开独立小窗；没有 Edge 时回退到默认浏览器。"""
     for edge in EDGE_PATHS:
         if os.path.isfile(edge):
-            subprocess.Popen([edge, f"--app={url}", "--window-size=980,660"])
+            subprocess.Popen([edge, f"--app={url}", f"--window-size={size}"])
             return
     webbrowser.open(url)
 
@@ -428,14 +463,15 @@ def main() -> None:
         make_shortcut()
         return
     url = f"http://127.0.0.1:{HOME_PORT}/"
+    size = launcher_window_size(skin_launcher_page(os.path.join(PROJECT_ROOT, read_local_config()["card"])))
     if port_open(HOME_PORT, 0.5):
-        open_window(url)  # 已经开着一个了：只把窗口再弹出来
+        open_window(url, size)  # 已经开着一个了：只把窗口再弹出来
         return
     home = Home()
     server = ThreadingHTTPServer(("127.0.0.1", HOME_PORT), make_handler(home))
     threading.Thread(target=home.poll_loop, daemon=True).start()
     threading.Thread(target=home.watchdog, args=(server,), daemon=True).start()
-    open_window(url)
+    open_window(url, size)
     try:
         server.serve_forever()
     finally:
