@@ -349,6 +349,7 @@ class KernelTurnHandler:
         proactive: Any,
         delivery_executor: DeliveryExecutor,
         vision_gateway: Any = None,
+        expression_picker: Any = None,
     ) -> None:
         self.kernel = kernel
         self._runtime = runtime
@@ -359,6 +360,8 @@ class KernelTurnHandler:
         self.delivery_executor = delivery_executor
         # 仅用于生成前图片自然描述；不是第二条主聊生成入口。
         self.vision_gateway = vision_gateway
+        # 系统替她挑表情（可选）：只决定要不要多发一个附件，不碰原稿。
+        self.expression_picker = expression_picker
         self._observer_tasks: set[asyncio.Task] = set()
 
     def __getattr__(self, name: str) -> Any:
@@ -414,6 +417,77 @@ class KernelTurnHandler:
         """真实动作记录是新内核的基础历史，不受旧实验开关控制。"""
         return getattr(self._runtime, "runtime_events", None)
 
+    async def _wait_first_reply(self) -> bool:
+        """她拿起手机的第一条先晾一会儿；取不到时机配置或出错就不等。"""
+        wait = getattr(self._runtime, "wait_first_reply", None)
+        if not callable(wait):
+            return False
+        try:
+            return bool(await wait(self.memory))
+        except Exception as exc:
+            logger.warning("[Kernel] 首条延迟异常，按不等待处理: %s", exc)
+            return False
+
+    async def _typing(self, draft: Any, plan: DeliveryPlan, is_first_reply: bool) -> None:
+        """发送前演"正在输入"：只算仍以文字发出的气泡，语音不是她打出来的字。"""
+        play = getattr(self._runtime, "play_typing", None)
+        if not callable(play):
+            return
+        channels = {action.bubble_id: action.channel for action in plan.actions}
+        text = "\n".join(
+            bubble.text for bubble in draft.bubbles if channels.get(bubble.bubble_id) == "text"
+        )
+        if not text:
+            return
+        try:
+            await play(text, is_first_reply)
+        except Exception as exc:
+            logger.warning("[Kernel] 正在输入异常，直接发送: %s", exc)
+
+    def _content_voice(self, draft: Any, plan: DeliveryPlan, planner: Any, allowed: bool) -> tuple[DeliveryPlan, str]:
+        """她没被要求发语音时，由程序看内容挑一句适合念的；只换载体，不改原话。
+
+        挑中的那句必须恰好是一条完整气泡，否则保持文字。普通回复和主动消息共用这一处。
+        """
+        choose = getattr(planner, "plan", None)
+        if not callable(choose):
+            return plan, ""
+        choice = choose("", draft.text, voice_allowed=allowed and planner.allows(""))
+        if not choice.has_voice:
+            return plan, choice.reason
+        return plan_explicit_voice(
+            draft, plan, requested=True, allowed=True,
+            max_chars=self._runtime._voice_max_chars(),
+            preferred_text=choice.voice_text,
+        ), choice.reason
+
+    async def _with_expression(
+        self, draft: Any, plan: DeliveryPlan, user_text: str, typing: Any
+    ) -> DeliveryPlan:
+        """一边演"正在输入"一边让系统挑表情，两件事同时做，不额外拖慢回复。"""
+        picker = self.expression_picker
+        if picker is None or not plan.actions:
+            await typing
+            return plan
+
+        async def _pick() -> Any:
+            try:
+                turns = await self.memory.get_recent_turns(limit=6)
+                ids = [t["id"] for t in turns if t.get("role") == "assistant" and t.get("id")]
+                return await picker.pick(user_text, draft.text, ids)
+            except Exception as exc:
+                logger.info("[Kernel] 这轮不发表情: %s", exc)
+                return None
+
+        picked, _ = await asyncio.gather(_pick(), typing)
+        if not picked:
+            return plan
+        last = plan.actions[-1]
+        actions = plan.actions[:-1] + (dataclasses.replace(
+            last, extra={**dict(last.extra), "sticker": picked, "sticker_after": True}
+        ),)
+        return dataclasses.replace(plan, actions=actions)
+
     async def _deliver(
         self, result: Any, plan: DeliveryPlan
     ) -> tuple[DeliveryResult, bool]:
@@ -467,12 +541,14 @@ class KernelTurnHandler:
                 logger.warning("[Kernel] 实际动作记录写入失败，不影响实际投递结果: %s", exc)
         try:
             if voice_status is not None:
+                # 程序自己挑的语音没发出去时，她从没提过语音，不往那一轮历史旁边挂说明。
+                noted = voice_promised or voice_status == "sent"
                 await events.record_voice(
                     voice_status,
                     result.draft.text,
                     now=received_at,
                     reason="; ".join(delivery.errors) or delivery.status,
-                    evidence_turn_id=turn_id,
+                    evidence_turn_id=turn_id if noted else None,
                 )
             elif explicit_request and voice_why:
                 # 点名要语音但闸门没放行：她写之前已经知道这轮只有文字，只留审计记录。
@@ -511,26 +587,12 @@ class KernelTurnHandler:
 
         # 主动语音由系统按现有闸门与内容规划选择；只改完整气泡的载体，不改正文。
         assembler = getattr(self._runtime, "assembler", None)
-        max_chars = self._runtime._voice_max_chars()
         planner = VoicePlanner(
             getattr(assembler, "voice_frequency", "frequent"),
-            max_chars=max_chars,
+            max_chars=self._runtime._voice_max_chars(),
         )
         allowed = await self.proactive._voice_gate_ok()
-        voice_choice = planner.plan(
-            "", result.draft.text,
-            voice_allowed=allowed and planner.allows(""),
-        )
-        plan = result.plan
-        if voice_choice.has_voice:
-            plan = plan_explicit_voice(
-                result.draft,
-                plan,
-                requested=True,
-                allowed=True,
-                max_chars=max_chars,
-                preferred_text=voice_choice.voice_text,
-            )
+        plan, voice_reason = self._content_voice(result.draft, result.plan, planner, allowed)
 
         # typing 只计算仍以文字投递的气泡；语音不是她“打出来”的字。
         actions_by_bubble = {action.bubble_id: action for action in plan.actions}
@@ -555,7 +617,7 @@ class KernelTurnHandler:
             delivery, result, plan,
             voice_promised=False,
             explicit_request=False,
-            voice_why=voice_choice.reason,
+            voice_why=voice_reason,
             received_at=turn_input.received_at,
             turn_id=turn_id,
         )
@@ -662,6 +724,9 @@ class KernelTurnHandler:
             await self.memory.finish_turn()
             return
 
+        # 她拿起手机的第一条先晾一会儿（相当于还没看到消息）；等完再取时间、定语音、拼提示词。
+        is_first_reply = await self._wait_first_reply()
+
         # 语音在生成前定下来并作为事实告诉她：她写的时候就知道这轮会不会出声。
         # 上一轮答应的语音没发出去时，这一轮由系统补发一次：她最自然的反应就是"我再发一条"，
         # 让这句话有真实动作兑现。只补一次，不连环重试。
@@ -718,6 +783,19 @@ class KernelTurnHandler:
             requested=explicit_request,
             allowed=allowed,
             max_chars=self._runtime._voice_max_chars() if explicit_request else 0,
+        )
+        if not explicit_request:
+            # 他没要语音：看内容挑一句适合念的（晚安、想你这类），同样要过闸门。
+            try:
+                gate_ok, _why = await self._runtime._check_voice_gate("")
+                plan, _reason = self._content_voice(
+                    result.draft, plan, getattr(self._runtime, "voice_planner", None), gate_ok
+                )
+            except Exception as exc:
+                logger.warning("[Kernel] 内容语音规划异常，本轮按文字发送: %s", exc)
+        plan = await self._with_expression(
+            result.draft, plan, user_text,
+            self._typing(result.draft, plan, is_first_reply),
         )
         delivery, cancelled = await self._deliver(result, plan)
         if delivery.status != "sent":

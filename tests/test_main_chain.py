@@ -29,7 +29,9 @@ from companion.kernel.production import (
 )
 from companion.kernel.psychology import PsychologicalSnapshotBuilder
 from companion.kernel.tracing import JsonlTraceRecorder
+from companion.kernel.expression import ExpressionPicker
 from companion.runtime_state import RuntimeEventStore
+from companion.voice_planner import VoicePlanner
 from companion.voice_planner import is_voice_request
 from helpers import card_path, close_db, make_db, make_engine_stack
 
@@ -93,7 +95,8 @@ class ScriptedSender:
 class Chain:
     """一套接好线的主链，测试只关心它的输入输出。"""
 
-    def __init__(self, db, tmp_path, replies, sender_script=(), voice_allowed=True):
+    def __init__(self, db, tmp_path, replies, sender_script=(), voice_allowed=True,
+                 content_voice=False, first_reply=None, picks=None):
         stack = make_engine_stack(db, persona_path=card_path())
         self.db = db
         self.memory = stack.memory
@@ -102,6 +105,8 @@ class Chain:
         self.sender = ScriptedSender(sender_script)
         self.observed = []
         self.unanswered = 0
+        self.typing = []          # 每次"正在输入"演的是哪些字
+        self.waited_first = 0     # 首条延迟被调用了几次
         self.tracer = JsonlTraceRecorder(str(tmp_path))
         kernel = DialogueKernel(
             gateway=self.gateway,
@@ -122,11 +127,23 @@ class Chain:
         async def gate(_user_text=""):
             return voice_allowed, "" if voice_allowed else "今天的语音额度用完了"
 
+        async def wait_first_reply(_memory):
+            self.waited_first += 1
+            return bool(first_reply)
+
+        async def play_typing(text, is_first):
+            self.typing.append((text, is_first))
+
         runtime = SimpleNamespace(
             assembler=SimpleNamespace(meetups=None, voice_frequency="frequent"),
             config=None,
             runtime_events=self.events,
-            voice_planner=SimpleNamespace(allows=lambda _text: True),
+            voice_planner=(
+                VoicePlanner("frequent", max_chars=60) if content_voice
+                else SimpleNamespace(allows=lambda _text: True)
+            ),
+            wait_first_reply=wait_first_reply,
+            play_typing=play_typing,
             _check_voice_gate=gate,
             _voice_max_chars=lambda: 60,
             _last_voice_sent=False,
@@ -157,7 +174,21 @@ class Chain:
                 _play_typing_indicator=noop,
             ),
             delivery_executor=DeliveryExecutor(self.sender, tracer=self.tracer),
+            expression_picker=self._picker(stack, picks),
         )
+
+    def _picker(self, stack, picks):
+        """picks：每次挑表情时后台模型返回的名字（脚本化）；None 表示不装挑选器。"""
+        if picks is None:
+            return None
+        self.pick_calls = []
+        script = list(picks)
+
+        async def chat(messages, **_kw):
+            self.pick_calls.append(messages[-1]["content"])
+            return '{"pick": "%s"}' % (script.pop(0) if script else "")
+
+        return ExpressionPicker(SimpleNamespace(chat=chat), stack.stickers, self.events)
 
     async def say(self, text, batch=None):
         await self.handler.handle_turn(text, None, batch)
@@ -422,3 +453,78 @@ async def test_one_trace_holds_both_the_draft_and_the_real_delivery(make_chain, 
     delivered = next(e for e in events if e["step"] == "delivery_result")
     assert raw["trace_id"] == delivered["trace_id"]
     assert raw["payload"]["served_model"] == "offline-model-0000"
+
+
+# ---------- 回复节奏：首条先晾一会儿，发送前"正在输入" ----------
+
+async def test_first_reply_wait_runs_before_generation_and_typing_covers_text_only(make_chain):
+    chain = await make_chain(["就这一条啊\n听完去吃饭"], first_reply=True)
+    await chain.say("发条语音听听")
+    assert chain.waited_first == 1
+    # 语音那条不是她打出来的字，只演文字气泡；首条标记原样传给节奏层
+    assert chain.typing == [("听完去吃饭", True)]
+
+
+async def test_no_typing_when_she_does_not_reply(make_chain):
+    chain = await make_chain(["去吧"])
+    await chain.say("先撤了，去开会")
+    await chain.say("[吃糖]")
+    assert len(chain.typing) == 1
+
+
+# ---------- 他没要语音时，程序看内容挑一句念 ----------
+
+async def test_content_voice_picks_a_whole_bubble_without_telling_her(make_chain):
+    chain = await make_chain(["晚安，早点睡\n明天再说", "嗯"], content_voice=True)
+    await chain.say("我去睡了")
+    assert "【本轮投递】" not in chain.last_prompt()[0]["content"]
+    assert chain.sender.sent == [("voice", "晚安，早点睡"), ("text", "明天再说")]
+    await chain.say("到了")
+    notes = [m["content"] for m in chain.last_prompt() if m["role"] == "system"][1:]
+    assert notes and "“晚安，早点睡”是用语音发出的" in notes[0]
+
+
+async def test_content_voice_failure_is_plain_text_with_no_note_and_no_retry(make_chain):
+    chain = await make_chain(
+        ["晚安，早点睡", "在呢，怎么了"], content_voice=True, sender_script=["reject"],
+    )
+    await chain.say("我去睡了")
+    assert chain.sender.sent == [("text", "晚安，早点睡")]
+    await chain.say("还在吗")
+    prompt = chain.last_prompt()
+    assert [m for m in prompt if m["role"] == "system"][1:] == []
+    assert chain.sender.sent[-1] == ("text", "在呢，怎么了")
+
+
+async def test_plain_information_is_not_voiced(make_chain):
+    chain = await make_chain(["到了，客栈门口"], content_voice=True)
+    await chain.say("到了吗")
+    assert chain.sender.sent == [("text", "到了，客栈门口")]
+
+
+# ---------- 系统替她挑表情 ----------
+
+async def test_system_picked_sticker_follows_the_last_bubble_and_is_read_back(make_chain):
+    chain = await make_chain(["第一句\n第二句", "嗯"], picks=["开心"])
+    await chain.say("今天发工资了")
+    assert [channel for channel, _ in chain.sender.sent] == ["text", "text", "sticker"]
+    assert (await chain.turns())[1] == ("assistant", "第一句\n第二句")   # 表情不进正文
+    await chain.say("哈哈")
+    notes = [m["content"] for m in chain.last_prompt() if m["role"] == "system"][1:]
+    assert notes and "还发了一个表情“开心”" in notes[0]
+
+
+async def test_expression_cools_down_and_ignores_unknown_names(make_chain):
+    chain = await make_chain(["甲", "乙", "丙"], picks=["开心", "收到", "不存在的名字"])
+    await chain.say("一")
+    await chain.say("二")          # 冷却中：不调用挑选，也不发
+    assert len(chain.pick_calls) == 1
+    assert [c for c, _ in chain.sender.sent].count("sticker") == 1
+
+
+async def test_sticker_send_failure_keeps_the_words_she_said(make_chain):
+    chain = await make_chain(["就这句"], picks=["开心"], sender_script=["ok", "reject"])
+    await chain.say("在吗")
+    assert chain.sender.sent == [("text", "就这句")]
+    assert await chain.turns() == [("user", "在吗"), ("assistant", "就这句")]
+    assert len(chain.observed) == 1

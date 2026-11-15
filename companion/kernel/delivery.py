@@ -71,7 +71,7 @@ def validate_action_delivery_plan(plan: DeliveryPlan, draft: ReplyDraft) -> None
             raise ValueError("动作参数不得复制或覆盖冻结原稿正文")
         if action.channel == "sticker" and not action.extra.get("sticker"):
             raise ValueError("sticker 动作必须提供附加资源")
-        if action.channel == "text" and set(action.extra) - {"sticker"}:
+        if action.channel == "text" and set(action.extra) - {"sticker", "sticker_after"}:
             raise ValueError("text 动作只允许 sticker 附加参数")
         seen.add(action.bubble_id)
     missing = set(bubbles) - seen
@@ -251,7 +251,9 @@ class DeliveryExecutor:
                 if inspect.isawaitable(awaited):
                     await awaited
             sticker = _sticker_of(action)
-            if not text_only and sticker is not None:
+            # sticker_after：表情跟在这条气泡后面发，是整轮话说完之后顺手补的一个附件。
+            sticker_after = bool(sticker is not None and action.extra.get("sticker_after"))
+            if not text_only and sticker is not None and not sticker_after:
                 try:
                     receipt = await self.sender.send_sticker(sticker)
                     messages.append(self._sent(bubble, "sticker", receipt, attachment=True))
@@ -304,6 +306,18 @@ class DeliveryExecutor:
                     stopped = True
                     break
 
+            if sticker_after and not stopped and any(
+                m.bubble_id == bubble.bubble_id and not m.attachment for m in messages
+            ):
+                # 正文已经送达才补表情；表情发不出去不影响已经说出口的话。
+                try:
+                    receipt = await self.sender.send_sticker(sticker)
+                    messages.append(self._sent(bubble, "sticker", receipt, attachment=True))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    errors.append(self._error(bubble, "sticker", exc))
+
         delivered = {message.bubble_id for message in messages if not message.attachment}
         complete = delivered == set(bubbles)
         if stopped or not complete:
@@ -328,7 +342,10 @@ class DeliveryExecutor:
         fallback_from: Optional[str],
     ) -> Tuple[SentMessage, Optional[int]]:
         if channel == "voice":
-            options = {key: value for key, value in extra.items() if key != "sticker"}
+            options = {
+                key: value for key, value in extra.items()
+                if key not in {"sticker", "sticker_after"}
+            }
             receipt = await self.sender.send_voice(
                 bubble.text, quote_message_id=quote_message_id, **options
             )

@@ -275,6 +275,8 @@ class ReplyConfig:
     runtime_state_v1: bool = False
     # 高频是产品偏好：frequent=适合就优先语音；explicit=仅明确请求；off=关闭规划
     voice_frequency: str = "frequent"
+    # 系统替她挑表情：她写完话后由一次很小的后台调用决定要不要顺手发一个表情包/小黄脸
+    expressions: bool = True
     trace_dir: str = "data/turn_traces"
 
 
@@ -564,6 +566,7 @@ class Config:
             ),
             runtime_state_v1=bool(reply_data.get("runtime_state_v1", False)),
             voice_frequency=str(reply_data.get("voice_frequency", "frequent")),
+            expressions=bool(reply_data.get("expressions", True)),
             trace_dir=str(reply_data.get("trace_dir", "data/turn_traces")),
         )
         if reply.voice_frequency not in ("frequent", "explicit", "off"):

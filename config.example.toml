@@ -80,6 +80,7 @@ chunk_delay_max = 2.2
 # 运行时事实/事件协作实验（默认关；只读状态、语音规划与投递、轮次追踪共用）
 runtime_state_v1 = false
 voice_frequency = "frequent"         # frequent=内容适合就优先语音（非每条）；explicit=仅明确请求；off=关闭规划
+expressions = true                   # 她写完话后由系统挑一个表情包/小黄脸顺手发出（偶尔才发；多一次很小的后台调用）
 trace_dir = "data/turn_traces"       # 新内核的本地 JSONL 轮次追踪
 style_examples = false             # 动态示例：按他这句话挑几条真人类似情境的回法当参考（只学怎么接，不学口吻；默认关）
 style_examples_path = "data/style_examples/real_chat.json"  # 示例库路径（相对项目根目录）

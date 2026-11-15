@@ -287,16 +287,20 @@ class RuntimeEventStore:
         marks = ",".join("?" for _ in ids)
         rows = await self.db.fetchall(
             "SELECT kind, subject, status, content, evidence_turn_id FROM runtime_events "
-            f"WHERE evidence_turn_id IN ({marks}) AND "
-            "((kind = 'delivery_action' AND subject = 'voice') OR kind = 'voice') "
+            f"WHERE evidence_turn_id IN ({marks}) AND (kind = 'delivery_action' OR kind = 'voice') "
             "ORDER BY id ASC",
             tuple(ids),
         )
         sent: dict[int, list[str]] = {}
+        stickers: dict[int, list[str]] = {}
         failed: set[int] = set()
         for row in rows:
             turn_id = int(row["evidence_turn_id"])
-            if row["kind"] == "delivery_action":
+            if row["kind"] == "delivery_action" and row["subject"] == "sticker":
+                name = str(row["content"] or "").strip()
+                if name:
+                    stickers.setdefault(turn_id, []).append(name)
+            elif row["kind"] == "delivery_action":
                 text = str(row["content"] or "").strip()
                 if text:
                     sent.setdefault(turn_id, []).append(text)
@@ -304,14 +308,20 @@ class RuntimeEventStore:
                 failed.add(turn_id)
         notes: dict[int, str] = {}
         for turn_id in ids:
+            parts: list[str] = []
             if turn_id in sent:
                 quoted = "、".join(f"“{text}”" for text in sent[turn_id])
-                notes[turn_id] = f"（投递记录：上面这轮里{quoted}是用语音发出的，其余是文字）"
+                parts.append(f"上面这轮里{quoted}是用语音发出的，其余是文字")
             elif turn_id in failed:
-                notes[turn_id] = (
-                    "（投递记录：上面这轮里原本要用语音发的那一条没有发出去，"
-                    "已改成文字送到对方那边；对方没有收到语音）"
+                parts.append(
+                    "上面这轮里原本要用语音发的那一条没有发出去，"
+                    "已改成文字送到对方那边；对方没有收到语音"
                 )
+            if turn_id in stickers:
+                quoted = "、".join(f"“{name}”" for name in stickers[turn_id])
+                parts.append(f"上面这轮最后还发了一个表情{quoted}")
+            if parts:
+                notes[turn_id] = "（投递记录：" + "；".join(parts) + "）"
         return notes
 
     async def render_prompt(self) -> str:

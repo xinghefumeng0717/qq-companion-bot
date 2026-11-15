@@ -35,7 +35,9 @@ from companion.kernel.kernel import DialogueKernel
 from companion.kernel.production import KernelTurnHandler
 from companion.kernel.psychology import PsychologicalSnapshotBuilder
 from companion.kernel.tracing import JsonlTraceRecorder
+from companion.kernel.expression import ExpressionPicker
 from companion.onebot import (
+    build_face_segment,
     OneBotClient,
     build_image_segment,
     build_record_segment,
@@ -247,7 +249,10 @@ class CompanionBot:
             meetups = MeetupManager(self.db, self.gateway, self.persona, self.memory)
             self.assembler.meetups = self.observer.meetups = self.proactive.meetups = meetups
 
-        runtime = TurnRuntime(config=config, assembler=self.assembler, tts=self.tts)
+        runtime = TurnRuntime(
+            config=config, assembler=self.assembler, tts=self.tts,
+            set_typing_fn=self._set_typing_to_onebot,
+        )
         runtime.runtime_events = self.runtime_events
         snapshot_builder = PsychologicalSnapshotBuilder(
             affection_engine=self.affection,
@@ -282,6 +287,10 @@ class CompanionBot:
                 self, tracer=tracer, before_send=self.before_delivery_send
             ),
             vision_gateway=self.gateway,
+            expression_picker=ExpressionPicker(
+                self.gateway, self.stickers, self.runtime_events,
+                enabled=getattr(config.reply, "expressions", True) is True,
+            ),
         )
         # 普通轮次与主动消息复用同一个内核、处理器和真实投递执行器。
         self.proactive.kernel_turn_handler = self.turn_handler
@@ -402,12 +411,18 @@ class CompanionBot:
 
     async def send_sticker(self, sticker: Any) -> SendReceipt:
         """贴纸是独立附件，使用真实资源单次发送，不带显示引用。"""
-        file_path = sticker.get("file") if isinstance(sticker, dict) else sticker
-        if not file_path:
-            raise DeliveryRejectedError("贴纸缺少真实文件资源")
+        face_id = sticker.get("face_id") if isinstance(sticker, dict) else None
+        if face_id is not None:
+            # QQ 自带的小黄脸：单独一条只发一个脸。
+            segment = build_face_segment(int(face_id))
+        else:
+            file_path = sticker.get("file") if isinstance(sticker, dict) else sticker
+            if not file_path:
+                raise DeliveryRejectedError("贴纸缺少真实文件资源")
+            segment = build_image_segment(file_path)
         receipt = await self.onebot.send_private_msg_receipt(
             self.config.account.allowed_user_id,
-            [build_image_segment(file_path)],
+            [segment],
         )
         return SendReceipt(message_id=receipt.message_id, actual_quote_message_id=None)
 

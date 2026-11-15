@@ -215,6 +215,25 @@ class StickerManager:
                 out.append(k)
         return out
 
+    def describe_all(self) -> List[Tuple[str, str, str, str]]:
+        """给系统挑表情用：每张表情包的（名字、含义、什么时候用、文件绝对路径）。
+
+        只列文件确实存在的；数量与提示词清单用同一个上限，顺序固定。
+        """
+        rows: List[Tuple[str, str, str, str]] = []
+        for name in sorted(self._index.keys())[: self.PROMPT_STICKER_LIST_MAX]:
+            entry = self._index[name]
+            path = os.path.join(self.stickers_dir, entry.get("file", ""))
+            if not entry.get("file") or not os.path.exists(path):
+                continue
+            rows.append((
+                name,
+                (entry.get("meaning") or entry.get("desc") or "").strip(),
+                (entry.get("usage") or "").strip(),
+                os.path.abspath(path),
+            ))
+        return rows
+
     def match_sticker(self, word: str) -> Optional[str]:
         """按描述词匹配表情包文件路径（优先精确，失败则模糊子串匹配）
         返回表情包绝对路径，未匹配到返回 None
