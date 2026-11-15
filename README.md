@@ -280,6 +280,8 @@ QQC_TEST_CARD=characters/example python -m pytest -q tests
 
 主链的行为集中在 `tests/test_main_chain.py`：用真实的数据库和真实的投递器，只把模型和 QQ 换成脚本化的假件。改主链时先看它。
 
+改角色卡或提示词之前，可以先用 `scripts/sim/prompt_probe.py` 量一下：它取一轮真实对话当时发给模型的提示词，只改你指定的一处，各跑几次，把她的回复并排打出来。"这样写她到底听不听"，量一下比猜准。用法见脚本开头的说明，它会调用真实模型，费用很小。
+
 `scripts/smoke/` 下的脚本会调用真实的在线接口并产生费用，不要批量跑。
 
 ---
