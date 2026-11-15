@@ -14,13 +14,15 @@ class FlowSender:
         self.calls = []
         self.next_id = 9000
 
-    def _receipt(self):
+    def _receipt(self, quote_message_id=None):
         self.next_id += 1
-        return SendReceipt(message_id=self.next_id)
+        return SendReceipt(
+            message_id=self.next_id, actual_quote_message_id=quote_message_id
+        )
 
     async def send_text(self, text, quote_message_id=None):
         self.calls.append(("text", text, quote_message_id))
-        return self._receipt()
+        return self._receipt(quote_message_id)
 
     async def send_voice(self, text, quote_message_id=None, **options):
         self.calls.append(("voice", text, quote_message_id, options))
@@ -89,6 +91,7 @@ async def test_voice_and_sticker_combo_preserves_whole_bubble_and_records_actual
     assert [(m.channel, m.attachment) for m in result.messages] == [
         ("sticker", True), ("voice", False)
     ]
+    assert result.messages[1].quote_message_id is None
     assert recorder.results == [result]
     assert all(m.message_id is not None for m in recorder.results[0].messages)
 

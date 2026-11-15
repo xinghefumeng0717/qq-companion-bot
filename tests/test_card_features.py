@@ -157,11 +157,8 @@ class TestCardFeatures(_TmpCase):
         self.assertFalse(cfg.character.fact_layers)
         self.assertFalse(cfg.character.impressions)
         self.assertFalse(cfg.character.meetup_recap)
-        self.assertFalse(cfg.reply.trim_echo)
-        self.assertEqual(cfg.reply.candidates, 1)
-        self.assertFalse(cfg.reply.vision_direct)
 
-    def testconfig没写时取卡里的features(self):
+    def testconfig没写时取卡里的当前features并忽略旧回复开关(self):
         card = self.card(features={
             "self_memory": True, "fact_layers": True, "impressions": True,
             "meetup_recap": True, "trim_echo": True, "candidates": 3,
@@ -172,63 +169,31 @@ class TestCardFeatures(_TmpCase):
         self.assertTrue(cfg.character.fact_layers)
         self.assertTrue(cfg.character.impressions)
         self.assertTrue(cfg.character.meetup_recap)
-        self.assertTrue(cfg.reply.trim_echo)
-        self.assertEqual(cfg.reply.candidates, 3)
-        self.assertTrue(cfg.reply.vision_direct)
+        for name in ("trim_echo", "candidates", "vision_direct"):
+            self.assertFalse(hasattr(cfg.reply, name))
 
     def testconfig显式false赢过卡里的true(self):
-        card = self.card(features={"self_memory": True, "trim_echo": True, "candidates": 3})
-        cfg = self._load(
-            card,
-            character_body="self_memory = false",
-            reply_body="trim_echo = false\ncandidates = 1",
-        )
+        card = self.card(features={"self_memory": True, "trim_echo": True})
+        cfg = self._load(card, character_body="self_memory = false")
         self.assertFalse(cfg.character.self_memory)
-        self.assertFalse(cfg.reply.trim_echo)
-        self.assertEqual(cfg.reply.candidates, 1)
 
     def testconfig显式值赢过卡里的false(self):
-        card = self.card(features={"self_memory": False, "candidates": 2})
+        card = self.card(features={"self_memory": False})
         cfg = self._load(card, character_body="self_memory = true")
         self.assertTrue(cfg.character.self_memory)
-        self.assertEqual(cfg.reply.candidates, 2)
-
-    def testcandidates按现有上限clamp(self):
-        card = self.card(features={"candidates": 9})
-        self.assertEqual(self._load(card).reply.candidates, 4)
-        card2 = self.card(features={"candidates": 0})
-        self.assertEqual(self._load(card2).reply.candidates, 1)
 
     def testfeatures里的畸形值逐项忽略(self):
         card = self.card(features={
-            "self_memory": "true",      # 不是布尔
-            "candidates": True,         # bool 不算整数
-            "trim_echo": 1,             # 不是布尔
+            "self_memory": "true", "candidates": True, "trim_echo": 1,
         })
         cfg = self._load(card)
         self.assertFalse(cfg.character.self_memory)
-        self.assertEqual(cfg.reply.candidates, 1)
-        self.assertFalse(cfg.reply.trim_echo)
+        self.assertFalse(hasattr(cfg.reply, "candidates"))
+        self.assertFalse(hasattr(cfg.reply, "trim_echo"))
 
     def test卡不存在时不炸(self):
         cfg = self._load(os.path.join(self.dir, "no_such_card"))
         self.assertFalse(cfg.character.self_memory)
-
-    def testtiebreak默认warm且卡可自声明first(self):
-        self.assertEqual(self._load(self.card()).reply.candidate_tiebreak, "warm")
-        card = self.card(features={"candidate_tiebreak": "first"})
-        self.assertEqual(self._load(card).reply.candidate_tiebreak, "first")
-
-    def testconfig显式tiebreak赢过卡(self):
-        card = self.card(features={"candidate_tiebreak": "first"})
-        cfg = self._load(card, reply_body='candidate_tiebreak = "warm"')
-        self.assertEqual(cfg.reply.candidate_tiebreak, "warm")
-
-    def testtiebreak畸形值回退warm(self):
-        card = self.card(features={"candidate_tiebreak": "tsundere"})
-        self.assertEqual(self._load(card).reply.candidate_tiebreak, "warm")
-        cfg = self._load(self.card(), reply_body='candidate_tiebreak = "tsundere"')
-        self.assertEqual(cfg.reply.candidate_tiebreak, "warm")
 
 
 # ==========================================

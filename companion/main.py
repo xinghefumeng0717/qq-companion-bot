@@ -25,13 +25,18 @@ from companion.gateway import LLMGateway
 from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.kernel.context import ContextBuilder
+from companion.kernel.contracts import SendReceipt
+from companion.kernel.delivery import (
+    ConfirmedDeliveryCancelled,
+    DeliveryExecutor,
+    DeliveryRejectedError,
+)
 from companion.kernel.kernel import DialogueKernel
 from companion.kernel.production import KernelTurnHandler
 from companion.kernel.psychology import PsychologicalSnapshotBuilder
 from companion.kernel.tracing import JsonlTraceRecorder
 from companion.onebot import (
     OneBotClient,
-    build_face_segment,
     build_image_segment,
     build_record_segment,
     build_reply_segment,
@@ -44,7 +49,7 @@ from companion.proactive import ProactiveScheduler
 from companion.replier import Replier
 from companion.runtime_state import RuntimeEventStore, TurnTracer
 from companion.stickers import StickerManager
-from companion.turn_handler import TurnHandler
+from companion.turn_runtime import TurnRuntime
 from companion.tts import TTSManager
 from companion.voice import VoiceProcessor
 
@@ -226,10 +231,8 @@ class CompanionBot:
             mood=self.mood,
             memory=self.memory,
             stickers=self.stickers,
-            replier=self.replier,
             gateway=self.gateway,
             db=self.db,
-            send_msg_fn=self._send_chunk_to_onebot,
             assembler=self.assembler,
             holidays_provider=holidays,
             set_typing_fn=self._set_typing_to_onebot,
@@ -244,52 +247,44 @@ class CompanionBot:
             meetups = MeetupManager(self.db, self.gateway, self.persona, self.memory)
             self.assembler.meetups = self.observer.meetups = self.proactive.meetups = meetups
 
-        turn_handler = TurnHandler(
-            config=config,
+        runtime = TurnRuntime(config=config, assembler=self.assembler, tts=self.tts)
+        runtime.runtime_events = self.runtime_events
+        snapshot_builder = PsychologicalSnapshotBuilder(
+            affection_engine=self.affection,
+            mood_engine=self.mood,
+            persona=self.persona,
+            holidays_provider=config.get_holidays,
+        )
+        # 模型侧与投递侧共用一个追踪器：同一个 trace_id 下既有她写了什么，也有实际发了什么。
+        tracer = JsonlTraceRecorder(config.reply.trace_dir)
+        self.kernel = DialogueKernel(
             gateway=self.gateway,
-            assembler=self.assembler,
-            replier=self.replier,
+            persona=self.persona,
+            snapshot_builder=snapshot_builder,
+            context_builder=ContextBuilder(),
+            tracer=tracer,
+            memory=self.memory,
+            arcs=self.arcs,
+            self_memory=self.assembler.self_memory,
+            impressions=self.assembler.impressions,
+            meetups=getattr(self.assembler, "meetups", None),
+            runtime_events=self.runtime_events,
+            model=config.llm.text_model,
+        )
+        self.turn_handler = KernelTurnHandler(
+            kernel=self.kernel,
+            runtime=runtime,
             memory=self.memory,
             observer=self.observer,
             proactive=self.proactive,
-            send_chunk_fn=self._send_chunk_to_onebot,
-            set_typing_fn=self._set_typing_to_onebot,
-            timing_config=config.timing,
-            tts=self.tts,   # FIXES22：语音闸门
+            # 所有轮次只经这一个执行器发送：真实回执决定历史，同稿不重发。
+            delivery_executor=DeliveryExecutor(
+                self, tracer=tracer, before_send=self.before_delivery_send
+            ),
+            vision_gateway=self.gateway,
         )
-        turn_handler.runtime_events = self.runtime_events
-        turn_handler.turn_tracer = self.turn_tracer
-        self.kernel = None
-        if getattr(config.reply, "use_kernel", False):
-            snapshot_builder = PsychologicalSnapshotBuilder(
-                affection_engine=self.affection,
-                mood_engine=self.mood,
-                persona=self.persona,
-                holidays_provider=config.get_holidays,
-            )
-            self.kernel = DialogueKernel(
-                gateway=self.gateway,
-                persona=self.persona,
-                snapshot_builder=snapshot_builder,
-                context_builder=ContextBuilder(),
-                tracer=JsonlTraceRecorder(config.reply.trace_dir),
-                memory=self.memory,
-                arcs=self.arcs,
-                self_memory=self.assembler.self_memory,
-                impressions=self.assembler.impressions,
-                meetups=getattr(self.assembler, "meetups", None),
-                model=config.llm.text_model,
-            )
-            turn_handler = KernelTurnHandler(
-                kernel=self.kernel,
-                legacy_handler=turn_handler,
-                memory=self.memory,
-                observer=self.observer,
-                proactive=self.proactive,
-                replier=self.replier,
-                send_chunk_fn=self._send_chunk_to_onebot,
-            )
-        self.turn_handler = turn_handler
+        # 普通轮次与主动消息复用同一个内核、处理器和真实投递执行器。
+        self.proactive.kernel_turn_handler = self.turn_handler
         self.aggregator = MessageAggregator(turn_handler=self.turn_handler.handle_turn)
 
         self.backup_scheduler = DailyBackupScheduler(
@@ -339,165 +334,82 @@ class CompanionBot:
         except Exception as e:
             logger.warning(f"[Bot] 凌晨补充生活主线失败: {e}")
 
-    async def _send_chunk_to_onebot(self, chunk: Dict[str, Any]) -> None:
-        """分段发送底层调用
+    async def before_delivery_send(self, bubble: Any, action: Any, action_index: int) -> None:
+        """DeliveryExecutor 复用 Replier 的段间节奏；每计划动作一次。"""
+        chunk = {"type": action.channel, "content": bubble.text}
+        await self.replier.wait_before_chunk(chunk, action_index)
 
-        FIXES20：新增 face（纯表情气泡）与 combo（文字+表情同一条消息）两种段。
-        combo 是主形态——机主 65% 的表情是"文字+表情同气泡"（其中 97% 挂句尾），
-        拆成两条消息就毁掉了这个语气。OneBot 一条消息本来就支持混合段数组。
-
-        FIXES21：段上有 `_quote` 头时，把它拼成 OneBot `reply` 段放在**最前面**，
-        与正文同一条消息出去（"回他第2条 + 内容"是一条气泡，不是两条）。
-        reply 段是 NapCat/QQ 侧最可能出岔子的一段（id 过期、部分实现不支持），
-        整条发送失败时**去掉 reply 段重发正文**——引用没了顶多指代弱一点，
-        她说的话丢了才是事故。
-        """
-        quote = chunk.get("_quote")
-        if chunk["type"] == "text":
-            body: List[Dict[str, Any]] = [build_text_segment(chunk["content"])]
-        elif chunk["type"] == "sticker":
-            body = [build_image_segment(chunk["file"])]
-        elif chunk["type"] == "face":
-            body = [build_face_segment(chunk["id"])]
-        elif chunk["type"] == "combo":
-            body = []
-            for part in chunk.get("parts", []):
-                if part.get("type") == "text":
-                    if part.get("content", "").strip():
-                        body.append(build_text_segment(part["content"]))
-                elif part.get("type") == "face":
-                    body.append(build_face_segment(part["id"]))
-            if not body:
-                return
-        elif chunk["type"] == "voice":
-            # record 不携带 reply；若语音失败降级为文字，保留原 quote 给文字段。
-            await self._send_voice_chunk(chunk)
-            return
-        else:
-            return
-
-        segs: List[Dict[str, Any]] = []
-        if quote and quote.get("message_id") is not None:
+    async def send_text(
+        self, text: str, quote_message_id: Optional[int] = None
+    ) -> SendReceipt:
+        """单次文字回执；仅明确拒绝时去引用重试，未决绝不重发。"""
+        body = [build_text_segment(text)]
+        segments = list(body)
+        actual_quote = None
+        if quote_message_id is not None:
             try:
-                segs.append(build_reply_segment(quote["message_id"]))
-            except (TypeError, ValueError) as e:
-                logger.warning(f"[Bot] 引用 id 非法（{quote.get('message_id')!r}），本条不带引用发出: {e}")
-                segs = []
-        segs.extend(body)
-
-        ok = await self.onebot.send_private_msg(
-            self.config.account.allowed_user_id, segs
-        )
-        if not ok and segs and segs[0].get("type") == "reply":
-            logger.warning(
-                f"[Bot] 带引用的消息发送失败（reply 段 id={quote.get('message_id')}），"
-                "去掉引用重发正文"
+                segments.insert(0, build_reply_segment(quote_message_id))
+                actual_quote = quote_message_id
+            except (TypeError, ValueError):
+                logger.warning(f"[Bot] 新发送器引用 id 非法，按无引用发送: {quote_message_id!r}")
+        try:
+            receipt = await self.onebot.send_private_msg_receipt(
+                self.config.account.allowed_user_id, segments
             )
-            await self.onebot.send_private_msg(self.config.account.allowed_user_id, body)
+            return SendReceipt(
+                message_id=receipt.message_id, actual_quote_message_id=actual_quote
+            )
+        except DeliveryRejectedError:
+            if actual_quote is None:
+                raise
+            receipt = await self.onebot.send_private_msg_receipt(
+                self.config.account.allowed_user_id, body
+            )
+            return SendReceipt(message_id=receipt.message_id, actual_quote_message_id=None)
 
-    async def _send_voice_chunk(self, chunk: Dict[str, Any]) -> None:
-        """语音段：合成 → 发送 → 删临时文件，失败必须真实降级为文字。"""
-        text = (chunk.get("content") or "").strip()
-        # record 本身不携带 reply；若语音失败降级为文字，原 quote 仍可按文字段发送。
+    async def send_voice(
+        self, text: str, quote_message_id: Optional[int] = None, **options: Any
+    ) -> SendReceipt:
+        """语音 record-only；明确失败交给 Executor，未决不得文字补发。"""
+        text = (text or "").strip()
         if not text:
-            return
-
-        async def _send_as_text(reason: str, *, warning: bool = False) -> None:
-            # 失败只把原句原地降级为文字：不再调用模型补写，也就不会产生新的许诺。
-            outgoing = text
-            log = logger.warning if warning else logger.info
-            log(f"[Bot] {reason}")
-            chunk["type"] = "text"
-            chunk["content"] = outgoing
-            chunk["_voice_failure_reason"] = reason
-            text_segments = []
-            quote = chunk.get("_quote")
-            if isinstance(quote, dict) and quote.get("message_id") is not None:
-                try:
-                    text_segments.append(build_reply_segment(quote["message_id"]))
-                except (TypeError, ValueError) as e:
-                    logger.warning(f"[Bot] 语音降级引用 id 非法，按无引用发送: {e}")
-            text_segments.append(build_text_segment(outgoing))
-            try:
-                sent = await self.onebot.send_private_msg(
-                    self.config.account.allowed_user_id, text_segments,
-                )
-                if not sent and len(text_segments) > 1:
-                    sent = await self.onebot.send_private_msg(
-                        self.config.account.allowed_user_id,
-                        [build_text_segment(outgoing)],
-                    )
-            except Exception as e:
-                sent = False
-                logger.error(f"[Bot] 语音降级文字发送异常: {e}")
-            chunk["_voice_delivery"] = "text" if sent else "failed"
-            if not sent:
-                logger.error("[Bot] 语音降级后的文字发送也未被 OneBot 确认")
-
+            raise DeliveryRejectedError("空语音正文")
         tts = getattr(self, "tts", None)
         if tts is None:
-            await _send_as_text("没有装配 TTSManager，本条按文字发出")
-            return
-
-        async def _deliver() -> None:
-            audio_path = None
-            sent_ok = False
+            raise DeliveryRejectedError("没有装配 TTSManager")
+        audio_path = None
+        try:
+            audio_path = await tts.synthesize(text)
+            if not audio_path:
+                raise DeliveryRejectedError("语音合成未成功")
+            await asyncio.sleep(min(3.0, 0.6 + 0.04 * len(text)))
+            receipt = await self.onebot.send_private_msg_receipt(
+                self.config.account.allowed_user_id,
+                [build_record_segment(audio_path)],
+            )
             try:
-                audio_path = await tts.synthesize(text)
-                if not audio_path:
-                    await _send_as_text("语音合成未成功，本条按文字发出")
-                    return
-                try:
-                    await asyncio.sleep(min(3.0, 0.6 + 0.04 * len(text)))
-                except asyncio.CancelledError:
-                    raise
-                # NapCat/QQ 不支持 reply + record；语音只发 record。
-                voice_segments = [build_record_segment(audio_path)]
-                ok = await self.onebot.send_private_msg(
-                    self.config.account.allowed_user_id, voice_segments,
-                )
-                if ok:
-                    sent_ok = True
-                    chunk["_voice_delivery"] = "sent"
-                    try:
-                        used = await tts.bump_daily()
-                        logger.info(f"[Bot] 语音已发出（{len(text)} 字，今日第 {used} 条）")
-                    except Exception as e:
-                        # 已经发出就不能再补一份文字；只把记账异常留痕。
-                        logger.warning(f"[Bot] 语音已发出，但日额度记账失败: {e}")
-                else:
-                    await _send_as_text(
-                        "语音发送未被 OneBot 确认，已改按文字补发（不计语音额度）",
-                        warning=True,
-                    )
+                await tts.bump_daily()
+            except asyncio.CancelledError:
+                raise ConfirmedDeliveryCancelled(receipt)
             except Exception as e:
-                if sent_ok:
-                    chunk["_voice_delivery"] = "sent"
-                    logger.warning(f"[Bot] 语音已发出，后续处理异常但不再重复发送: {e}")
-                else:
-                    logger.warning(f"[Bot] 语音发送异常，改按文字补发: {e}")
-                    await _send_as_text("语音发送异常，已改按文字补发（不计语音额度）", warning=True)
-            finally:
-                try:
-                    tts.cleanup(audio_path)
-                except Exception as e:
-                    logger.debug(f"[Bot] 语音临时文件清理异常: {e}")
-
-        # 主聊与主动消息共用 TTSManager 的锁，临界区内重查日额度再合成、发送、记账。
-        lock = getattr(tts, "send_lock", None)
-        if lock is None:
-            await _deliver()
-            return
-        async with lock:
+                logger.warning(f"[Bot] 新语音发送器已确认发送，额度记账失败: {e}")
+            return SendReceipt(message_id=receipt.message_id, actual_quote_message_id=None)
+        finally:
             try:
-                used, limit = await tts.daily_status()
+                tts.cleanup(audio_path)
             except Exception as e:
-                logger.warning(f"[Bot] 发送前重查语音日额度失败，沿用本轮闸门结果: {e}")
-                used, limit = 0, 1
-            if used >= limit:
-                await _send_as_text(f"今日语音已达上限（{used}/{limit} 条），本条按文字发出")
-                return
-            await _deliver()
+                logger.debug(f"[Bot] 新语音发送器清理临时文件异常: {e}")
+
+    async def send_sticker(self, sticker: Any) -> SendReceipt:
+        """贴纸是独立附件，使用真实资源单次发送，不带显示引用。"""
+        file_path = sticker.get("file") if isinstance(sticker, dict) else sticker
+        if not file_path:
+            raise DeliveryRejectedError("贴纸缺少真实文件资源")
+        receipt = await self.onebot.send_private_msg_receipt(
+            self.config.account.allowed_user_id,
+            [build_image_segment(file_path)],
+        )
+        return SendReceipt(message_id=receipt.message_id, actual_quote_message_id=None)
 
     async def _set_typing_to_onebot(self, typing: bool) -> bool:
         """FIXES15 "正在输入"状态。user_id 在这里绑定，处理器/调度器只管开/关。
@@ -521,14 +433,14 @@ class CompanionBot:
         image_path: Optional[str],
         quote_targets: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """兼容保留：委托给 TurnHandler 处理单轮对话（FIXES21：批次透传）"""
+        """委托给唯一的 KernelTurnHandler 处理单轮对话。"""
         await self.turn_handler.handle_turn(user_text, image_path, quote_targets)
 
     async def run(self) -> None:
         """主运行循环"""
         await self.db.init_tables()
-        if getattr(self.config.reply, "runtime_state_v1", False) is True:
-            await self.runtime_events.init()
+        # 新内核的真实动作记录始终可用；旧实验开关只控制状态摘要与提示块。
+        await self.runtime_events.init()
         await self.stickers.sync_initial_stickers()
         self.aggregator.start()
         self.proactive.start()

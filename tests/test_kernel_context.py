@@ -23,7 +23,6 @@ from typing import Any, List, Optional
 from companion.kernel.context import (
     ContextBuilder,
     filter_action_tags,
-    filter_style_rule,
 )
 from companion.kernel.contracts import (
     IncomingMessage,
@@ -49,8 +48,6 @@ class FakeChatStyle:
     rules: List[str] = field(
         default_factory=lambda: [
             "说话保持干练，不拖泥带水",
-            "不要输出 [voice:xxx] 标签",
-            "不要输出 [sticker:xxx] 表情包",
             "有事说事，直接回答",
         ]
     )
@@ -74,7 +71,6 @@ class FakeStage:
     instructions: List[str] = field(
         default_factory=lambda: [
             "保持专业工作态度",
-            "不要使用 [face:1] 小黄脸",
         ]
     )
     examples: List[str] = field(
@@ -218,6 +214,36 @@ def test_build_messages_with_quote_and_history():
     assert current_user_msg["role"] == "user"
     expected_quote_prefix = "他引用之前的“食堂今天有土豆烧牛肉。”时说：\n那一份够吃吗？"
     assert current_user_msg["content"] == expected_quote_prefix
+
+def test_build_messages_uses_scoped_quote_view_for_structured_input():
+    turn_input = StandardizedTurnInput(
+        session_id="sess_context_scoped_quote",
+        messages=(
+            IncomingMessage(message_id=1, text="普通一句", payload={"source_scope": 1}),
+            IncomingMessage(
+                message_id=2, text="那句呢", quoted_message_id=90,
+                payload={"source_scope": 2, "quoted_text": "记得带伞", "quoted_role": "assistant"},
+            ),
+        ),
+        text="对方连着发来了以下内容：\n普通一句\n那句呢",
+        received_at=datetime.now(),
+        reply_to_message_id=2,
+        quoted_text="记得带伞",
+    )
+    snapshot = PsychologicalSnapshot(
+        turn_id="turn_scoped_quote", frozen_at=datetime.now(), state_version=1,
+        stage_index=0, prompt_hint="", action_context={}, affection={}, mood={},
+    )
+    messages = ContextBuilder(max_history_turns=5).build_messages(
+        FakePersona(), snapshot, [], turn_input
+    )
+    assert messages[-1]["content"] == (
+        "对方连着发来了以下内容：\n普通一句\n"
+        "他引用你之前说的“记得带伞”时说：\n那句呢"
+    )
+    assert "source_scope" not in messages[-1]["content"]
+    assert "quoted_role" not in messages[-1]["content"]
+
 
 def test_filter_action_tags_preserves_arithmetic_and_explanations():
     """测试 filter_action_tags 保留算术星号、数字/英文括号与普通解释说明括号，仅清洗明确动作与协议。"""
@@ -369,10 +395,14 @@ def test_full_style_assets_are_separate_and_unlimited_by_default():
     assert "（敬礼）" not in prompt and "[voice" not in prompt
 
 
-def test_style_rule_only_drops_action_clauses():
-    assert filter_style_rule("别发语音，保持自然，别用祈使句") == "保持自然，别用祈使句"
-    assert filter_style_rule("不要输出 [sticker:x] 表情包") == ""
-    assert filter_style_rule("说话保持干练，不拖泥带水") == "说话保持干练，不拖泥带水"
+def test_style_rules_and_stage_instructions_are_kept_whole():
+    """正文规则不再按动作词分句裁剪；自然语言中的‘沉默’也不能被误删。"""
+    persona = FakePersona()
+    rule = "他沉默时别急着追问，先陪他待一会儿"
+    persona.chat_style.rules = [rule]
+    persona.stages[0].instructions = [rule]
+    prompt = ContextBuilder().build_system_prompt(persona, _snapshot_for_context())
+    assert prompt.count(rule) == 2
 
 
 def test_memory_blocks_insert_in_order_and_empty_is_compatible():

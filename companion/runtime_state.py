@@ -170,12 +170,68 @@ class RuntimeEventStore:
         return applied
 
     async def record_voice(self, status: str, content: str, *, now: Optional[datetime] = None,
-                           reason: str = "") -> int:
+                           reason: str = "", evidence_turn_id: Optional[int] = None) -> int:
         if status not in self.VOICE_STATUSES:
             raise ValueError(f"未知语音投递状态: {status}")
         return await self._insert(kind="voice", subject="当前语音投递", status=status,
                                   source="system", content=content, now=now,
+                                  evidence_turn_id=evidence_turn_id,
                                   metadata={"reason": reason})
+
+    async def record_delivery_actions(self, actions: list[dict[str, Any]], *,
+                                      now: Optional[datetime] = None,
+                                      evidence_turn_id: Optional[int] = None) -> int:
+        """逐条保存实际送达的语音/贴纸；输入必须由 DeliveryResult.messages 投影。
+
+        evidence_turn_id 是这一轮助手正文在 turns 表里的 id：真实动作挂在它说出口的那一轮上，
+        回读历史时才能告诉模型"这一句当时是用语音发的"。"""
+        recorded = 0
+        for action in actions:
+            channel = action.get("channel")
+            if channel not in {"voice", "sticker"}:
+                raise ValueError(f"未知实际动作类型: {channel}")
+            metadata = action.get("metadata")
+            if not isinstance(metadata, dict):
+                raise ValueError("实际动作必须携带投递明细")
+            await self._insert(
+                kind="delivery_action",
+                subject=channel,
+                status="sent",
+                source="system",
+                content=str(action.get("content") or ""),
+                now=now,
+                evidence_turn_id=evidence_turn_id,
+                metadata=metadata,
+            )
+            recorded += 1
+        return recorded
+
+    async def recent_delivery_actions(self, limit: int = 50, *,
+                                      channel: Optional[str] = None) -> list[dict[str, Any]]:
+        """读取最近的真实动作，最新在前；metadata 解码后供系统冷却、防重复与审计。"""
+        if channel not in {None, "voice", "sticker"}:
+            raise ValueError(f"未知实际动作类型: {channel}")
+        if channel is None:
+            rows = await self.db.fetchall(
+                "SELECT * FROM runtime_events WHERE kind = 'delivery_action' "
+                "ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+        else:
+            rows = await self.db.fetchall(
+                "SELECT * FROM runtime_events WHERE kind = 'delivery_action' AND subject = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (channel, int(limit)),
+            )
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.get("metadata") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["metadata"] = {}
+            items.append(item)
+        return items
 
     async def record_delivery_chunks(self, chunks: list[dict[str, Any]], content: str, *,
                                      now: Optional[datetime] = None, blocked_reason: str = "") -> str:
@@ -209,6 +265,55 @@ class RuntimeEventStore:
     async def latest_voice(self) -> Optional[dict[str, Any]]:
         return await self._latest("voice")
 
+    @staticmethod
+    def _voice_prompt_line(voice: dict[str, Any]) -> str:
+        labels = {"not_attempted": "未尝试/未获放行", "sent": "已由协议端发出",
+                  "failed": "未发出", "text_fallback": "未发出，已转文字"}
+        return (
+            f"- 最近一次语音：{labels.get(voice['status'], voice['status'])}"
+            f"（{voice['recorded_at']}）；这只是系统投递结果，不代表对方已经听到"
+        )
+
+    async def delivery_notes_for_turns(self, turn_ids: list[int]) -> dict[int, str]:
+        """把真实语音结果整理成挂在具体历史轮次上的一句投递记录。
+
+        事实跟着它发生的那一轮走：模型在自己那句话旁边读到"这句是语音发的／语音没发出去"，
+        历史滚出窗口后记录自然消失，不会在无关轮次里长期滞留。
+        只写语音：成功的写明是哪一句，失败的写明对方没有收到语音。
+        """
+        ids = [int(i) for i in turn_ids if i]
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        rows = await self.db.fetchall(
+            "SELECT kind, subject, status, content, evidence_turn_id FROM runtime_events "
+            f"WHERE evidence_turn_id IN ({marks}) AND "
+            "((kind = 'delivery_action' AND subject = 'voice') OR kind = 'voice') "
+            "ORDER BY id ASC",
+            tuple(ids),
+        )
+        sent: dict[int, list[str]] = {}
+        failed: set[int] = set()
+        for row in rows:
+            turn_id = int(row["evidence_turn_id"])
+            if row["kind"] == "delivery_action":
+                text = str(row["content"] or "").strip()
+                if text:
+                    sent.setdefault(turn_id, []).append(text)
+            elif row["status"] in {"failed", "text_fallback"}:
+                failed.add(turn_id)
+        notes: dict[int, str] = {}
+        for turn_id in ids:
+            if turn_id in sent:
+                quoted = "、".join(f"“{text}”" for text in sent[turn_id])
+                notes[turn_id] = f"（投递记录：上面这轮里{quoted}是用语音发出的，其余是文字）"
+            elif turn_id in failed:
+                notes[turn_id] = (
+                    "（投递记录：上面这轮里原本要用语音发的那一条没有发出去，"
+                    "已改成文字送到对方那边；对方没有收到语音）"
+                )
+        return notes
+
     async def render_prompt(self) -> str:
         lines: list[str] = []
         labels = {"planned": "计划中", "active": "进行中"}
@@ -221,12 +326,7 @@ class RuntimeEventStore:
             )
         voice = await self.latest_voice()
         if voice:
-            labels = {"not_attempted": "未尝试/未获放行", "sent": "已由协议端发出",
-                      "failed": "未发出", "text_fallback": "未发出，已转文字"}
-            lines.append(
-                f"- 最近一次语音：{labels.get(voice['status'], voice['status'])}（{voice['recorded_at']}）；"
-                "这只是系统投递结果，不代表对方已经听到"
-            )
+            lines.append(self._voice_prompt_line(voice))
         if not lines:
             return ""
         return (

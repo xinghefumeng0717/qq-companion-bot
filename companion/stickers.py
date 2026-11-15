@@ -105,31 +105,37 @@ def resize_image_if_needed(image_path: str) -> None:
                     resized = resized.convert("RGB")
                 resized.save(image_path)
                 logger.info(f"[Stickers] 图片缩放: {w}x{h} -> {new_w}x{new_h}")
+    except OSError:
+        raise
     except Exception as e:
         logger.warning(f"[Stickers] 检查/缩放图片失败: {e}")
 
 
 def image_to_base64_data_url(image_path: str) -> Tuple[Optional[str], Optional[str]]:
     """读取图片并转换为 base64 data url。
-    如果超过 10MB 则返回 (None, "图片太大了，我看不清")
+    如果超过 10MB 则返回 (None, "图片太大了，我看不清")。
+    若文件不存在或读取发生 OSError，返回 (None, "找不到图片文件")。
     """
-    if not os.path.exists(image_path):
+    try:
+        if not os.path.exists(image_path):
+            return None, "找不到图片文件"
+
+        resize_image_if_needed(image_path)
+
+        file_size = os.path.getsize(image_path)
+        if file_size > MAX_BASE64_SIZE:
+            return None, "图片太大了，我看不清"
+
+        from companion.onebot import detect_image_ext_and_mime
+
+        with open(image_path, "rb") as f:
+            data = f.read()
+        _, mime = detect_image_ext_and_mime(data, image_path)
+        b64 = base64.b64encode(data).decode("utf-8")
+        data_url = f"data:{mime};base64,{b64}"
+        return data_url, None
+    except OSError:
         return None, "找不到图片文件"
-
-    resize_image_if_needed(image_path)
-
-    file_size = os.path.getsize(image_path)
-    if file_size > MAX_BASE64_SIZE:
-        return None, "图片太大了，我看不清"
-
-    from companion.onebot import detect_image_ext_and_mime
-
-    with open(image_path, "rb") as f:
-        data = f.read()
-    _, mime = detect_image_ext_and_mime(data, image_path)
-    b64 = base64.b64encode(data).decode("utf-8")
-    data_url = f"data:{mime};base64,{b64}"
-    return data_url, None
 
 
 class StickerManager:

@@ -75,6 +75,21 @@ class RuntimeEventTests(unittest.IsolatedAsyncioTestCase):
         await self.store.record_voice("text_fallback", "晚安", now=self.now, reason="recovered")
         self.assertEqual((await self.store.latest_voice())["status"], "text_fallback")
 
+    async def test_语音结果挂在说出口的那一轮上(self):
+        self.assertEqual(await self.store.delivery_notes_for_turns([7, 8]), {})
+        await self.store.record_delivery_actions(
+            [{"channel": "voice", "content": "晚安", "metadata": {}}], evidence_turn_id=7,
+        )
+        await self.store.record_voice("sent", "晚安\n早点睡", now=self.now, evidence_turn_id=7)
+        await self.store.record_voice(
+            "text_fallback", "行吧就一条", now=self.now, reason="rejected", evidence_turn_id=8,
+        )
+        await self.store.record_voice("not_attempted", "不发", now=self.now, evidence_turn_id=9)
+        notes = await self.store.delivery_notes_for_turns([7, 8, 9])
+        self.assertIn("“晚安”是用语音发出的", notes[7])
+        self.assertIn("没有发出去", notes[8])
+        self.assertNotIn(9, notes)
+
     async def test_最终段决定真实投递(self):
         sent = await self.store.record_delivery_chunks(
             [{"type": "voice", "content": "晚安", "_runtime_voice": True, "_voice_delivery": "sent"}],

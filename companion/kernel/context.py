@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 from companion.datefmt import relativize_dates
 from companion.lorebook import BLOCK_HEADER
-from companion.kernel.semantic import semantic_history_view
+from companion.kernel.semantic import format_current_user_content, semantic_history_view
 from companion.kernel.contracts import (
     IncomingMessage,
     MemoryPromptBlocks,
@@ -124,29 +124,6 @@ def filter_action_tags(text: str) -> str:
     # 清理多余空行与两端空白
     cleaned = _MULTI_NEWLINE_RE.sub("\n\n", cleaned).strip()
     return cleaned
-
-_STYLE_ACTION_WORDS = (
-    "[voice", "[face", "[sticker", "[quote", "[沉默",
-    "语音", "表情包", "小黄脸", "沉默",
-)
-
-
-def filter_style_rule(text: str) -> str:
-    """只剔除动作协议分句，保留同条规则里的有效文风要求。"""
-    cleaned = filter_action_tags(text)
-    if not cleaned:
-        return ""
-    pieces = re.split(r"([。；;！!？?，,\n])", cleaned)
-    kept: List[str] = []
-    for index in range(0, len(pieces), 2):
-        statement = pieces[index]
-        punctuation = pieces[index + 1] if index + 1 < len(pieces) else ""
-        if any(word in statement for word in _STYLE_ACTION_WORDS):
-            continue
-        if statement.strip():
-            kept.append(statement + punctuation)
-    return "".join(kept).strip()
-
 
 # 星期口径（与旧 assembler.WEEKDAYS 同一套说法：星期一…星期日）
 _WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
@@ -416,9 +393,10 @@ class ContextBuilder:
         for rule in raw_rules:
             if not isinstance(rule, str):
                 continue
-            cleaned_rule = filter_style_rule(rule)
-            if cleaned_rule:
-                filtered_rules.append(cleaned_rule)
+            # 正文风格规则整条保留；动作职责已在角色卡整理时整块移出。
+            # 不再运行时按关键词和分句裁剪，避免留下残句。
+            if rule.strip():
+                filtered_rules.append(rule.strip())
 
         rules_text = "\n".join(f"- {g}" for g in guidelines)
         if filtered_rules:
@@ -467,7 +445,7 @@ class ContextBuilder:
             stage_name = getattr(stage, "name", f"阶段{stage_idx}")
             stage_tone = getattr(stage, "tone", "")
             stage_insts = getattr(stage, "instructions", []) or []
-            safe_insts = [cleaned for i in stage_insts if (cleaned := filter_style_rule(str(i)))]
+            safe_insts = [str(i).strip() for i in stage_insts if str(i).strip()]
             insts_str = "；".join(str(i) for i in safe_insts if i)
             stage_info = f"当前阶段：{stage_name}。态度倾向：{stage_tone}。相处指引：{insts_str}"
 
@@ -489,6 +467,11 @@ class ContextBuilder:
 
         # 8. 本轮时间事实块（客观事实，放在心理提示附近；绝不写进用户正文）
         sections.append(f"【本轮时间】\n{self._build_time_block(persona, snapshot, now_dt)}")
+
+        # 8b. 生成前已定下的本轮投递事实：她写之前就知道系统这轮会做什么，说的和做的才对得上。
+        delivery_fact = str(getattr(turn_input, "delivery_fact", "") or "").strip()
+        if delivery_fact:
+            sections.append(f"【本轮投递】\n- {delivery_fact}")
 
         # 9. 本轮只读采集的记忆与安全块；缺省契约全部为空时不改变原结构。
         if memory_blocks is not None:
@@ -549,9 +532,12 @@ class ContextBuilder:
         )
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_content}]
 
-        # 处理近期历史（至多 max_history_turns 条）
+        # 处理近期历史：至多 max_history_turns 轮（一轮 = 他一句 + 她一句，即两条记录），
+        # 截取后从他的话开始，不让窗口以她的半轮开头。
         if history:
-            sliced_history = history[-self.max_history_turns :]
+            sliced_history = list(history[-self.max_history_turns * 2 :])
+            while sliced_history and sliced_history[0].get("role", "user") != "user":
+                sliced_history.pop(0)
             for item in sliced_history:
                 role = item.get("role", "user")
                 # 兼容不同历史数据结构：semantic_text > readable_text > text > content
@@ -566,12 +552,25 @@ class ContextBuilder:
                     content = semantic_history_view(content, role)
                 if content:
                     messages.append({"role": role, "content": str(content)})
+                    # 真实投递记录紧跟在它发生的那一轮后面，由系统陈述，不混进她自己的话。
+                    note = str(item.get("delivery_note") or "").strip()
+                    if note:
+                        messages.append({"role": "system", "content": note})
 
-        # 当前轮统一使用输入层已经生成的自然语义，不再另走一条过滤路径。
-        current_user_content = turn_input.text
-        if turn_input.quoted_text:
-            current_user_content = f"他引用之前的“{turn_input.quoted_text}”时说：\n{current_user_content}"
-
-        messages.append({"role": "user", "content": current_user_content})
+        # 当前轮只读输入层整理好的自然语义；不把最新引用套到整批。
+        current_content = format_current_user_content(turn_input)
+        if turn_input.source == "proactive":
+            # 主动事件是系统来源，不是用户刚说过的话；只说明来源，不另建人格规则。
+            messages.append({
+                "role": "system",
+                "content": (
+                    "【主动消息事件】\n"
+                    "现在没有新的用户发言。以下是系统提供的主动素材，不是用户说的话：\n"
+                    f"{current_content}\n"
+                    "请据此自然地主动发一条消息。"
+                ),
+            })
+        else:
+            messages.append({"role": "user", "content": current_content})
 
         return messages

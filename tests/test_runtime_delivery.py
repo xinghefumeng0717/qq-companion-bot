@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from companion.main import CompanionBot
+from companion.kernel.contracts import SendReceipt
+from companion.kernel.delivery import DeliveryRejectedError
 
 
 class _OneBot:
@@ -12,9 +14,11 @@ class _OneBot:
         self.result = result
         self.calls = []
 
-    async def send_private_msg(self, _uid, segments):
+    async def send_private_msg_receipt(self, _uid, segments):
         self.calls.append(segments)
-        return self.result
+        if not self.result:
+            raise DeliveryRejectedError("synthetic rejection")
+        return SendReceipt(message_id=1)
 
 
 class _TTS:
@@ -44,20 +48,15 @@ class RuntimeDeliveryTests(unittest.IsolatedAsyncioTestCase):
         bot.onebot = onebot
         bot.tts = tts
         bot.config = SimpleNamespace(account=SimpleNamespace(allowed_user_id=1))
-        handler = MagicMock()
-        handler.recover_voice_failure = AsyncMock(return_value=None)
-        bot.turn_handler = handler
         return bot
 
-    async def test_合成异常会转文字并留下真实状态(self):
+    async def test_合成异常交给执行器且发送器不擅自补文字(self):
         with tempfile.TemporaryDirectory() as d:
             onebot = _OneBot(result=True)
             bot = self._bot(onebot, _TTS(os.path.join(d, "x.mp3"), error=True))
-            chunk = {"type": "voice", "content": "晚安"}
-            await bot._send_voice_chunk(chunk)
-            self.assertEqual(chunk["type"], "text")
-            self.assertEqual(chunk["_voice_delivery"], "text")
-            self.assertEqual(len(onebot.calls), 1)
+            with self.assertRaisesRegex(RuntimeError, "synthetic tts failure"):
+                await bot.send_voice("晚安")
+            self.assertEqual(onebot.calls, [])
 
     async def test_语音发送不携带引用段(self):
         with tempfile.TemporaryDirectory() as d:
@@ -66,11 +65,10 @@ class RuntimeDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 f.write(b"fake-audio")
             onebot = _OneBot(result=True)
             bot = self._bot(onebot, _TTS(path))
-            chunk = {"type": "voice", "content": "晚安", "_quote": {"index": 2, "message_id": 123}}
-            await bot._send_voice_chunk(chunk)
-            # NapCat/QQ 不支持 reply + record；引用只放文字段。
+            receipt = await bot.send_voice("晚安", quote_message_id=123)
+            # NapCat/QQ 不支持 reply + record；实际回执也不得伪造显示引用。
             self.assertEqual([s["type"] for s in onebot.calls[0]], ["record"])
-            self.assertEqual(chunk["_voice_delivery"], "sent")
+            self.assertIsNone(receipt.actual_quote_message_id)
 
     async def test_已发出后计数异常不重复补发(self):
         with tempfile.TemporaryDirectory() as d:
@@ -79,10 +77,8 @@ class RuntimeDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 f.write(b"fake-audio")
             onebot = _OneBot(result=True)
             bot = self._bot(onebot, _TTS(path, bump_error=True))
-            chunk = {"type": "voice", "content": "晚安"}
-            await bot._send_voice_chunk(chunk)
-            self.assertEqual(chunk["type"], "voice")
-            self.assertEqual(chunk["_voice_delivery"], "sent")
+            receipt = await bot.send_voice("晚安")
+            self.assertEqual(receipt.message_id, 1)
             self.assertEqual(len(onebot.calls), 1)
 
 

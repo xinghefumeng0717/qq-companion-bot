@@ -2,7 +2,7 @@
 后台定时协程，执行三层决策：
 1. 零成本规则闸门 (quiet_hours, 60min间隔, 晚安, 情绪下限)
 2. LLM 潜意识决策 (A想发 / B不发 / C克制入池)
-3. 话题素材五级优选与分段发送
+3. 话题素材五级优选与统一内核生成、真实投递
 """
 
 from __future__ import annotations
@@ -30,30 +30,17 @@ from companion.memory import MemoryManager
 from companion.mood import MoodEngine
 from companion.persona import LONG_HOLIDAY_MIN_SPAN, Persona, holiday_span
 from companion.prompts import (
-    face_prompt_block,
     PROACTIVE_DECISION_PROMPT,
-    PROACTIVE_GENERATE_PROMPT,
     STAGE_GATING_RESTRICTED,
     get_mood_description,
     get_mood_label,
     get_trust_description,
     holiday_prompt_note,
 )
-from companion.voice_recovery import recover_voice_text
-from companion.voice_planner import VoicePlanner
 from companion.runtime_state import runtime_v1_enabled
 from companion.replier import (
-    Replier,
-    count_today_faces,
-    face_daily_budget,
-    has_voice_intent,
-    has_voice_promise,
-    sanitize_voice_claims,
-    record_text_from_chunks,
     strip_face_markers,
     strip_voice_record_prefix_for_history,
-    typing_text_from_chunks_or_record,
-    fit_chunks,
 )
 from companion.stickers import StickerManager
 
@@ -134,10 +121,8 @@ class ProactiveScheduler:
         mood: MoodEngine,
         memory: MemoryManager,
         stickers: StickerManager,
-        replier: Replier,
         gateway: LLMGateway,
         db: Database,
-        send_msg_fn: Callable[[Dict[str, Any]], Coroutine[Any, Any, None]],
         assembler: Optional[Any] = None,
         holidays_provider: Optional[Callable[[], List[str]]] = None,
         set_typing_fn: Optional[Callable[[bool], Coroutine[Any, Any, bool]]] = None,
@@ -151,10 +136,8 @@ class ProactiveScheduler:
         self.mood = mood
         self.memory = memory
         self.stickers = stickers
-        self.replier = replier
         self.gateway = gateway
         self.db = db
-        self.send_msg_fn = send_msg_fn
         self.assembler = assembler
         # 节假日唯一数据源 Config.get_holidays()；不传即视为无节假日
         self._holidays_provider = holidays_provider
@@ -167,6 +150,8 @@ class ProactiveScheduler:
         # FIXES22：语音闸门（与主聊共用同一份 TTSManager 账目：开关/日上限/作息）
         self.tts = tts
         self.runtime_events = None
+        # 由生产装配注入同一个 KernelTurnHandler；没有新主链时不得回退旧主动生成。
+        self.kernel_turn_handler: Optional[Any] = None
         self._typing_on = (
             timing_config is not None
             and timing_config.typing_indicator_enabled
@@ -481,161 +466,16 @@ class ProactiveScheduler:
             return ""
 
     async def _generate_and_send(self, material: str, current_time_str: str) -> bool:
-        """给定话题素材走"生成 → 切段 → typing 表演 → 发送 → 落库"整条管道。
-
-        A 分支（常规决策选中想发）与 FIXES16 事件通道共用这一条，
-        保证两条路产出的消息在切段、typing、落库、未回复计数上完全同构。
-        返回 True = 消息已发出并落库。
-        """
-        stickers_list = "、".join(self.stickers.get_prompt_sticker_list())
-
-        # 任务1：生成层注入最近 8 条对话历史。E1 的根因就是这里 0 条历史，
-        # 她对"他已经坐动车到家"完全无知，只能拿永不更新的 facts 硬编
-        gen_turns = await self.memory.get_recent_turns(limit=8)
-        recent_chat_block = await self._reply_gap_note() + format_recent_chat(gen_turns, max_chars=60)
-
-        medium = self.persona.world.chat_medium
-        gen_user_prompt = PROACTIVE_GENERATE_PROMPT.format(
-            user_address=self.persona.user_address,
-            # 默认值保留改造前的"手机 QQ"写法（带空格），旧卡提示词逐字节不变
-            chat_medium="手机 QQ" if medium == "手机QQ" else medium,
-            typing_habit=self.persona.world.typing_habit,
-            current_time=current_time_str,
-            topic_material=material,
-            recent_chat=recent_chat_block,
-            stickers_list=stickers_list,
-            face_block=face_prompt_block(self.persona.world),
-        )
-
-        # FIXES22：主动消息同样走语音闸门（"睡前收到她一条语音"是这张卡的高光场景），
-        # 与主聊共用同一份 TTSManager 账目（开关/日上限/作息）。**先问闸门再组装**：
-        # 关着时提示词里就不该出现 [voice:] 这个写法。
-        voice_ok = await self._voice_gate_ok()
-        # FIXES27：TTS 开着、闸门却没过（真在合练/走不开）时，提示词里得告诉她
-        # "这会儿只能打字"，免得主动消息里答应了发语音、实际只发出文字。
-        # 防御式 getattr：老测试/旧装配没有 self.tts 也能走。
-        tts_cfg = getattr(getattr(self, "tts", None), "config", None)
-        voice_gated_note = (not voice_ok) and bool(getattr(tts_cfg, "enabled", False))
-        # 完整人格 system prompt 注入（主动消息传空串：作息注记不会误加"你其实是醒着的"）
-        runtime_enabled = runtime_v1_enabled(None, self.assembler)
-        runtime_block = (
-            await self.runtime_events.render_prompt()
-            if runtime_enabled and self.runtime_events is not None else ""
-        )
-        if self.assembler is None:
-            # 老的轻量调用方允许不传 assembler，至少保留角色背景而不崩溃
-            system_prompt = getattr(self.persona, "core_description", "")
-        else:
-            system_prompt = await self.assembler.assemble_system_prompt(
-                "", voice_ok, voice_gated_note=voice_gated_note,
-                now=datetime.now(), runtime_state_block=runtime_block,
-            )
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": self._for_her(gen_user_prompt)},
-        ]
-
-        try:
-            reply_text = await self.gateway.chat(
-                messages=messages,
-                model=self.gateway.config.text_model,
-                temperature=0.8,
-                purpose="proactive_message",
-            )
-        except Exception as e:
-            logger.error(f"[Proactive] 生成主动消息失败: {e}")
+        """普通主动与生活事件共用新内核；返回是否存在任何确认送达。"""
+        del current_time_str  # 本轮时间由统一输入与只读快照提供，不另拼主动时间提示。
+        handler = getattr(self, "kernel_turn_handler", None)
+        if handler is None:
+            logger.error("[Proactive] 新内核主动处理器未装配，本次不主动发")
             return False
-
-        # 切段与发送（source=proactive：占位符兜底的 INFO 日志据此标注来源）
-        # FIXES22：用上面问过闸门的那份结论（不重复查库），语音与主聊共用额度
-        face_budget = None
-        if getattr(self.persona.world, "face_usage", "normal") == "rare":
-            used_faces = await count_today_faces(self.db)
-            face_budget = face_daily_budget(self.persona.world, used_faces)
-        runtime_plan = None
-        planner = None
-        planner_allowed = voice_ok
-        if runtime_enabled:
-            planner = VoicePlanner(
-                getattr(self.assembler, "voice_frequency", "frequent"),
-                max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
-            )
-            planner_allowed = voice_ok and planner.allows("")
-            reply_text = sanitize_voice_claims(
-                reply_text, voice_allowed=planner_allowed,
-                previous_voice_sent=False, voice_context=True,
-            )
-            runtime_plan = planner.plan("", reply_text, voice_allowed=planner_allowed)
-            if not runtime_plan.has_voice:
-                reply_text = sanitize_voice_claims(
-                    reply_text, voice_allowed=False,
-                    previous_voice_sent=False, voice_context=True,
-                )
-            chunks, clean_text = self.replier.parse_reply(
-                runtime_plan.body_text if runtime_plan.has_voice else reply_text,
-                source="proactive",
-                face_budget=face_budget,
-                voice_allowed=False,
-                voice_max_chars=getattr(getattr(self.tts, "config", None), "max_chars", 60),
-            )
-            if runtime_plan.has_voice:
-                chunks.append({
-                    "type": "voice", "content": runtime_plan.voice_text,
-                    "_runtime_voice": True,
-                })
-                chunks = fit_chunks(chunks, self.replier.config.max_chunks)
-        else:
-            chunks, clean_text = self.replier.parse_reply(
-                reply_text,
-                source="proactive",
-                face_budget=face_budget,
-                voice_allowed=voice_ok,
-                voice_max_chars=getattr(
-                    getattr(self.tts, "config", None), "max_chars", 60
-                ),
-            )
-        for chunk in chunks:
-            if chunk.get("type") == "voice":
-                chunk["_voice_user_text"] = ""
-        if (has_voice_intent(reply_text) or has_voice_promise(reply_text)) and (
-            planner is None or planner.frequency != "off"
-        ) and not any(
-            c.get("type") == "voice" for c in chunks
-        ):
-            recovered = await recover_voice_text(
-                replier=self.replier,
-                assembler=self.assembler,
-                gateway=self.gateway,
-                user_text="",
-                draft=reply_text,
-                reason="主动消息的语音没有真正发出",
-                model=self.gateway.config.text_model,
-            )
-            if recovered:
-                chunks.append({"type": "text", "content": recovered})
-        clean_text = record_text_from_chunks(chunks) or clean_text
-        if not chunks:
-            return False
-
-        logger.info(f"[Proactive] 正在分段发送主动消息: {clean_text}")
-        # FIXES22：打字时长按"她真打出来的字"算（语音段不算，它走自己的发送停顿）
-        # DEEP_AUDIT B-6：纯语音轮**不**回退记录文本（语音正文不是她打的字）
-        await self._play_typing_indicator(
-            typing_text_from_chunks_or_record(chunks, clean_text)
-        )
-        await self.replier.send_reply_chunks(chunks, self.send_msg_fn)
-        clean_text = record_text_from_chunks(chunks) or clean_text
-
-        # 实验路径只按最终实发结果记语音；没有语音计划时不额外制造未尝试记录
-        if runtime_enabled and self.runtime_events is not None:
-            try:
-                await self.runtime_events.record_delivery_chunks(chunks, reply_text, now=datetime.now())
-            except Exception as e:
-                logger.warning(f"[Proactive] 运行时语音账本写入失败，不影响落库: {e}")
-        # 发送后落库并累加未回复计数
-        await self.memory.save_proactive_turn(clean_text)
-        await self.increment_unanswered_count()
-        return True
+        # 沿用既有回复间隔事实与防复读提醒，但由系统事件承载，不冒充用户发言。
+        # 相对日期转换覆盖整段系统材料，与旧主动生成保持一致。
+        event_material = self._for_her(await self._reply_gap_note() + material)
+        return await handler.handle_proactive(event_material)
 
     async def _voice_gate_ok(self) -> bool:
         """主动消息的语音闸门（FIXES22 任务3 第3条）

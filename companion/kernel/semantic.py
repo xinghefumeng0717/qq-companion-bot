@@ -4,6 +4,7 @@
 1. 从 contracts.IncomingMessage 序列构建 StandardizedTurnInput，聚合为自然语言，保留真实 message_id；
    （文本与表情混合的批次合成一个自然整体，表情是附属信息而不是新话题）；
 2. 历史记录只读语义视图，把已有语音/表情/协议记录转为自然语义描述，不修改数据库，不向模型输出协议教学；
+   助手自己的历史只剥离动作标记，不把系统动作改写成“发了一个……表情”回灌正文；
 3. 从主模型文本创建不可变 ReplyDraft 与具有稳定 ID 的 ReplyBubble 序列；
 4. 创建并严格校验第一阶段纯文字 DeliveryPlan（每个气泡恰好投递一次，拒绝重复、缺失或非纯文本）。
 
@@ -39,6 +40,9 @@ _STICKER_TAG_RE = re.compile(r"\[(?:sticker|表情)[:：]([^\]]+)\]", re.IGNOREC
 _QUOTE_TAG_RE = re.compile(r"^[ \t]*\[quote[:：](\d+)\]\s*", re.MULTILINE | re.IGNORECASE)
 _SILENCE_TAG_RE = re.compile(r"^[ \t]*\[(?:沉默|SILENT|SILENCE)\][ \t]*$", re.MULTILINE | re.IGNORECASE)
 _LABEL_TAG_RE = re.compile(r"^[ \t]*\[label[:：](\d+)\]\s*", re.MULTILINE | re.IGNORECASE)
+_USER_IMAGE_DESC_RE = re.compile(r"\[(?:发来一张照片|发来一张图片)[:：]([^\]]+)\]")
+_USER_IMAGE_UNCLEAR_RE = re.compile(r"\[(?:对方)?发来一张图片[，,]但没能看清\]")
+_USER_IMAGE_UNSEEN_RE = re.compile(r"\[对方发来一张图片[，,]你看不到内容\]")
 
 # 气泡切分：代码块与列表匹配正则
 _CODE_FENCE_START_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
@@ -60,7 +64,7 @@ def _incoming_semantic(msg: IncomingMessage) -> str:
     kind = msg.kind.lower()
     label = raw.strip("[]【】") or kind
     if kind in {"face", "emoji", "sticker"}:
-        return f"发了一个“{label}”表情"
+        return f"发了一个{_face_view(label)}表情"
     if kind == "voice":
         return f"发来一条语音，内容是：“{raw}”" if raw else "发来一条语音"
     if kind == "image":
@@ -69,6 +73,17 @@ def _incoming_semantic(msg: IncomingMessage) -> str:
 
 
 _FACE_KINDS = {"face", "emoji", "sticker"}
+
+
+def _face_view(label: str) -> str:
+    """表情名后面带一句它在聊天里的意思；只有名字时模型会按字面去读（把“吃糖”当成真在吃糖）。
+
+    含义取自既有的小黄脸词表，只在这个表情真的出现时带上，不整表常驻提示词。
+    """
+    from companion.prompts import READ_FACE_MEANINGS
+
+    meaning = READ_FACE_MEANINGS.get(label, "")
+    return f"“{label}”（{meaning}）" if meaning else f"“{label}”"
 
 
 def _face_label(msg: IncomingMessage) -> str:
@@ -138,11 +153,11 @@ def _merge_text_and_faces(
             if not label:
                 return None
             if prev is None:
-                parts.append(f"先附上一个小表情“{label}”")
+                parts.append(f"先附上一个小表情{_face_view(label)}")
             elif prev == "text":
-                parts.append(f"同时附上一个小表情“{label}”")
+                parts.append(f"同时附上一个小表情{_face_view(label)}")
             else:
-                parts.append(f"又附上一个小表情“{label}”")
+                parts.append(f"又附上一个小表情{_face_view(label)}")
         prev = cls
 
     return "对方" + "，".join(parts)
@@ -209,12 +224,124 @@ def build_turn_input(
     )
 
 
+def build_proactive_turn_input(
+    material: str,
+    received_at: Optional[datetime] = None,
+) -> StandardizedTurnInput:
+    """构造系统主动事件；它没有用户消息 ID，也不产生显示引用目标。"""
+    event_text = (material or "").strip()
+    event = IncomingMessage(
+        message_id=None,
+        text=event_text,
+        kind="proactive_event",
+        semantic_text=event_text,
+    )
+    return StandardizedTurnInput(
+        session_id="production-proactive",
+        messages=(event,),
+        text=event_text,
+        received_at=received_at or datetime.now(),
+        reply_to_message_id=None,
+        source="proactive",
+    )
+
+
+def _current_message_scope(msg: IncomingMessage, position: int) -> Tuple[Any, ...]:
+    """优先使用生产批次序位；旧数据只按真实消息 ID 收拢连续段。"""
+    scope = msg.payload.get("source_scope")
+    if scope is not None:
+        return ("source", scope)
+    if msg.message_id is not None:
+        return ("message", msg.message_id)
+    return ("position", position)
+
+
+def _quoted_group_view(group: Sequence[IncomingMessage]) -> str:
+    """一条原消息只展示一次引用；组内各段仍复用现有自然语义。"""
+    merged = _merge_text_and_faces(group)
+    body = merged if merged is not None else format_incoming_messages(group)
+    first = group[0]
+    if first.quoted_message_id is None or first.payload.get("quote_prefix_in_text"):
+        return body
+
+    quoted_text = str(
+        first.payload.get("quoted_semantic_text")
+        or first.payload.get("quoted_text")
+        or ""
+    ).strip()
+    if not quoted_text:
+        return body
+
+    role = str(first.payload.get("quoted_role") or "unknown")
+    if role == "user":
+        prefix = f"他引用自己之前说的“{quoted_text}”"
+    elif role == "assistant":
+        prefix = f"他引用你之前说的“{quoted_text}”"
+    else:
+        prefix = f"他引用之前的“{quoted_text}”"
+
+    if not body:
+        return prefix
+    if merged is not None:
+        # “对方”是上面 _merge_text_and_faces 刚生成的结构外壳，不是用户原文。
+        return f"{prefix}，{merged[len('对方'):]}"
+    if len(group) > 1:
+        # 多段外壳同样由结构决定，不能靠正文前缀猜测。
+        contents = [_incoming_semantic(msg) for msg in group]
+        return prefix + "；这条消息的内容是：\n" + "\n".join(contents)
+    if first.kind.lower() in _FACE_KINDS | {"image", "voice"}:
+        return f"{prefix}，同时{body}"
+    return f"{prefix}时说：\n{body}"
+
+
+def format_current_user_content(turn_input: StandardizedTurnInput) -> str:
+    """生成主模型唯一需要阅读的当前输入，不回写正文或历史。
+
+    新结构化数据按原消息逐条展示引用；旧数据只有顶层 quoted_text 时，
+    保留原有整批前置作为兼容 fallback。scope、消息 ID 和角色枚举不外泄。
+    """
+    messages = list(turn_input.messages)
+    if not any(msg.quoted_message_id is not None for msg in messages):
+        if turn_input.quoted_text:
+            return f"他引用之前的“{turn_input.quoted_text}”时说：\n{turn_input.text}"
+        return turn_input.text
+
+    groups: List[List[IncomingMessage]] = []
+    previous_scope: Optional[Tuple[Any, ...]] = None
+    for position, msg in enumerate(messages):
+        scope = _current_message_scope(msg, position)
+        if not groups or scope != previous_scope:
+            groups.append([msg])
+        else:
+            groups[-1].append(msg)
+        previous_scope = scope
+
+    views = [_quoted_group_view(group) for group in groups]
+    views = [view for view in views if view.strip()]
+    if not views:
+        return ""
+    if len(views) == 1:
+        return views[0]
+    return "对方连着发来了以下内容：\n" + "\n".join(views)
+
+
+def _is_assistant_role(role: str) -> bool:
+    """判断这条历史是否来自助手自己。
+
+    助手自己的历史里，[face:x]、[sticker:x]、[表情:x] 是系统动作而不是助手说的话；
+    对方（用户）发的表情则一直是自然语义的一部分。
+    """
+    return str(role or "").strip().lower() == "assistant"
+
+
 def semantic_history_view(raw_content: str, role: str = "assistant") -> str:
     """历史记录只读语义视图：将已有的语音/表情/协议标记转化为自然语义描述。
 
     - 严禁修改数据库原始数据；
     - 历史里的语音标记只剥离外壳并保留正文，不生成“用语音说”模板；
-    - 将 [face:xxx]、[sticker:xxx] 转化为自然表述「发了一个“xxx”表情」；
+    - role="assistant"：只读剥离 [face:xxx]、[sticker:xxx]、[表情:xxx] 等动作标记并保留自然正文，
+      绝不把系统动作改写成「发了一个“xxx”表情」回灌成助手自己的话（动作事实另有历史）；
+    - role="user"（及其它非助手角色）：沿用既有表情语义「发了一个“xxx”表情」；
     - 去除协议性行首引用标记 [quote:N] 或转为自然语境；
     - 绝不在模型上下文里露出协议标记，避免模型模仿学习协议语法。
     """
@@ -236,9 +363,19 @@ def semantic_history_view(raw_content: str, role: str = "assistant") -> str:
     # 5. 历史存档前缀同样只去掉外壳，保留正文。
     text = _VOICE_RECORD_PREFIX_RE.sub(lambda match: match.group(1).strip(), text)
 
-    # 6. 表情与表情包转为自然语义，不留下机器协议外形。
-    text = _FACE_TAG_RE.sub(r"发了一个“\1”表情", text)
-    text = _STICKER_TAG_RE.sub(r"发了一个“\1”表情", text)
+    # 6. 表情与表情包按角色处理，任何情况下都不留下机器协议外形。
+    #    助手自己的历史：只剥离动作标记，动作事实由动作历史承担，不回灌成助手正文；
+    #    对方（用户等）发来的表情：沿用既有自然语义。
+    if _is_assistant_role(role):
+        text = _FACE_TAG_RE.sub("", text)
+        text = _STICKER_TAG_RE.sub("", text)
+    else:
+        text = _FACE_TAG_RE.sub(lambda m: f"发了一个{_face_view(m.group(1))}表情", text)
+        text = _STICKER_TAG_RE.sub(lambda m: f"发了一个{_face_view(m.group(1))}表情", text)
+        # 既有用户图片历史记录只读语义转换（去除方括号并保留自然语义）
+        text = _USER_IMAGE_DESC_RE.sub(lambda m: f"发来一张图片：{m.group(1).strip()}", text)
+        text = _USER_IMAGE_UNCLEAR_RE.sub("发来一张图片，但没能看清", text)
+        text = _USER_IMAGE_UNSEEN_RE.sub("对方发来一张图片，你看不到内容", text)
 
     # 7. 剥离行首协议引用 [quote:N] 与 [label:N]
     text = _QUOTE_TAG_RE.sub("", text)

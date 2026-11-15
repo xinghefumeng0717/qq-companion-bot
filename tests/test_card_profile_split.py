@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from companion.persona import Persona, World
-from companion.prompts import LIFE_ARC_GENERATE_PROMPT, REPLY_CHECK_PROMPT, SYSTEM_PROMPT_TEMPLATE
+from companion.prompts import LIFE_ARC_GENERATE_PROMPT, SYSTEM_PROMPT_TEMPLATE
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 LEAN = os.path.join(ROOT, "characters", "qingzi_lean")
@@ -74,9 +74,6 @@ class TestWorld(_Tmp):
             .replace("{calendar_label}", w.calendar_label).replace("{calendar_kind}", w.calendar_kind)
         self.assertIn("她是一个真实的大学生", arc)
         self.assertIn("【学期节奏锚点】（校历硬事实", arc)
-        chk = REPLY_CHECK_PROMPT.replace("{her_identity}", w.her_identity) \
-            .replace("{his_identity}", "一个男生（同校朋友）")
-        self.assertIn("写草稿的是一个女大学生，她在跟一个男生（同校朋友）聊天", chk)
 
     def test_卡里可以改世界设置_未知字段忽略(self):
         p = Persona.load(self.card({"world": {"her_identity": "岁的第十三代理人", "chat_medium": "终端",

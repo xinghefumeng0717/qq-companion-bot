@@ -1618,6 +1618,14 @@ class Replier:
         clean_record_text = record_text_from_chunks(final_chunks)
         return final_chunks, clean_record_text
 
+    async def wait_before_chunk(self, chunk: Dict[str, Any], index: int) -> None:
+        """新旧发送链共用的同一份段间节奏；首段减半，非文字按既有权重。"""
+        base_delay = random.uniform(self.config.chunk_delay_min, self.config.chunk_delay_max)
+        total_delay = base_delay + chunk_text_weight(chunk) * 0.03
+        if index == 0:
+            total_delay *= 0.5
+        await asyncio.sleep(total_delay)
+
     async def send_reply_chunks(
         self,
         chunks: List[Dict[str, Any]],
@@ -1625,18 +1633,5 @@ class Replier:
     ) -> None:
         """分段发送：段间随机延迟 + 模拟打字延迟，首段延迟减半"""
         for i, chunk in enumerate(chunks):
-            # 计算延迟
-            base_delay = random.uniform(self.config.chunk_delay_min, self.config.chunk_delay_max)
-            # FIXES20：文字量按 chunk_text_weight 折算（face/combo 都走这一份），
-            # 语义与改前一致：文字段按真实字数、非文字段（含表情包）按 5 字
-            char_count = chunk_text_weight(chunk)
-            typing_delay = char_count * 0.03
-            total_delay = base_delay + typing_delay
-
-            if i == 0:
-                total_delay *= 0.5
-
-            await asyncio.sleep(total_delay)
-
-            # 调用发送函数
+            await self.wait_before_chunk(chunk, i)
             await send_fn(chunk)

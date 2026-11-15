@@ -15,7 +15,7 @@ thinking_effort_tasks = "low"
 # 总开关关闭时，按用途白名单开思考（默认即下列五项：写出来的文字用户看得见，不思考的 flash 行文会不通顺）
 # ⚠ 手工填写本字段时须包含 life_arc（她的生活主线）——写了白名单却漏掉它，
 #   主线生成会静默退回不思考，FIXES16 的效果等于没上。整行删掉则用代码默认值（同样含 life_arc）。
-thinking_tasks_purposes = ["diary_archive", "vision_perception", "proactive_message", "life_arc", "reply_check"]
+thinking_tasks_purposes = ["diary_archive", "vision_perception", "life_arc"]
 
 # 每个 [models.<名>] 是一家厂商的完整档案
 [models.deepseek]
@@ -77,21 +77,10 @@ impressions = false                # 对他的看法：每 8 轮更新几条"我
 max_chunks = 5                     # 单轮最多拆几条发送
 chunk_delay_min = 0.8              # 段间延迟秒数下限
 chunk_delay_max = 2.2
-self_check = false                 # 生成后质检：flash 检查复述/点评他的话和装饰性比喻，有就删掉（默认关）
-self_check_timeout = 10.0          # 质检最长等几秒，超时照发原稿（质检开 low 思考，中位约 1.6 秒）
-continuity_check = true            # 语句连贯性：只抓答非所问、读不通、前后矛盾；失败照发原稿
-continuity_timeout = 8.0            # 连贯性判定最长等几秒，超时照发原稿
 # 运行时事实/事件协作实验（默认关；只读状态、语音规划与投递、轮次追踪共用）
 runtime_state_v1 = false
 voice_frequency = "frequent"         # frequent=内容适合就优先语音（非每条）；explicit=仅明确请求；off=关闭规划
-trace_dir = "data/turn_traces"       # 实验开启后的本地 JSONL 轮次追踪
-use_kernel = false                  # 新对话内核：普通文字与明确语音走新管线，特殊输入事前回退旧链路（默认关）
-# trim_echo / vision_direct / candidates 同样可由卡里的 features 段自声明：
-# 这里没写的项取卡里的值，写了以这里为准。
-trim_echo = false                  # 首泡回声裁剪：第一个气泡在复述/点评他、后面还有话就删掉（不调模型，默认关）
-vision_direct = false              # 一步看图：主聊模型直接看图（要支持多模态），省掉单独看图那次调用（默认关）
-candidates = 1                     # 并行生成几条候选、挑没复述/点评/比喻的那条（1 = 不开，最多 4；费用按条数翻倍）
-# candidate_tiebreak = "warm"        # 多候选毛病分打平后的决胜："warm"=挑更暖的（默认）；"first"=取最先生成的（傲娇等"暖=人设磨损"的卡用，也可由卡 features 段自声明）
+trace_dir = "data/turn_traces"       # 新内核的本地 JSONL 轮次追踪
 style_examples = false             # 动态示例：按他这句话挑几条真人类似情境的回法当参考（只学怎么接，不学口吻；默认关）
 style_examples_path = "data/style_examples/real_chat.json"  # 示例库路径（相对项目根目录）
 

@@ -143,11 +143,7 @@ class LLMConfig:
     DEFAULT_THINKING_PURPOSES = [
         "diary_archive",
         "vision_perception",
-        "proactive_message",
         "life_arc",
-        # 回复质检的改写稿直接发给他，同样是"用户看得见的字"（2026-10-19 v5 实测：不思考时
-        # 复述率只降到 11%、还会留半截话；开 low 降到 5.6%、改写通顺，耗时中位 +0.6s）
-        "reply_check",
     ]
 
     def __init__(
@@ -272,31 +268,14 @@ class ReplyConfig:
     max_chunks: int = 5
     chunk_delay_min: float = 0.8
     chunk_delay_max: float = 2.2
-    # 生成后质检（low 思考的 flash 抓复述/点评和装饰性比喻并删掉），新功能默认关
-    self_check: bool = False
-    self_check_timeout: float = 10.0
-    # 首泡回声裁剪：第一个气泡在复述/点评他、后面还有话就删掉（零调用），默认关
-    trim_echo: bool = False
-    # 并行生成几条候选、挑没复述/点评/比喻的那条（1 = 不开），默认 1
-    candidates: int = 1
-    # 多候选毛病分打平后的决胜规则："warm"=挑更暖的（默认，暖卡既有行为）；
-    # "first"=取最先生成的，不做温度偏好（傲娇等"暖=人设磨损"的卡用）
-    candidate_tiebreak: str = "warm"
     # 动态示例：按他这句话从真人聊天库挑几条类似情境的回法给模型参考，默认关
     style_examples: bool = False
     style_examples_path: str = "data/style_examples/real_chat.json"
-    # 一步看图：主聊模型直接看他发的图（要求主聊模型支持多模态），回复末尾顺手写一行
-    # 【看到：…】存进记录；发图那一轮只生成 1 条候选。默认关 = 老的两步（先看图写描述再聊）
-    vision_direct: bool = False
-    # 语句连贯性闸门：只抓答非所问、读不通、前后矛盾；失败开放，默认开
-    continuity_check: bool = True
-    continuity_timeout: float = 8.0
     # 运行时事实/事件协作实验：默认关，旧路径逐字不变
     runtime_state_v1: bool = False
     # 高频是产品偏好：frequent=适合就优先语音；explicit=仅明确请求；off=关闭规划
     voice_frequency: str = "frequent"
     trace_dir: str = "data/turn_traces"
-    use_kernel: bool = False
 
 
 @dataclass
@@ -410,7 +389,6 @@ def _admin_theme(val: object) -> str:
 # 卡里写 {"self_memory": true, ...} 表示"这个角色需要这些能力"。旧卡没有 features 段
 # 时这里整条跳过，所有开关保持代码默认值——提示词与行为逐字节不变。
 CARD_FEATURE_CHARACTER_BOOLS = ("self_memory", "fact_layers", "impressions", "meetup_recap")
-CARD_FEATURE_REPLY_BOOLS = ("trim_echo", "vision_direct")
 
 
 def load_card_features(char_dir: str) -> Dict[str, Any]:
@@ -439,14 +417,12 @@ def load_card_features(char_dir: str) -> Dict[str, Any]:
 
 def apply_card_features(
     character: CharacterConfig,
-    reply: ReplyConfig,
     character_data: Dict[str, Any],
-    reply_data: Dict[str, Any],
     char_dir: str,
 ) -> None:
     """把卡里的 features 补进"config 没显式写"的开关。
 
-    character_data / reply_data 是 TOML 里 [character] / [reply] 的原始键集合：
+    character_data 是 TOML 里 [character] 的原始键集合：
     **键存在即显式**（写了 false 也算显式，卡不许覆盖），没有才用卡里的值。
     由 Config.load 在返回前调用，早于 main.py 的所有消费点。
     """
@@ -463,33 +439,7 @@ def apply_card_features(
         else:
             logger.warning(f"[Config] 角色卡 features.{name} 必须是布尔值，已忽略：{value!r}")
 
-    for name in CARD_FEATURE_REPLY_BOOLS:
-        if name in reply_data or name not in features:
-            continue
-        value = features[name]
-        if isinstance(value, bool):
-            setattr(reply, name, value)
-        else:
-            logger.warning(f"[Config] 角色卡 features.{name} 必须是布尔值，已忽略：{value!r}")
 
-    if "candidates" not in reply_data and "candidates" in features:
-        value = features["candidates"]
-        if isinstance(value, int) and not isinstance(value, bool):
-            reply.candidates = max(1, min(value, 4))
-        else:
-            logger.warning(
-                f"[Config] 角色卡 features.candidates 必须是整数，已忽略：{value!r}"
-            )
-
-    if "candidate_tiebreak" not in reply_data and "candidate_tiebreak" in features:
-        value = features["candidate_tiebreak"]
-        if value in ("warm", "first"):
-            reply.candidate_tiebreak = value
-        else:
-            logger.warning(
-                f"[Config] 角色卡 features.candidate_tiebreak 只认 warm/first，"
-                f"已忽略：{value!r}"
-            )
 
 
 @dataclass
@@ -608,29 +558,14 @@ class Config:
             max_chunks=int(reply_data.get("max_chunks", 5)),
             chunk_delay_min=float(reply_data.get("chunk_delay_min", 0.8)),
             chunk_delay_max=float(reply_data.get("chunk_delay_max", 2.2)),
-            self_check=bool(reply_data.get("self_check", False)),
-            self_check_timeout=float(reply_data.get("self_check_timeout", 10.0)),
-            trim_echo=bool(reply_data.get("trim_echo", False)),
-            candidates=max(1, min(int(reply_data.get("candidates", 1)), 4)),
             style_examples=bool(reply_data.get("style_examples", False)),
             style_examples_path=str(
                 reply_data.get("style_examples_path", "data/style_examples/real_chat.json")
             ),
-            vision_direct=bool(reply_data.get("vision_direct", False)),
-            continuity_check=bool(reply_data.get("continuity_check", True)),
-            continuity_timeout=float(reply_data.get("continuity_timeout", 8.0)),
             runtime_state_v1=bool(reply_data.get("runtime_state_v1", False)),
             voice_frequency=str(reply_data.get("voice_frequency", "frequent")),
             trace_dir=str(reply_data.get("trace_dir", "data/turn_traces")),
-            use_kernel=bool(reply_data.get("use_kernel", False)),
-            candidate_tiebreak=str(reply_data.get("candidate_tiebreak", "warm")),
         )
-        if reply.candidate_tiebreak not in ("warm", "first"):
-            logger.warning(
-                f"[Config] reply.candidate_tiebreak 只认 warm/first，已回退默认 warm："
-                f"{reply.candidate_tiebreak!r}"
-            )
-            reply.candidate_tiebreak = "warm"
         if reply.voice_frequency not in ("frequent", "explicit", "off"):
             logger.warning(
                 f"[Config] reply.voice_frequency 只认 frequent/explicit/off，已回退 frequent："
@@ -639,7 +574,7 @@ class Config:
             reply.voice_frequency = "frequent"
         # 卡里的 features 只补 config 没显式写的项；旧卡没有 features 段时整条跳过。
         # 必须在 main.py 消费这些开关之前完成（Config.load 返回前，见 CompanionBot.__init__）。
-        apply_card_features(character, reply, char_data, reply_data, character.path)
+        apply_card_features(character, char_data, character.path)
 
         proactive_data = data.get("proactive", {})
         proactive = ProactiveConfig(

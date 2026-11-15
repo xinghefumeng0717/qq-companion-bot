@@ -170,17 +170,17 @@ class _StubAssembler:
 
 
 def _handler(tts=None):
-    """只够跑 _check_voice_gate 的 TurnHandler 壳（绕过重型构造函数）。"""
-    from companion.turn_handler import TurnHandler
+    """只够跑 _check_voice_gate 的 TurnRuntime 壳（绕过重型构造函数）。"""
+    from companion.turn_runtime import TurnRuntime
 
-    handler = object.__new__(TurnHandler)
+    handler = object.__new__(TurnRuntime)
     handler.assembler = _StubAssembler()
     if tts is not None:
         handler.tts = tts  # 不传就模拟"老装配没有 tts 属性"
     return handler
 
 
-class TestTurnHandlerVoiceGate(unittest.TestCase):
+class TestTurnRuntimeVoiceGate(unittest.TestCase):
     def test_对话轮次恒按醒着传参(self):
         """handle_turn 是"他正在跟她聊"的轮次，awake_override 必须恒 True。"""
         tts = _RecordingTTS()

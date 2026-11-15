@@ -9,7 +9,9 @@
 2. semantic_history_view:
    - 历史记录只读语义视图
    - 历史语音只剥离标记并保留正文，不生成“用语音说”模板
-   - 历史中的 [face:xxx]、[sticker:xxx] 转换为自然表述「发了一个“xxx”表情」
+   - 助手历史（role=assistant）：[face:xxx]、[sticker:xxx]、[表情:xxx] 只剥离动作标记并保留正文，
+     绝不改写成「发了一个“xxx”表情」回灌助手正文
+   - 用户历史（role=user）：[face:xxx]、[sticker:xxx] 仍转换为自然表述「发了一个“xxx”表情」
    - 历史视图不再出现（语音）/（表情：）等括号记号，自然内容完整保留
    - 剥离 [quote:N]、[沉默]、[SILENT] 等内部机器协议
    - 不修改数据库原始数据，不向模型输出协议教学
@@ -27,6 +29,8 @@
    - 拒绝 draft_id 不匹配
 """
 
+import re
+
 import pytest
 from datetime import datetime
 from companion.kernel.contracts import (
@@ -40,6 +44,7 @@ from companion.kernel.semantic import (
     build_turn_input,
     create_delivery_plan,
     create_reply_draft,
+    format_current_user_content,
     format_incoming_messages,
     semantic_history_view,
     validate_delivery_plan,
@@ -55,18 +60,18 @@ def test_format_incoming_messages_single_and_sugar_face():
         message_id=102,
         text="吃糖",
         kind="face",
-        semantic_text="发了一个“吃糖”表情",
+        semantic_text="发了一个“吃糖”（卖萌、心情好）表情",
     )
     res2 = format_incoming_messages([msg2])
     assert "吃糖" in res2
-    assert "发了一个“吃糖”表情" in res2
+    assert "发了一个“吃糖”（卖萌、心情好）表情" in res2
     assert "[face:" not in res2
     assert "[1]" not in res2
     assert "1." not in res2
 
     # 文本 + 表情恰好两条时，合成一个自然整体，不再拆成两行
     combined = format_incoming_messages([msg1, msg2])
-    assert combined == "对方说：“睡了啊那肯定”，同时附上一个小表情“吃糖”"
+    assert combined == "对方说：“睡了啊那肯定”，同时附上一个小表情“吃糖”（卖萌、心情好）"
     assert "对方连着发来了以下内容：" not in combined
     assert "吃糖" in combined
     assert "1." not in combined
@@ -82,12 +87,12 @@ def test_format_incoming_messages_merges_text_and_face_in_both_orders():
         message_id=202,
         text="吃糖",
         kind="face",
-        semantic_text="发了一个“吃糖”表情",
+        semantic_text="发了一个“吃糖”（卖萌、心情好）表情",
     )
 
     # 1. 文本在前
     res_text_first = format_incoming_messages([text_msg, face_msg])
-    assert res_text_first == "对方说：“睡了啊那肯定”，同时附上一个小表情“吃糖”"
+    assert res_text_first == "对方说：“睡了啊那肯定”，同时附上一个小表情“吃糖”（卖萌、心情好）"
     assert "\n" not in res_text_first
     assert "对方连着发来了以下内容：" not in res_text_first
     assert "吃糖" in res_text_first
@@ -96,7 +101,7 @@ def test_format_incoming_messages_merges_text_and_face_in_both_orders():
 
     # 2. 表情在前
     res_face_first = format_incoming_messages([face_msg, text_msg])
-    assert res_face_first == "对方先附上一个小表情“吃糖”，接着说：“睡了啊那肯定”"
+    assert res_face_first == "对方先附上一个小表情“吃糖”（卖萌、心情好），接着说：“睡了啊那肯定”"
     assert "\n" not in res_face_first
     assert "对方连着发来了以下内容：" not in res_face_first
     assert "吃糖" in res_face_first
@@ -189,6 +194,92 @@ def test_build_turn_input_preserves_message_ids_and_quotes():
     assert turn_input_override.quoted_text == "今天天气真好"
 
 
+def test_current_user_content_keeps_plain_message_outside_quote_scope():
+    normal = IncomingMessage(message_id=1, text="普通一句", payload={"source_scope": 1})
+    quoted = IncomingMessage(
+        message_id=2, text="那句呢", quoted_message_id=90,
+        payload={"source_scope": 2, "quoted_text": "记得带伞", "quoted_role": "assistant"},
+    )
+    turn = build_turn_input("s", [normal, quoted])
+    assert format_current_user_content(turn) == (
+        "对方连着发来了以下内容：\n普通一句\n"
+        "他引用你之前说的“记得带伞”时说：\n那句呢"
+    )
+    assert turn.text == "对方连着发来了以下内容：\n普通一句\n那句呢"
+    assert turn.quoted_text == "记得带伞"
+    assert turn.reply_to_message_id == 2
+
+
+def test_current_user_content_distinguishes_speakers_with_identical_text():
+    messages = [
+        IncomingMessage(
+            message_id=3, text="旧话一样", quoted_message_id=91,
+            payload={"source_scope": 1, "quoted_text": "同样的话", "quoted_role": "user"},
+        ),
+        IncomingMessage(
+            message_id=4, text="旧话一样", quoted_message_id=91,
+            payload={"source_scope": 2, "quoted_text": "同样的话", "quoted_role": "assistant"},
+        ),
+    ]
+    turn = build_turn_input("s", messages)
+    current = format_current_user_content(turn)
+    assert "他引用自己之前说的“同样的话”时说：\n旧话一样" in current
+    assert "他引用你之前说的“同样的话”时说：\n旧话一样" in current
+    assert current.count("同样的话") == 2
+
+
+def test_current_user_content_quote_only_and_unknown_role():
+    quoted = IncomingMessage(
+        message_id=5, text="", quoted_message_id=92,
+        payload={"source_scope": 1, "quoted_text": "记得喝水", "quoted_role": "unknown"},
+    )
+    turn = build_turn_input("s", [quoted])
+    assert format_current_user_content(turn) == "他引用之前的“记得喝水”"
+    assert "时说" not in format_current_user_content(turn)
+
+
+def test_current_user_content_collects_text_face_image_once_without_message_id():
+    payload = {"source_scope": 1, "quoted_text": "昨天的图", "quoted_role": "user"}
+    messages = [
+        IncomingMessage(message_id=None, text="看这个", kind="text", quoted_message_id=93, payload=payload),
+        IncomingMessage(message_id=None, text="[doge]", kind="face", quoted_message_id=93, payload=payload),
+        IncomingMessage(message_id=None, text="一只橘猫", kind="image", quoted_message_id=93, payload=payload),
+    ]
+    current = format_current_user_content(build_turn_input("s", messages))
+    assert current == (
+        "他引用自己之前说的“昨天的图”；这条消息的内容是：\n"
+        "看这个\n发了一个“doge”（狗头保命）表情\n发来一张图片：一只橘猫"
+    )
+    assert current.count("他引用") == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "对方不回我怎么办",
+        "对方说：他明天不来",
+        "对方连着发来了以下内容：\n这是我粘贴的原文",
+    ],
+)
+def test_current_user_content_never_trims_user_text_that_looks_like_wrapper(body):
+    msg = IncomingMessage(
+        message_id=2, text=body, quoted_message_id=1,
+        payload={"source_scope": 1, "quoted_text": "记得带伞", "quoted_role": "assistant"},
+    )
+    current = format_current_user_content(build_turn_input("s", [msg]))
+    assert current == f"他引用你之前说的“记得带伞”时说：\n{body}"
+
+
+def test_current_user_content_legacy_prefix_is_not_added_twice():
+    raw = "（他之前说的「旧话」）\n新话"
+    legacy = IncomingMessage(
+        message_id=6, text=raw, quoted_message_id=94,
+        payload={"quoted_text": "旧话", "quoted_role": "user", "quote_prefix_in_text": True},
+    )
+    turn = build_turn_input("s", [legacy])
+    assert format_current_user_content(turn) == raw
+
+
 def test_build_turn_input_reply_target_ignores_quoted_history():
     """测试回复目标绝不会被用户引用的历史消息 ID 污染。
 
@@ -239,7 +330,7 @@ def test_semantic_history_view_removes_machine_protocols():
     """测试历史语音/表情/协议转为自然语义，不保留机器协议。"""
     # 1. 历史语音只保留正文，不保留协议或“用语音说”模板
     raw_history_voice = "[voice:]早点休息，明天见[/voice]\n(语音消息)晚安啦\n[voice: 路上小心 ]"
-    view_voice = semantic_history_view(raw_history_voice)
+    view_voice = semantic_history_view(raw_history_voice, role="assistant")
     assert "[voice:" not in view_voice
     assert "[/voice]" not in view_voice
     assert "(语音消息)" not in view_voice
@@ -253,23 +344,36 @@ def test_semantic_history_view_removes_machine_protocols():
     assert "晚安啦" in view_voice
     assert "路上小心" in view_voice
 
-    # 2. 表情与贴纸：发了一个“xxx”表情
+    # 2. 表情与贴纸按角色区分：助手只剥离动作标记，用户保留既有表情语义
     raw_history_face = "你看这个[face:点赞]还有这个[sticker:猫猫探头]"
-    view_face = semantic_history_view(raw_history_face)
+    view_face = semantic_history_view(raw_history_face, role="assistant")
     assert "[face:" not in view_face
     assert "[sticker:" not in view_face
-    assert "发了一个“点赞”表情" in view_face
-    assert "发了一个“猫猫探头”表情" in view_face
-    assert "（表情：点赞）" not in view_face
-    assert "（表情：猫猫探头）" not in view_face
-    assert "表情：" not in view_face
+    # 助手历史不得出现“发了一个……表情”：动作不回灌成助手自己的话
+    assert "发了一个" not in view_face
+    assert not re.search(r"发了一个.{0,12}表情", view_face)
+    # 原始正文保留，动作标签本身不进助手正文
+    assert "你看这个" in view_face
+    assert "还有这个" in view_face
+    assert "点赞" not in view_face
+    assert "猫猫探头" not in view_face
+
+    # 用户历史：既有表情语义保持不变
+    view_face_user = semantic_history_view(raw_history_face, role="user")
+    assert "[face:" not in view_face_user
+    assert "[sticker:" not in view_face_user
+    assert "发了一个“点赞”表情" in view_face_user
+    assert "发了一个“猫猫探头”表情" in view_face_user
+    assert "（表情：点赞）" not in view_face_user
+    assert "（表情：猫猫探头）" not in view_face_user
+    assert "表情：" not in view_face_user
     # 原始文字段保留
-    assert "点赞" in view_face
-    assert "猫猫探头" in view_face
+    assert "点赞" in view_face_user
+    assert "猫猫探头" in view_face_user
 
     # 3. 引用与沉默协议
     raw_history_protocol = "[quote:8848] 你刚才说的那个事情\n[沉默]\n[SILENT]\n我赞成"
-    view_protocol = semantic_history_view(raw_history_protocol)
+    view_protocol = semantic_history_view(raw_history_protocol, role="assistant")
     assert "[quote:" not in view_protocol
     assert "[8848]" not in view_protocol
     assert "[沉默]" not in view_protocol
@@ -288,7 +392,7 @@ def test_semantic_history_view_has_no_bracket_markers():
         "[quote:1234] 一句正文\n"
         "最后一句"
     )
-    view = semantic_history_view(raw_history)
+    view = semantic_history_view(raw_history, role="assistant")
 
     # 括号记号彻底消失
     assert "（语音）" not in view
@@ -304,23 +408,28 @@ def test_semantic_history_view_has_no_bracket_markers():
     assert "[sticker:" not in view
     assert "[quote:" not in view
 
-    # 历史语音只保留正文，表情仍沿用原有语义，不扩大本阶段范围
+    # 历史语音只保留正文；助手历史里的表情动作只剥离标记，不再文本化
     assert "用语音说" not in view
-    assert "发了一个“吃糖”表情" in view
-    assert "发了一个“猫猫探头”表情" in view
+    assert "发了一个" not in view
+    assert not re.search(r"发了一个.{0,12}表情", view)
 
     # 自然内容与顺序保留
     assert "今天好累" in view
     assert "早点睡" in view
     assert "明天再说" in view
-    assert "吃糖" in view
-    assert "猫猫探头" in view
     assert "一句正文" in view
     assert "最后一句" in view
     lines = view.splitlines()
     assert lines.index("今天好累") < lines.index("早点睡")
-    face_line_idx = next(i for i, line in enumerate(lines) if "吃糖" in line)
-    assert face_line_idx < lines.index("最后一句")
+    assert lines.index("一句正文") < lines.index("最后一句")
+
+    # 用户角色的表情语义保持不变
+    view_user = semantic_history_view(raw_history, role="user")
+    assert "发了一个“吃糖”（卖萌、心情好）表情" in view_user
+    assert "发了一个“猫猫探头”表情" in view_user
+    assert "[face:" not in view_user
+    assert "[sticker:" not in view_user
+    assert "一句正文" in view_user
 
 
 def test_create_reply_draft_idempotent_bubbles():
@@ -530,7 +639,7 @@ def test_create_reply_draft_normal_sentences_and_decimals():
 def test_semantic_history_view_strips_label_protocol():
     """测试历史记录中的 [label:N] 内部机器标签连同引用被彻底剥离，不进入模型上下文。"""
     raw_history = "[label:1] 上一次回复内容\n[quote:10086] 用户说的话\n正常聊天内容"
-    view = semantic_history_view(raw_history)
+    view = semantic_history_view(raw_history, role="assistant")
     assert "[label:" not in view
     assert "[1]" not in view
     assert "[quote:" not in view
@@ -547,7 +656,7 @@ def test_format_incoming_messages_merges_multi_text_multi_face_batch():
             message_id=402,
             text="吃糖",
             kind="face",
-            semantic_text="发了一个“吃糖”表情",
+            semantic_text="发了一个“吃糖”（卖萌、心情好）表情",
         ),
         IncomingMessage(message_id=403, text="刚开完会", kind="text"),
         IncomingMessage(
@@ -620,7 +729,7 @@ def test_format_incoming_messages_falls_back_when_body_or_label_missing():
         message_id=422,
         text="吃糖",
         kind="face",
-        semantic_text="发了一个“吃糖”表情",
+        semantic_text="发了一个“吃糖”（卖萌、心情好）表情",
     )
     res = format_incoming_messages([empty_text, face])
     assert res.startswith("对方连着发来了以下内容：")
@@ -640,7 +749,7 @@ def test_format_incoming_messages_other_kind_keeps_original_behavior():
         message_id=432,
         text="吃糖",
         kind="face",
-        semantic_text="发了一个“吃糖”表情",
+        semantic_text="发了一个“吃糖”（卖萌、心情好）表情",
     )
     voice = IncomingMessage(
         message_id=433,
@@ -670,3 +779,73 @@ def test_format_incoming_messages_pure_batches_still_listed():
     # 单条仍然直接返回自然语义
     assert format_incoming_messages([text_a]) == "在吗"
     assert format_incoming_messages([]) == ""
+
+
+def test_semantic_history_view_assistant_strips_action_markers_keeps_body():
+    """助手历史：动作标记只读剥离，自然正文完整保留，不产生“发了一个……表情”。"""
+    raw = "今天有点累[face:微笑]明天再说[sticker:猫猫探头]\n先这样"
+    view = semantic_history_view(raw, role="assistant")
+
+    # 正文保留，动作标记与动作标签都不进助手正文
+    assert view == "今天有点累明天再说\n先这样"
+    assert "发了一个" not in view
+    assert not re.search(r"发了一个.{0,12}表情", view)
+    assert "微笑" not in view
+    assert "猫猫探头" not in view
+    assert "[face:" not in view
+    assert "[sticker:" not in view
+
+    # 纯动作的助手历史只剩空正文，不产生任何动作叙述
+    assert semantic_history_view("[face:微笑]", role="assistant") == ""
+    assert semantic_history_view("[表情:卖萌]", role="assistant") == ""
+
+
+def test_semantic_history_view_user_keeps_face_semantics():
+    """用户历史：既有表情语义保持不变（对方发的是表情，不是助手动作）。"""
+    raw = "今天有点累[face:微笑]明天再说"
+    view = semantic_history_view(raw, role="user")
+
+    assert view == "今天有点累发了一个“微笑”表情明天再说"
+    assert "发了一个“微笑”表情" in view
+    assert "[face:" not in view
+
+    # 贴纸与中文表情标签同样保留既有语义
+    sticker_view = semantic_history_view("[sticker:猫猫探头]", role="user")
+    assert sticker_view == "发了一个“猫猫探头”表情"
+    assert semantic_history_view("[表情:卖萌]", role="user") == "发了一个“卖萌”表情"
+
+
+def test_semantic_history_view_user_image_records_conversion():
+    """用户历史中的三类图片记录只读语义转换：
+    1. 照片描述去掉方括号并保留自然“发来一张图片：…”语义；
+    2. 两个失败占位去掉方括号、保留原含义；
+    3. 文字+图片混合；
+    4. 普通文字与既有 user/assistant 表情语义不变。
+    """
+    # 1. 三种单独记录 (role="user")
+    v1 = semantic_history_view("[发来一张照片：一只猫]", role="user")
+    assert v1 == "发来一张图片：一只猫"
+
+    v2 = semantic_history_view("[发来一张图片，但没能看清]", role="user")
+    assert v2 == "发来一张图片，但没能看清"
+
+    v3 = semantic_history_view("[对方发来一张图片，你看不到内容]", role="user")
+    assert v3 == "对方发来一张图片，你看不到内容"
+
+    # 2. 文字 + 图片混合记录 (role="user")
+    v_mix1 = semantic_history_view("看这个 [发来一张照片：一只猫]", role="user")
+    assert v_mix1 == "看这个 发来一张图片：一只猫"
+
+    v_mix2 = semantic_history_view("看这个 [发来一张图片，但没能看清]", role="user")
+    assert v_mix2 == "看这个 发来一张图片，但没能看清"
+
+    v_mix3 = semantic_history_view("看这个 [对方发来一张图片，你看不到内容]", role="user")
+    assert v_mix3 == "看这个 对方发来一张图片，你看不到内容"
+
+    # 3. 普通文字不变
+    assert semantic_history_view("今天天气真好", role="user") == "今天天气真好"
+    assert semantic_history_view("今天天气真好", role="assistant") == "今天天气真好"
+
+    # 4. 既有 user / assistant 表情语义不变
+    assert semantic_history_view("好呀[face:吃糖]", role="user") == "好呀发了一个“吃糖”（卖萌、心情好）表情"
+    assert semantic_history_view("好呀[face:吃糖]", role="assistant") == "好呀"

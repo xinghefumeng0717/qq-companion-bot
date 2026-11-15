@@ -18,7 +18,8 @@ class IncomingMessage:
     kind: str = "text"
     semantic_text: str = ""
     quoted_message_id: Optional[int] = None
-    # 原始载荷（如 face_id、图片路径）；不直接喂给主模型。
+    # 原始载荷（如 face_id、图片路径、quoted_role、source_scope）；不直接喂给主模型。
+    # source_scope 只用于收拢同一原消息的 text/face/image 段，不是对外消息 ID。
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -35,8 +36,13 @@ class StandardizedTurnInput:
     # 机器人回复应引用的当前用户消息 ID（投递层引用目标）。
     # 与"用户引用的历史消息"无关：后者由 IncomingMessage.quoted_message_id 与 quoted_text 承担。
     reply_to_message_id: Optional[int] = None
-    # 用户引用的原消息语义（若有），引用理解在生成前完成。
+    # 最新非空引用语义，保留给现有 lorebook 焦点；不是整批引用展示视图。
+    # 主模型当前输入由 messages 中的逐条事实整理，不把本字段前置到整批。
     quoted_text: str = ""
+    # 输入来源：普通用户轮次保持 user；主动消息使用 proactive，不得伪装成用户发言。
+    source: str = "user"
+    # 生成前已经定下的本轮投递事实（例如"这轮会有一条用语音发出"）；只是事实，不是协议。
+    delivery_fact: str = ""
 
 
 @dataclass(frozen=True)
@@ -137,6 +143,8 @@ class SendReceipt:
     """发送器对一条真实消息的确认；未确认必须抛错，不能伪造成功。"""
 
     message_id: Optional[int] = None
+    # 实际展示的引用；语音 record-only、无引用或去引用成功均为 None。
+    actual_quote_message_id: Optional[int] = None
 
 
 @dataclass(frozen=True)

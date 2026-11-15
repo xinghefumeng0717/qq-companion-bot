@@ -23,7 +23,9 @@ class GuardSender:
         self.calls.append(("text", text, quote_message_id))
         if self.error:
             raise self.error
-        return SendReceipt(message_id=100)
+        return SendReceipt(
+            message_id=100, actual_quote_message_id=quote_message_id
+        )
 
     async def send_voice(self, text, quote_message_id=None, **options):
         self.calls.append(("voice", text, quote_message_id))

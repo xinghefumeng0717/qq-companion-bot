@@ -54,6 +54,7 @@ from companion.reset import reset_database
 from helpers import (
     FIXTURE_CALENDAR_ANCHORS,
     FIXTURE_LIFE_ARC_SEED_POOL,
+    attach_proactive_test_handler,
     close_db,
     make_db,
     make_engine_stack,
@@ -794,14 +795,13 @@ class TestEventChannelInScheduler(ArcsTestBase):
             mood=stack.mood,
             memory=stack.memory,
             stickers=stack.stickers,
-            replier=stack.replier,
             gateway=self.gateway,
             db=self.db,
-            send_msg_fn=self._send,
             assembler=stack.assembler,
             arcs=self.arcs,
         )
         stack.assembler.arcs = self.arcs
+        attach_proactive_test_handler(self.scheduler, send_msg_fn=self._send, replier=stack.replier)
         self.decision_calls = 0
 
     async def _send(self, chunk):

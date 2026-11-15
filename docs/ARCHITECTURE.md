@@ -4,6 +4,8 @@
 
 文中的数字都取自代码（文件位置写在每节末尾），改代码时请同步这里。图是用 Mermaid 画好再导出的图片，源码折叠在每张图下面；改了源码后运行 `node scripts/util/render_mermaid.js docs/ARCHITECTURE.md docs/images architecture` 重新生成图片。
 
+> **说明（2026-11）**：主对话已经收敛为一条主链（见 README 第 2～5 节），旧的 `turn_handler.py` 流水线已移除。本文里关于消息编号、`[quote:N]`、回复清理与回复时机的描述是旧流水线时期的写法，其余关于记忆、情绪、关系、主动消息的机制仍然适用。
+
 ---
 
 ## 目录
@@ -97,7 +99,7 @@ sequenceDiagram
 3. **回复先清理再发**。模型的原始输出会经过几道处理：剥掉旧格式的残留标记、按需选出一句发语音、按意思拆成最多 5 条短消息、换算表情和表情包。
 4. **结算放到事后**。好感、情绪、记事这些"想一想"的工作交给观察者异步做，不拖慢她回你。
 
-> 代码：`companion/aggregator.py`、`companion/turn_handler.py`（`handle_turn` 里按 1~8 编号的步骤）、`companion/observer.py`
+> 代码：`companion/aggregator.py`、`companion/kernel/production.py`、`companion/observer.py`
 
 ---
 

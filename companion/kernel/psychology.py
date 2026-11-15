@@ -275,7 +275,7 @@ class PsychologicalSnapshotBuilder:
 
         # 情绪/心理体验
         mood_text = get_mood_description(v, a)
-        trust_text = get_trust_description(t)
+        trust_text = get_trust_description(t, other="对方")
         frust_text = get_frustration_description(frustration)
         neglect_text = get_neglect_description(hours_since_chat, composite_aff)
 

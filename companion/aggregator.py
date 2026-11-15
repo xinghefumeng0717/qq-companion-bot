@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,38 @@ TYPING_ABSOLUTE_LIMIT = 30.0
 
 # 批次里一条消息的形状（用 TypedDict 只是给读代码的人看，这里保持 dict 以便序列化）
 BatchItem = Dict[str, Any]
+
+
+class StructuredText(str):
+    """带**结构化段**与附加元数据的文本（str 子类）。
+
+    存在的理由：
+    1. 表情的**类型**（QQ 小黄脸 / 商城表情）来自 OneBot 段本身；
+    2. 引用回复的**被引事实**（quoted_message_id, quoted_text, quoted_role）来自 OneBot 协议回包。
+    元数据随文本一起往下游走，既保证旧链路 str 兼容与 full_text 不变，
+    又保证新链路能拿到结构化事实。
+
+    **兼容策略（不靠吞 TypeError 区分）**：
+    - 现有三参数回调收到的仍然是字符串（`isinstance(x, str)` 为真），
+      旧链路读到的文本逐字节不变，回调签名一个字没动；
+    - 只有需要结构化事实的新链路才读 `.parts`、`.quoted_message_id`、`.quoted_text`；
+    - 没有结构化段与引用时根本不构造这个类，用普通 str，行为与改动前完全一致。
+    """
+
+    def __new__(
+        cls,
+        text: str,
+        parts: Sequence[Dict[str, Any]] = (),
+        quoted_message_id: Any = None,
+        quoted_text: Optional[str] = None,
+        quoted_role: Optional[str] = None,
+    ) -> "StructuredText":
+        obj = super().__new__(cls, text)
+        obj.parts: Tuple[Dict[str, Any], ...] = tuple(dict(part) for part in parts)
+        obj.quoted_message_id: Any = quoted_message_id
+        obj.quoted_text: Optional[str] = quoted_text
+        obj.quoted_role: Optional[str] = quoted_role
+        return obj
 
 
 class MessageAggregator:
@@ -96,6 +128,9 @@ class MessageAggregator:
 
         FIXES21：多带一个 message_id（入站事件里本来就有），与文本一起进批次。
         纯空消息（既没文字也没图、只有 message_id）**不进批次**——它没有可引用的内容。
+
+        表情的**类型**随文本一起进批次：文本若是 StructuredText（onebot 产的），
+        批次项额外带 `parts`（段级事实）。没有结构化段时批次项形状与改动前逐字不变。
         """
         loop = asyncio.get_running_loop()
         now = loop.time()
@@ -106,12 +141,25 @@ class MessageAggregator:
             if image_path:
                 # 一轮内多图时保留最后一张（更可能是机主当下要问的那张）
                 self._image_buffer = image_path
-            self._batch.append({
+            item = {
                 "index": len(self._batch) + 1,
-                "text": text or "",
+                "text": str(text) if text else "",
                 "message_id": message_id,
                 "has_image": bool(image_path),
-            })
+            }
+            parts = getattr(text, "parts", None)
+            if parts is not None:
+                item["parts"] = [dict(part) for part in parts]
+            quoted_mid = getattr(text, "quoted_message_id", None)
+            if quoted_mid is not None:
+                item["quoted_message_id"] = quoted_mid
+            quoted_t = getattr(text, "quoted_text", None)
+            if quoted_t is not None:
+                item["quoted_text"] = quoted_t
+            quoted_role = getattr(text, "quoted_role", None)
+            if quoted_role is not None:
+                item["quoted_role"] = quoted_role
+            self._batch.append(item)
             if image_path:
                 self._image_index = self._batch[-1]["index"]
 
