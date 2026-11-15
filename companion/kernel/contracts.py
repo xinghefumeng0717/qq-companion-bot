@@ -41,6 +41,8 @@ class StandardizedTurnInput:
     quoted_text: str = ""
     # 输入来源：普通用户轮次保持 user；主动消息使用 proactive，不得伪装成用户发言。
     source: str = "user"
+    # 这一轮之前，她主动找过他而他没回的次数；是"之前发生了什么"的事实，供心理快照使用。
+    unanswered_proactive: int = 0
     # 生成前已经定下的本轮投递事实（例如"这轮会有一条用语音发出"）；只是事实，不是协议。
     delivery_fact: str = ""
 

@@ -132,6 +132,8 @@ class DialogueKernel:
             # 主动事件可供本轮参考，但不是用户刚发来的消息。
             user_message=turn_input.text if turn_input.source == "user" else "",
             now=turn_input.received_at,
+            history_before_id=history_before_id,
+            unanswered_proactive=int(getattr(turn_input, "unanswered_proactive", 0) or 0),
         )
         self.tracer.record(
             "psychological_snapshot", snapshot, trace_id=event_trace_id,

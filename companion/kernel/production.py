@@ -417,6 +417,15 @@ class KernelTurnHandler:
         """真实动作记录是新内核的基础历史，不受旧实验开关控制。"""
         return getattr(self._runtime, "runtime_events", None)
 
+    async def _unanswered_proactive(self) -> int:
+        getter = getattr(self.proactive, "get_unanswered_count", None)
+        if not callable(getter):
+            return 0
+        try:
+            return int(await getter() or 0)
+        except Exception:
+            return 0
+
     async def _wait_first_reply(self) -> bool:
         """她拿起手机的第一条先晾一会儿；取不到时机配置或出错就不等。"""
         wait = getattr(self._runtime, "wait_first_reply", None)
@@ -569,6 +578,9 @@ class KernelTurnHandler:
         if not (material or "").strip():
             return False
         turn_input = build_proactive_turn_input(material, received_at=received_at)
+        turn_input = dataclasses.replace(
+            turn_input, unanswered_proactive=await self._unanswered_proactive()
+        )
         try:
             result = await self.kernel.handle_turn(turn_input)
         except Exception as exc:
@@ -704,6 +716,8 @@ class KernelTurnHandler:
         if record_suffix:
             record_user_text = f"{user_text} {record_suffix}".strip() if user_text else record_suffix
 
+        # 清零之前先记下：她找过他几次他没回，是这一轮的背景事实。
+        unanswered = await self._unanswered_proactive()
         await self.proactive.reset_unanswered_count()
         # 与旧流水线同序：到点的见面先补纪要，再准备本轮对话。
         meetups = getattr(getattr(self._runtime, "assembler", None), "meetups", None)
@@ -756,8 +770,10 @@ class KernelTurnHandler:
 
         logger.info("[Kernel] 轮次进入新内核 (has_image=%s)", has_image_turn)
         turn_input = _turn_input(user_text, batch, image_desc=image_desc, image_path=image_path)
-        if delivery_fact:
-            turn_input = dataclasses.replace(turn_input, delivery_fact=delivery_fact)
+        if delivery_fact or unanswered:
+            turn_input = dataclasses.replace(
+                turn_input, delivery_fact=delivery_fact, unanswered_proactive=unanswered
+            )
         try:
             result = await self.kernel.handle_turn(turn_input, history_before_id=user_turn_id)
         except Exception as exc:

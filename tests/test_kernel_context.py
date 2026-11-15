@@ -150,7 +150,8 @@ def test_build_system_prompt_structure_and_no_protocol_leak():
     # 必须保留当前关系阶段与心理提示
     assert "初识期" in sys_prompt
     assert "礼貌客气、稍带距离感" in sys_prompt
-    assert "此刻你正专注地与他交流" in sys_prompt
+    # 心理提示不在系统提示词里：它紧挨着他这一轮的话出现
+    assert "此刻你正专注地与他交流" not in sys_prompt
 
     # 严格检验动作协议与机器字典不泄漏
     for forbidden in ["[voice", "[face", "[sticker", "[quote", "[沉默", "表情包", "小黄脸"]:

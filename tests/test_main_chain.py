@@ -159,6 +159,11 @@ class Chain:
         async def bump():
             self.unanswered += 1
 
+        async def unanswered_getter():
+            return self.unanswered
+
+        self.unanswered_getter = unanswered_getter
+
         async def voice_gate_ok():
             return False
 
@@ -200,6 +205,20 @@ class Chain:
 
     def last_prompt(self):
         return self.gateway.calls[-1]
+
+    def delivery_notes(self):
+        """上一份提示词里跟在历史轮次后面的投递记录。"""
+        return [
+            m["content"] for m in self.last_prompt()
+            if m["role"] == "system" and m["content"].startswith("（投递记录")
+        ]
+
+    def state_note(self):
+        """上一份提示词里紧挨着他这句话的"她此刻的状态"。"""
+        prompt = self.last_prompt()
+        note = prompt[-2]
+        assert note["role"] == "system" and note["content"].startswith("【你此刻的状态】")
+        return note["content"]
 
 
 @pytest.fixture
@@ -284,7 +303,7 @@ async def test_history_window_is_ten_exchanges_and_starts_with_him(make_chain):
     chain = await make_chain([f"回{i}" for i in range(13)])
     for i in range(13):
         await chain.say(f"问{i}")
-    history = chain.last_prompt()[1:-1]
+    history = chain.last_prompt()[1:-2]   # 去掉开头的系统提示词、末尾的状态说明和他这句话
     assert len(history) == 20
     assert history[0] == {"role": "user", "content": "问2"}
     assert history[-1] == {"role": "assistant", "content": "回11"}
@@ -322,7 +341,7 @@ async def test_voice_request_is_told_to_her_before_she_writes_and_marked_in_hist
     await chain.say("听到了")
     prompt = chain.last_prompt()
     assert VOICE_FACT_WILL_SEND not in prompt[0]["content"]
-    notes = [m["content"] for m in prompt if m["role"] == "system"][1:]
+    notes = chain.delivery_notes()
     assert len(notes) == 1 and "“就这一条啊”是用语音发出的" in notes[0]
     assert prompt[prompt.index({"role": "system", "content": notes[0]}) - 1]["role"] == "assistant"
 
@@ -333,7 +352,7 @@ async def test_failed_voice_falls_back_to_same_text_and_next_turn_reads_it_besid
     assert chain.sender.sent == [("text", "行吧就一条"), ("text", "开免提听")]
 
     await chain.say("没收到诶")
-    notes = [m["content"] for m in chain.last_prompt() if m["role"] == "system"][1:]
+    notes = chain.delivery_notes()
     assert len(notes) == 1 and "没有发出去" in notes[0] and "没有收到语音" in notes[0]
 
 
@@ -480,7 +499,7 @@ async def test_content_voice_picks_a_whole_bubble_without_telling_her(make_chain
     assert "【本轮投递】" not in chain.last_prompt()[0]["content"]
     assert chain.sender.sent == [("voice", "晚安，早点睡"), ("text", "明天再说")]
     await chain.say("到了")
-    notes = [m["content"] for m in chain.last_prompt() if m["role"] == "system"][1:]
+    notes = chain.delivery_notes()
     assert notes and "“晚安，早点睡”是用语音发出的" in notes[0]
 
 
@@ -492,7 +511,7 @@ async def test_content_voice_failure_is_plain_text_with_no_note_and_no_retry(mak
     assert chain.sender.sent == [("text", "晚安，早点睡")]
     await chain.say("还在吗")
     prompt = chain.last_prompt()
-    assert [m for m in prompt if m["role"] == "system"][1:] == []
+    assert chain.delivery_notes() == []
     assert chain.sender.sent[-1] == ("text", "在呢，怎么了")
 
 
@@ -510,7 +529,7 @@ async def test_system_picked_sticker_follows_the_last_bubble_and_is_read_back(ma
     assert [channel for channel, _ in chain.sender.sent] == ["text", "text", "sticker"]
     assert (await chain.turns())[1] == ("assistant", "第一句\n第二句")   # 表情不进正文
     await chain.say("哈哈")
-    notes = [m["content"] for m in chain.last_prompt() if m["role"] == "system"][1:]
+    notes = chain.delivery_notes()
     assert notes and "还发了一个表情“开心”" in notes[0]
 
 
@@ -528,3 +547,30 @@ async def test_sticker_send_failure_keeps_the_words_she_said(make_chain):
     assert chain.sender.sent == [("text", "就这句")]
     assert await chain.turns() == [("user", "在吗"), ("assistant", "就这句")]
     assert len(chain.observed) == 1
+
+
+# ---------- 她此刻的状态：紧挨着他这句话，先说发生了什么 ----------
+
+async def test_state_note_sits_right_before_his_words_and_not_in_the_system_prompt(make_chain):
+    chain = await make_chain(["在呢"])
+    await chain.say("在吗")
+    assert "内心感受" in chain.state_note()
+    assert "【当前内心状态】" not in chain.last_prompt()[0]["content"]
+    assert chain.last_prompt()[-1] == {"role": "user", "content": "在吗"}
+
+
+async def test_long_gap_is_told_as_what_happened_even_though_his_message_is_stored_first(make_chain):
+    chain = await make_chain(["去吧", "哟，还知道回来"])
+    await chain.say("先去忙了")
+    await chain.db.execute("UPDATE turns SET created_at = '2020-01-01 08:00'")
+    await chain.say("我回来了")
+    assert "没找你了" in chain.state_note()
+    assert "距上次聊天已过" in chain.last_prompt()[0]["content"]
+
+
+async def test_unanswered_proactive_pings_are_part_of_what_happened(make_chain):
+    chain = await make_chain(["醒了没", "才回啊"])
+    await chain.handler.handle_proactive("想问他醒了没")
+    chain.handler.proactive.get_unanswered_count = chain.unanswered_getter
+    await chain.say("刚醒")
+    assert "你之前主动找过他 1 次，他到现在才回" in chain.state_note()

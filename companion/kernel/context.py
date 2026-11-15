@@ -460,10 +460,8 @@ class ContextBuilder:
                 stage_info += "\n阶段语气示范：\n" + "\n".join(f"  - {e}" for e in filtered_stage_ex[:3])
             sections.append(f"【当前关系阶段】\n{stage_info}")
 
-        # 7. 心理状态提示（PsychologicalSnapshot 的精简 prompt_hint）
-        prompt_hint = getattr(snapshot, "prompt_hint", "")
-        if prompt_hint and isinstance(prompt_hint, str) and prompt_hint.strip():
-            sections.append(f"【当前内心状态】\n{prompt_hint.strip()}")
+        # 7. 心理状态不放在这里：它紧挨着他这一轮的话出现（见 build_messages）。
+        #    埋在几千字中间的一句状态，模型基本读不进去；放在最后她才真的会带着这个状态说话。
 
         # 8. 本轮时间事实块（客观事实，放在心理提示附近；绝不写进用户正文）
         sections.append(f"【本轮时间】\n{self._build_time_block(persona, snapshot, now_dt)}")
@@ -556,6 +554,11 @@ class ContextBuilder:
                     note = str(item.get("delivery_note") or "").strip()
                     if note:
                         messages.append({"role": "system", "content": note})
+
+        # 她此刻的状态紧挨着他这一轮的话：先说发生了什么，再说感受，由她自己带着说话。
+        prompt_hint = getattr(snapshot, "prompt_hint", "")
+        if prompt_hint and isinstance(prompt_hint, str) and prompt_hint.strip():
+            messages.append({"role": "system", "content": f"【你此刻的状态】\n{prompt_hint.strip()}"})
 
         # 当前轮只读输入层整理好的自然语义；不把最新引用套到整批。
         current_content = format_current_user_content(turn_input)
