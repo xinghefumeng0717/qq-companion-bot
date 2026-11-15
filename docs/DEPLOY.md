@@ -226,7 +226,7 @@ PY
 
 - 输出「无」→ 直接进第 7 步；
 - 输出里有标签 → 把它们从 `companion/prompts.py` 的 `PROMPT_FACE_LIST` 里剔除，
-  改完**必须**重跑一次 `./venv/bin/python -m unittest discover -s tests`（版本闸有单测守着），
+  改完**必须**重跑一次 `./venv/bin/python -m pytest -q tests`（版本闸有单测守着），
   再重新 scp 上传那两个文件。
 
 ## 第 7 步：扫码登录小号 + 配置 OneBot 接口（本地浏览器操作）

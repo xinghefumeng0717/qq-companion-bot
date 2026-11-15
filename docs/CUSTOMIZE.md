@@ -39,7 +39,7 @@ cp -r characters/example characters/my_character
 - **`initial_dims`**：开局六维好感度（决定开局在哪个阶段）；
 - **`long_holiday_activity` / `calendar_anchors` / `life_arc_seed_pool`**（可选）：长假文案、日历锚点、生活主线取材范围。不填分别是"通用默认 / 无锚点 / 不做生活主线"；想让"她的生活有连续性"，至少填 `life_arc_seed_pool`，写法见 README 第 5.1.1 节与示例卡。
 
-**改卡后必须做的事**：跑 `python -m companion.chat` 进沙箱试聊（不碰 QQ、不碰生产数据），觉得不对就改卡再来。别直接上线试错。
+**改卡后必须做的事**：跑 `python -m companion.chat` 进沙箱试聊（不碰 QQ、不碰生产数据），觉得不对就改卡再来。别直接上线试错。注意：这个沙箱用的还是早期的提示词拼法，和线上主对话不完全一样，适合看个大概；拿不准的地方，以真实聊天时 `data/turn_traces/` 里记录的提示词和回复为准。
 
 ## 第 3 步：表情包（可选）
 
@@ -57,7 +57,7 @@ cp -r characters/example characters/my_character
 
 ## 第 5 步：上线前自检清单
 
-- [ ] `python -m unittest discover -s tests` 全绿（ outsiders 的 clone 会 skip 27 条依赖私有画像的用例，属正常）；
+- [ ] `python -m pytest -q tests` 全绿（少量依赖私有文件的用例会自动跳过，属正常）；
 - [ ] 沙箱里聊过至少 20 轮，告别、沉默、表情包场景都试过；
 - [ ] `config.toml` 不在 git 跟踪里（`.gitignore` 已拦，别手动 `git add -f`）；
 - [ ] 服务器部署照 README 第 3、7 节。
